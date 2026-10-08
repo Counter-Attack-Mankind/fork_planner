@@ -182,10 +182,11 @@ public:
                                  &MultiVehiclePatrolNode::tick, this);
 
         ROS_INFO("[multi_patrol] started RViz timestamp simulation: vehicles=%d "
-                 "seed=%d speed=%.2f max=%.2f dwell=%.2f horizon=%.2f step=%.2f",
+                 "seed=%d speed=%.2f max=%.2f dwell=%.2f horizon=%.2f step=%.2f "
+                 "simulation_speed=%.3fx",
                  cfg_.vehicle_count, cfg_.random_seed, cfg_.nominal_speed,
                  cfg_.max_speed, cfg_.dwell_time, cfg_.prediction_horizon,
-                 cfg_.prediction_step);
+                 cfg_.prediction_step, pp_.simulation_speed);
     }
 
 private:
@@ -2303,15 +2304,63 @@ private:
         active_a1_exit_intrusions_.swap(current);
     }
 
-    void tick(const ros::TimerEvent&) {
-        const double dt = 1.0 / pp_.update_rate;        //控制周期与仿真系统推移周期一致
-        ++tick_count_;          //记录系统运行了多少隔周期
-        sim_time_ += dt;        //仿真时间增加一个固定时间步长
+    void stepSimulation(double dt) {
+        ++tick_count_;
+        sim_time_ += dt;
         setCoordLogContext("REAL", sim_plan_id_, coord_log_frame_id_, -1);
 
+        updateDwellAndTasks(dt);
+        if (rb_one_shot_traj_) {
+            rule_engine_->decide(agents_, dt);
+            marker_pub_->setRollingDecision(
+                rule_engine_->lastRollingDynamicDecision());
+        } else {
+            if (simulationPlanNeedsRefresh()) {
+                publishHorizon();
+                force_horizon_refresh_ = false;
+            }
+            if (!executeSimulationPlanSample()) {
+                // A task/path event may invalidate a just-built frame. Rebuild
+                // once immediately; only fall back to a current decision if
+                // planning itself produced no executable frame.
+                publishHorizon();
+                force_horizon_refresh_ = false;
+                if (!executeSimulationPlanSample()) {
+                    ROS_ERROR_THROTTLE(
+                        1.0,
+                        "[sim_plan] no executable frame; using one safe "
+                        "current-step decision");
+                    if (diagnostics_) {
+                        diagnostics_->event(
+                            "[ROLLING_PLAN_FAILURE] mode=SIM fallback=current_step_decision");
+                    }
+                    rule_engine_->decide(agents_, dt);
+                    marker_pub_->setRollingDecision(
+                        rule_engine_->lastRollingDynamicDecision());
+                }
+            }
+        }
+        advanceVehicles(dt);
+        diagnoseA1ExitIntrusions();
+        recordDebugTimelineTick();
+        updateSnapshotWedgeTrigger();
+
+        if (rb_one_shot_traj_ && !one_shot_published_) {
+            one_shot_published_ = publishFullTrajectories();
+        }
+
+        logAgentStatus();
+        logStuckDiagnostics();
+    }
+
+    void tick(const ros::TimerEvent&) {
+        const double dt = 1.0 / pp_.update_rate;
 
         // 1. 实车模式---未摆放好姿态模式
         if (cfg_.real_mode) {
+            ++tick_count_;
+            sim_time_ += dt;
+            setCoordLogContext("REAL", sim_plan_id_, coord_log_frame_id_, -1);
             if (!rb_started_) {
                 marker_pub_->publish(
                     agents_, visited_slots_, rule_engine_->conflicts(),
@@ -2398,57 +2447,22 @@ private:
             return;
         }
 
-        //=======仿真模式=======
-        // dt = 1.0 / pp_.update_rate; dt= 1 / 10 = 0.1s。
-
-        // 从当前仿真状态推进一拍。滚动模式下，普通协调只在构建10秒计划时
-        // 运行；随后20拍(2秒)逐拍执行冻结计划。0.1秒层只保留任务事件、
-        // 运动学推进和 advanceVehicles 内不可关闭的物理碰撞兜底。
-        updateDwellAndTasks(dt);
-        if (rb_one_shot_traj_) {
-            rule_engine_->decide(agents_, dt);
-            marker_pub_->setRollingDecision(
-                rule_engine_->lastRollingDynamicDecision());
-        } else {
-            if (simulationPlanNeedsRefresh()) {
-                publishHorizon();
-                force_horizon_refresh_ = false;
-            }
-            if (!executeSimulationPlanSample()) {
-                // A task/path event may invalidate a just-built frame. Rebuild
-                // once immediately; only fall back to a current decision if
-                // planning itself produced no executable frame.
-                publishHorizon();
-                force_horizon_refresh_ = false;
-                if (!executeSimulationPlanSample()) {
-                    ROS_ERROR_THROTTLE(
-                        1.0,
-                        "[sim_plan] no executable frame; using one safe "
-                        "current-step decision");
-                    if (diagnostics_) {
-                        diagnostics_->event(
-                            "[ROLLING_PLAN_FAILURE] mode=SIM fallback=current_step_decision");
-                    }
-                    rule_engine_->decide(agents_, dt);
-                    marker_pub_->setRollingDecision(
-                        rule_engine_->lastRollingDynamicDecision());
-                }
-            }
-        }
-        advanceVehicles(dt);
-        diagnoseA1ExitIntrusions();
-        recordDebugTimelineTick();
-
-
-        //4. 仿真模式---一次性触发完成
-        updateSnapshotWedgeTrigger();
-
-        if (rb_one_shot_traj_) {    
-            if (!one_shot_published_) one_shot_published_ = publishFullTrajectories();
+        const ros::WallTime callback_start = ros::WallTime::now();
+        if (!speed_stats_initialized_) {
+            speed_stats_initialized_ = true;
+            speed_stats_start_wall_ = callback_start;
+            speed_stats_start_sim_time_ = sim_time_;
         }
 
-        logAgentStatus();
-        logStuckDiagnostics();
+        simulation_step_credit_ += pp_.simulation_speed;
+        const int simulation_steps = static_cast<int>(std::floor(simulation_step_credit_ + 1e-12));
+        simulation_step_credit_ -= simulation_steps;
+        for (int step = 0; step < simulation_steps; ++step) {
+            stepSimulation(dt);
+        }
+
+        // 当前状态 Marker 每个现实 Timer 回调最多发布一次；预测轨迹仍在
+        // publishHorizon() 中随滚动计划刷新发布。
         marker_pub_->publish(
             agents_, visited_slots_, rule_engine_->conflicts(),
             marker_pub_->hasSubscribers()
@@ -2458,6 +2472,19 @@ private:
             rule_engine_->futureA1Commitment(),
             rule_engine_->a1DepartureClusters(),
             rule_engine_->recoveryDirective());
+
+        const ros::WallTime callback_end = ros::WallTime::now();
+        max_sim_callback_time_ = std::max(max_sim_callback_time_, (callback_end - callback_start).toSec());
+        const double stats_wall_time = (callback_end - speed_stats_start_wall_).toSec();
+        if (stats_wall_time >= 5.0) {
+            const double actual_speed = (sim_time_ - speed_stats_start_sim_time_) / stats_wall_time;
+            ROS_INFO("[simulation_speed] requested=%.3fx actual=%.3fx "
+                     "max_callback=%.3fs",
+                     pp_.simulation_speed, actual_speed, max_sim_callback_time_);
+            speed_stats_start_wall_ = callback_end;
+            speed_stats_start_sim_time_ = sim_time_;
+            max_sim_callback_time_ = 0.0;
+        }
     }
     
     //===========================================================================
@@ -3085,6 +3112,11 @@ private:
     unsigned long long tick_count_ = 0;
     std::set<std::pair<int, int>> active_a1_exit_intrusions_;
     double sim_time_ = 0.0;
+    double simulation_step_credit_ = 0.0;
+    bool speed_stats_initialized_ = false;
+    ros::WallTime speed_stats_start_wall_;
+    double speed_stats_start_sim_time_ = 0.0;
+    double max_sim_callback_time_ = 0.0;
 
     // 无头批处理(快速回归)统计。确定性仿真:同种子同代码必得同结果,故脱离 RViz、
     // 不按实时狂跑 N 拍即可在几秒内覆盖数小时仿真,直接数碰撞。

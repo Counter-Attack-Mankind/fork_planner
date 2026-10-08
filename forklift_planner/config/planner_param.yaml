@@ -19,6 +19,7 @@ forklift_planner:
 
   # 主控制/仿真更新频率。10Hz 表示 dt=0.1s
   update_rate:  10.0   # Hz
+  simulation_speed: 1.0  # 普通多车仿真倍率；实车与 Batch 忽略
   path_color_r: 0.2
   path_color_g: 0.8
   path_color_b: 1.0
