@@ -104,6 +104,8 @@ public:
     struct Snapshot {
         std::map<std::pair<int, int>, DepartureClusterCommitment>
             departure_clusters;
+        std::map<int, int> bypass_count;
+        std::map<int, int> bypass_request_path_gen;
     };
 
     struct PairAuthority {
@@ -192,10 +194,14 @@ public:
         return future_a1_commitment_;
     }
     const ServiceMetrics& serviceMetrics() const { return service_metrics_; }
+    int bypassCount(int vehicle_id) const {
+        const auto it = bypass_count_.find(vehicle_id);
+        return it == bypass_count_.end() ? 0 : it->second;
+    }
 
     Snapshot snapshot() const;
     void restore(const Snapshot& snapshot,
-                 bool clear_intrusion_corrections = true);
+                 bool restore_persistent_state = true);
 
     PairAuthority authorityForPair(const VehicleAgent& a,
                                    const VehicleAgent& b) const;
@@ -255,7 +261,8 @@ private:
         const ArrivalKinematics& kinematics) const;
     FutureA1Commitment selectFutureA1Owner(
         const std::vector<VehicleAgent>& vehicles,
-        const ArrivalSummary& summary) const;
+        const ArrivalSummary& summary,
+        std::string* selection_reason = nullptr) const;
     FutureA1Commitment retainLockedFutureA1Owner(
         const std::vector<VehicleAgent>& vehicles,
         const ArrivalSummary& summary, std::string& retain_reason) const;
@@ -265,6 +272,11 @@ private:
                                const ArrivalSummary& summary,
                                const std::string& change_reason,
                                double now, double horizon);
+    void refreshBypassRequests(const std::vector<VehicleAgent>& vehicles);
+    void updateBypassCountsOnCreate(const ArrivalSummary& summary,
+                                    int owner_id);
+    void logA1Scheduling(const ArrivalSummary& summary, int owner_id,
+                         const std::string& selection_reason) const;
 
     FutureA1ZoneSelection selectFutureA1ProtectedZones(
         const std::vector<ConflictZone>& canonical_zones,
@@ -298,6 +310,8 @@ private:
     int future_a1_admission_log_owner_path_gen_ = -1;
     std::set<std::tuple<int, int, int, int>> a1_decision_logs_;
     ServiceMetrics service_metrics_;
+    std::map<int, int> bypass_count_;
+    std::map<int, int> bypass_request_path_gen_;
     std::function<void(const std::string&)> coord_log_sink_;
     std::function<bool(int, PathTrack&)> pickup_leg_track_;
     std::string debug_log_source_ = "REAL";

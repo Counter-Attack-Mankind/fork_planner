@@ -156,6 +156,18 @@ if(CATKIN_ENABLE_TESTING)
   )
   add_test(NAME future_a1_policy_test COMMAND future_a1_policy_test)
 
+  add_executable(a1_scheduling_test
+    test/a1_scheduling_test.cpp
+    src/multi_vehicle/a1/a1_coordinator.cpp
+    src/multi_vehicle/footprint.cpp
+    src/multi_vehicle/path_track.cpp
+  )
+  add_dependencies(a1_scheduling_test ${catkin_EXPORTED_TARGETS})
+  target_link_libraries(a1_scheduling_test ${catkin_LIBRARIES})
+  add_test(NAME a1_scheduling_test
+           COMMAND ${CATKIN_DEVEL_PREFIX}/env.sh
+                   $<TARGET_FILE:a1_scheduling_test>)
+
   add_executable(spatiotemporal_interaction_test
     test/spatiotemporal_interaction_test.cpp
     src/multi_vehicle/bridge_ttc_correction.cpp

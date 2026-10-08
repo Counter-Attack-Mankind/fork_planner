@@ -15,6 +15,7 @@ namespace multi_vehicle {
 namespace {
 
 constexpr double kIntrusionRetreatClearance = 0.02;
+constexpr int kA1BypassThreshold = 3;
 const char* missionPhaseName(MissionPhase phase) {
     switch (phase) {
         case MissionPhase::DIRECT_TO_B: return "DIRECT_TO_B";
@@ -300,12 +301,24 @@ A1Coordinator::ArrivalSummary A1Coordinator::predictA1Arrivals(
 
 A1Coordinator::FutureA1Commitment A1Coordinator::selectFutureA1Owner(
     const std::vector<VehicleAgent>& vehicles,
-    const ArrivalSummary& summary) const {
+    const ArrivalSummary& summary, std::string* selection_reason) const {
     const double tie_window = std::max(0.02, cfg_.prediction_step);
     std::vector<FutureA1RankedCandidate> ranked;
     ranked.reserve(summary.candidates.size());
+    int max_bypass_count = 0;
     for (const auto& item : summary.candidates) {
+        max_bypass_count = std::max(max_bypass_count, bypassCount(item.second.vehicle_id));
+    }
+    const bool starvation_priority = max_bypass_count >= kA1BypassThreshold;
+    for (const auto& item : summary.candidates) {
+        if (starvation_priority &&
+            bypassCount(item.second.vehicle_id) != max_bypass_count) {
+            continue;
+        }
         ranked.push_back({item.second.vehicle_id, item.second.arrival_time});
+    }
+    if (selection_reason != nullptr) {
+        *selection_reason = starvation_priority ? "bypass_count" : "eta";
     }
     const int best_id = selectFutureA1Candidate(
         ranked, tie_window, [&](int lhs, int rhs) {
@@ -326,6 +339,73 @@ A1Coordinator::FutureA1Commitment A1Coordinator::selectFutureA1Owner(
     commitment.predicted_a1_arrival_time = best->second.arrival_time;
     commitment.predicted_to_b_time = best->second.to_b_time;
     return commitment;
+}
+
+void A1Coordinator::refreshBypassRequests(
+    const std::vector<VehicleAgent>& vehicles) {
+    std::set<int> present_ids;
+    for (const VehicleAgent& vehicle : vehicles) {
+        present_ids.insert(vehicle.id);
+        int request_path_gen = -1;
+        if (vehicle.active() && vehicle.mission_phase == MissionPhase::TO_A1 &&
+            vehicle.leg_target == LegTargetKind::A1) {
+            request_path_gen = vehicle.path_gen;
+        } else if (vehicle.active() &&
+                   vehicle.mission_phase == MissionPhase::TO_B &&
+                   vehicle.leg_target == LegTargetKind::B_SLOT) {
+            request_path_gen = vehicle.path_gen + 1;
+        } else if (vehicle.mode == VehicleMode::DWELL &&
+                   vehicle.mission_phase == MissionPhase::UNLOAD_DWELL) {
+            request_path_gen = vehicle.path_gen + 1;
+        }
+
+        if (request_path_gen < 0) {
+            bypass_count_.erase(vehicle.id);
+            bypass_request_path_gen_.erase(vehicle.id);
+            continue;
+        }
+        const auto previous = bypass_request_path_gen_.find(vehicle.id);
+        if (previous == bypass_request_path_gen_.end() ||
+            previous->second != request_path_gen) {
+            bypass_request_path_gen_[vehicle.id] = request_path_gen;
+            bypass_count_[vehicle.id] = 0;
+        }
+    }
+    for (auto it = bypass_count_.begin(); it != bypass_count_.end();) {
+        if (present_ids.count(it->first) == 0) {
+            bypass_request_path_gen_.erase(it->first);
+            it = bypass_count_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void A1Coordinator::updateBypassCountsOnCreate(
+    const ArrivalSummary& summary, int owner_id) {
+    for (const auto& item : summary.candidates) {
+        if (item.first == owner_id) bypass_count_[item.first] = 0;
+        else ++bypass_count_[item.first];
+    }
+}
+
+void A1Coordinator::logA1Scheduling(
+    const ArrivalSummary& summary, int owner_id,
+    const std::string& selection_reason) const {
+    if (!coord_log_sink_) return;
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(2)
+         << "[A1_SCHEDULING] owner=V" << owner_id
+         << " reason=" << selection_reason << " candidates=[";
+    bool first = true;
+    for (const auto& item : summary.candidates) {
+        if (!first) line << ",";
+        first = false;
+        line << "V" << item.first << ":wait=" << bypassCount(item.first)
+             << ":eta=" << item.second.arrival_time << "s";
+    }
+    line << "]";
+    coord_log_sink_(line.str());
 }
 
 A1Coordinator::FutureA1Commitment
@@ -448,6 +528,7 @@ void A1Coordinator::refreshPlanningContext(
     // prediction so UNLOAD_DWELL waiters can preview their already-built
     // next B->A1 service without generating another path.
     pickup_leg_track_ = kinematics.pickup_leg_track;
+    refreshBypassRequests(vehicles);
     const FutureA1Commitment previous = future_a1_commitment_;
     const ArrivalSummary arrivals =
         predictA1Arrivals(vehicles, horizon, kinematics);
@@ -457,9 +538,15 @@ void A1Coordinator::refreshPlanningContext(
     // Preserve the old rolling behavior: invalidating an existing owner does
     // not select a replacement until the next rolling refresh.
     if (!previous.valid()) {
-        commitment = selectFutureA1Owner(vehicles, arrivals);
+        std::string selection_reason;
+        commitment = selectFutureA1Owner(vehicles, arrivals,
+                                         &selection_reason);
         change_reason = commitment.valid() ? "service_owner_selected"
                                            : "no_candidate";
+        if (commitment.valid()) {
+            logA1Scheduling(arrivals, commitment.owner_id, selection_reason);
+            updateBypassCountsOnCreate(arrivals, commitment.owner_id);
+        }
     }
     setFutureA1Commitment(commitment);
     logFutureA1Transition(vehicles, previous, commitment, arrivals,
@@ -577,11 +664,12 @@ void A1Coordinator::logFutureA1Transition(
 }
 
 A1Coordinator::Snapshot A1Coordinator::snapshot() const {
-    return Snapshot{departure_cluster_commitments_};
+    return Snapshot{departure_cluster_commitments_, bypass_count_,
+                    bypass_request_path_gen_};
 }
 
 void A1Coordinator::restore(const Snapshot& snapshot,
-                            bool clear_intrusion_corrections) {
+                            bool restore_persistent_state) {
     for (const auto& current : departure_cluster_commitments_) {
         const auto incoming = snapshot.departure_clusters.find(current.first);
         if (current.second.active &&
@@ -606,9 +694,13 @@ void A1Coordinator::restore(const Snapshot& snapshot,
         }
     }
     departure_cluster_commitments_ = snapshot.departure_clusters;
+    if (restore_persistent_state) {
+        bypass_count_ = snapshot.bypass_count;
+        bypass_request_path_gen_ = snapshot.bypass_request_path_gen;
+    }
     // Intrusion correction is live, derived motion state. A rollout snapshot
     // must never install or complete it for the real executor.
-    if (clear_intrusion_corrections) intrusion_corrections_.clear();
+    if (restore_persistent_state) intrusion_corrections_.clear();
 }
 
 A1Coordinator::FutureA1ZoneSelection
