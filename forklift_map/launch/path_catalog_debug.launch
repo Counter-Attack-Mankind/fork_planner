@@ -1,0 +1,64 @@
+<launch>
+  <!-- direction=from_depot: selected depot -> B0..B65.
+       direction=to_depot: B0..B65 -> selected depot.
+       target_slot=5 with depot=A1 animates A1 -> B5 or B5 -> A1.
+       target_row=7 with target_slot=-1 draws only slots in row_id 7. -->
+  <arg name="depot" default="A1"/>
+  <arg name="direction" default="from_depot"/>
+  <arg name="target_slot" default="-1"/>
+  <arg name="target_row" default="-1"/>
+  <arg name="validate_paths" default="true"/>
+  <arg name="visualize_rejections" default="true"/>
+  <arg name="visualize_path_layers" default="false"/>
+  <arg name="visualize_turn_types" default="true"/>
+  <arg name="verbose_batch_paths" default="false"/>
+  <arg name="animate" default="true"/>
+  <arg name="animation_duration" default="8.0"/>
+
+  <param name="/use_sim_time" value="false"/>
+
+  <rosparam file="$(find forklift_map)/config/map_param.yaml" command="load"/>
+  <rosparam file="$(find forklift_planner)/config/planner_param.yaml" command="load"/>
+
+  <node name="forklift_map" pkg="forklift_map" type="map_node" output="screen"/>
+
+  <node name="path_catalog_debug_node"
+        pkg="forklift_map"
+        type="path_catalog_debug_node"
+        output="screen">
+    <!-- true: A1/A2 are computed from B4/B5 and B60/B61 midpoints. -->
+    <param name="use_exact_midpoints" value="true"/>
+
+    <!-- Used only when use_exact_midpoints=false, kept for field tuning. -->
+    <param name="a1_x" value="1.25"/>
+    <param name="a1_y" value="4.38"/>
+    <param name="a1_pre_x" value="1.25"/>
+    <param name="a1_pre_y" value="4.105"/>
+    <param name="a1_yaw" value="1.57079632679"/>
+    <param name="a2_x" value="1.25"/>
+    <param name="a2_y" value="0.12"/>
+    <param name="a2_pre_x" value="1.25"/>
+    <param name="a2_pre_y" value="0.395"/>
+    <param name="a2_yaw" value="-1.57079632679"/>
+
+    <param name="depot" type="str" value="$(arg depot)"/>
+    <param name="direction" type="str" value="$(arg direction)"/>
+    <param name="target_slot" type="int" value="$(arg target_slot)"/>
+    <param name="target_row" type="int" value="$(arg target_row)"/>
+    <param name="validate_paths" type="bool" value="$(arg validate_paths)"/>
+    <param name="visualize_rejections" type="bool" value="$(arg visualize_rejections)"/>
+    <param name="visualize_path_layers" type="bool" value="$(arg visualize_path_layers)"/>
+    <param name="visualize_turn_types" type="bool" value="$(arg visualize_turn_types)"/>
+    <param name="verbose_batch_paths" type="bool" value="$(arg verbose_batch_paths)"/>
+    <param name="animate" type="bool" value="$(arg animate)"/>
+    <param name="animation_duration" type="double" value="$(arg animation_duration)"/>
+    <param name="animation_period" type="double" value="0.05"/>
+  </node>
+
+  <node name="rviz" pkg="rviz" type="rviz"
+        args="-d $(find forklift_map)/config/forklift.rviz"
+        required="false">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

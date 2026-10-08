@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Run this launch in its own terminal so single-key input is available. -->
+  <node pkg="forklift_planner"
+        type="realbridge_keyboard_control.py"
+        name="realbridge_keyboard_control"
+        output="screen"
+        required="true"/>
+</launch>

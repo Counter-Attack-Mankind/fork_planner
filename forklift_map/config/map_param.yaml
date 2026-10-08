@@ -1,0 +1,49 @@
+forklift_map:
+  # Field dimensions (m)
+  field_width:  2.500
+  field_height: 4.500
+
+  # Zone heights (bottom-to-top stacking order)
+  bottom_shelf_depth:  0.2500   # 顶/底单排货架深度
+  corridor_height:     0.6385   # 転弱区（走廊）高度
+  shelf_row_depth:     0.4820   # 双排货架行深度
+
+  # Row-2 (行2 瓶颈) horizontal layout
+  row2_left_width:   1.125   # 左货架宽
+  row2_gap:          0.250   # 防火墙瓶颈宽
+  # row2_right_width is field_width - row2_left_width - row2_gap
+
+  # Row-1 (行1 中央岛) horizontal layout
+  row1_left_aisle:   0.580   # 左侧通道宽（可穿越行1）
+  row1_shelf_width:  1.140   # 主货架宽
+  row1_mini_shelf:   0.200   # 右侧小货架宽
+
+  # Row-3 (行3 双车道) horizontal layout
+  row3_left_shelf:    1.000   # 左货架宽
+  row3_center_aisle:  0.500   # 中央双车道宽
+
+  # Top/Bottom shelf horizontal layout
+  tb_shelf_width:  1.125   # 顶/底货架左（右）宽，中央留 0.25m 缺口
+
+  # Vehicle / slot dimensions (slot = vehicle footprint)
+  vehicle_length:  0.211   # Y 方向深度
+  vehicle_width:   0.191   # X 方向宽度
+
+  # Vehicle steering kinematics —— 拐弯（曲率连续 clothoid）单一参数源
+  # 规划器与地图/打印图的拐弯几何都从这里派生，保证一致
+  wheel_base:       0.143   # m   轴距
+  max_steer_angle:  0.40    # rad 最大前轮转角
+  max_steer_rate:   0.25    # rad/s 最大转向角速度
+  turn_speed:       0.20    # m/s 计算曲率斜升段用的代表车速
+  path_resolution:  0.01    # m   曲线采样步长
+
+  # Visualization parameters
+  show_slot_ids:       true    # RViz 中显示每个货位的编号；设为 false 可关闭
+  show_slot_poses:     true    # RViz 中显示每个货位的 cx/cy/dock_theta 和朝向箭头
+  show_coordinate_axes: true
+  pre_dock_clearance:  0.150   # 预停靠点距货架边缘距离 (m)
+  road_line_width:     0.020   # 道路中心线线宽 (m)
+  arrow_size:          0.060   # 方向箭头长度 (m)
+
+  # ROS frame
+  frame_id: "map"

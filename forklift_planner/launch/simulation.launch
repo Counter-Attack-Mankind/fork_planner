@@ -1,0 +1,21 @@
+<launch>
+  <param name="/use_sim_time" value="false"/>
+
+  <!-- Map visualization -->
+  <node name="map_node" pkg="forklift_map" type="map_node" output="screen">
+    <rosparam file="$(find forklift_map)/config/map_param.yaml" command="load"/>
+  </node>
+
+  <!-- Planner + vehicle simulation -->
+  <node name="planner_node" pkg="forklift_planner" type="planner_node" output="screen">
+    <rosparam file="$(find forklift_planner)/config/planner_param.yaml" command="load"/>
+  </node>
+
+  <!-- RViz -->
+  <node name="rviz" pkg="rviz" type="rviz"
+        args="-d $(find forklift_map)/config/forklift.rviz"
+        output="screen">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

@@ -1,0 +1,78 @@
+  # 每个控制器使用不同的控制参数
+  #--------------------------------------------------------
+  # 先调横向再调纵向，横向调整的是lookahead_scale
+  # 车切弯过晚，将前瞻系数调小。若车左右摆动，转向敏感，则调大前瞻系数
+  #--------------------------------------------------------
+  # 若车明显落后参考轨迹，则增大kp，若车冲过头则减小kp
+  #--------------------------------------------------------
+controller_0:  #changed
+  K_e: 15.0
+  K_yaw: 1.8
+  ff_lead_time: 0.0
+
+  lookahead_scale: 1.0
+  longitude_kp: 2.0
+  longitude_ki: 0.1
+
+controller_1: #changed
+  K_e: 15.0
+  K_yaw: 1.8
+  ff_lead_time: 0.10
+
+  lookahead_scale: 1.2
+  longitude_kp: 2.5
+  longitude_ki: 0.1
+
+controller_2: #changed
+  K_e: 15.0
+  K_yaw: 1.8
+  ff_lead_time: 0.0
+
+  lookahead_scale: 1.2
+  longitude_kp: 2.0
+  longitude_ki: 0.1
+
+controller_3:  #changed
+  K_e: 12.0
+  K_yaw: 1.8
+  ff_lead_time: 0.12
+
+  lookahead_scale: 1.2
+  longitude_kp: 2.5
+  longitude_ki: 0.15
+
+controller_4: #changed  a little bit error
+  K_e: 12.0
+  K_yaw: 1.8
+  ff_lead_time: 0.12
+
+  lookahead_scale: 1.0
+  longitude_kp: 2.5
+  longitude_ki: 0.1
+
+controller_5:   # changed
+  K_e: 12.0
+  K_yaw: 1.8
+  ff_lead_time: 0.12
+
+  lookahead_scale: 1.2
+  longitude_kp: 2.5
+  longitude_ki: 0.15
+
+controller_6:
+  K_e: 12.0
+  K_yaw: 1.8
+  ff_lead_time: 0.12
+
+  lookahead_scale: 1.2
+  longitude_kp: 2.5
+  longitude_ki: 0.15
+
+controller_7:
+  K_e: 12.0
+  K_yaw: 1.8
+  ff_lead_time: 0.12
+  
+  lookahead_scale: 1.2
+  longitude_kp: 2.5
+  longitude_ki: 0.15

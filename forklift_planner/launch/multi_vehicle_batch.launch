@@ -1,0 +1,29 @@
+<launch>
+  <!-- 无头快速回归:狂跑 N 仿真分钟(确定性,不启 rviz/不按实时),节点退出码 1=有碰撞。
+       用法:roslaunch forklift_planner multi_vehicle_batch.launch minutes:=120 -->
+  <arg name="minutes" default="120"/>
+  <arg name="one_shot" default="false"/>
+  <arg name="a1_cycle_catalog_file" default="$(find forklift_planner)/config/a1_cycle_path_catalog.yaml"/>
+  <arg name="coord_log_file" default="$(find forklift_planner)/logs/multi_vehicle_batch.log"/>
+  <arg name="debug_timeline_start" default="-1.0"/>
+  <arg name="debug_timeline_end" default="-1.0"/>
+
+  <param name="/use_sim_time" value="false"/>
+
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml" />
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml" />
+  <param name="/forklift_planner/multi_vehicle/a1_cycle_catalog_file"
+         value="$(arg a1_cycle_catalog_file)"/>
+  <param name="/forklift_planner/multi_vehicle/real_mode" value="false"/>
+
+  <node pkg="forklift_planner"
+        type="multi_vehicle_patrol_node"
+        name="multi_vehicle_patrol_node"
+        output="screen" required="true">
+    <param name="one_shot" value="$(arg one_shot)"/>
+    <param name="batch_minutes" value="$(arg minutes)"/>
+    <param name="coord_log_file" value="$(arg coord_log_file)"/>
+    <param name="debug_timeline_start" value="$(arg debug_timeline_start)"/>
+    <param name="debug_timeline_end" value="$(arg debug_timeline_end)"/>
+  </node>
+</launch>

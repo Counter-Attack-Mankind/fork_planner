@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!-- Standalone real-vehicle steering calibration. Do not run PP/planner concurrently. -->
+<launch>
+  <arg name="server" default="10.1.1.198"/>
+  <arg name="target"/>
+  <arg name="direction"/>
+  <arg name="safe_min_x"/>
+  <arg name="safe_max_x"/>
+  <arg name="safe_min_y"/>
+  <arg name="safe_max_y"/>
+
+  <arg name="throttle" default="0.05"/>
+  <arg name="steering_start" default="0.30"/>
+  <arg name="steering_step" default="0.03"/>
+  <arg name="steering_max_test" default="0.65"/>
+  <arg name="settle_time" default="2.0"/>
+  <arg name="measure_time" default="5.0"/>
+  <arg name="wheel_base" default="0.143"/>
+  <arg name="boundary_margin" default="0.18"/>
+  <arg name="log_dir" default="$(find chassis)/../../log"/>
+
+  <arg name="min_samples" default="30"/>
+  <arg name="min_travel_distance" default="0.15"/>
+  <arg name="min_arc_angle" default="0.15"/>
+  <arg name="max_fit_rms" default="0.02"/>
+  <arg name="max_radius_variation_ratio" default="0.20"/>
+  <arg name="min_effective_increment" default="0.01"/>
+  <arg name="object_timeout" default="0.30"/>
+  <arg name="max_pose_jump" default="0.25"/>
+  <arg name="max_total_time" default="180.0"/>
+  <arg name="stop_frame_count" default="10"/>
+
+  <rosparam command="load" file="$(find chassis)/config/vehicle_chassis_gains.yaml"/>
+
+  <include file="$(find vrpn_client_ros)/launch/sample.launch">
+    <arg name="server" value="$(arg server)"/>
+  </include>
+  <node pkg="nokov_localization" type="nokov_localization_v2.py"
+        name="nokov" output="screen"/>
+  <node pkg="chassis" type="chassis_node" name="chassis" output="screen"/>
+
+  <node pkg="chassis" type="steering_limit_calibration_node"
+        name="steering_limit_calibration" output="screen" required="true">
+    <param name="target" value="$(arg target)"/>
+    <param name="direction" value="$(arg direction)"/>
+    <param name="safe_min_x" value="$(arg safe_min_x)"/>
+    <param name="safe_max_x" value="$(arg safe_max_x)"/>
+    <param name="safe_min_y" value="$(arg safe_min_y)"/>
+    <param name="safe_max_y" value="$(arg safe_max_y)"/>
+    <param name="throttle" value="$(arg throttle)"/>
+    <param name="steering_start" value="$(arg steering_start)"/>
+    <param name="steering_step" value="$(arg steering_step)"/>
+    <param name="steering_max_test" value="$(arg steering_max_test)"/>
+    <param name="settle_time" value="$(arg settle_time)"/>
+    <param name="measure_time" value="$(arg measure_time)"/>
+    <param name="wheel_base" value="$(arg wheel_base)"/>
+    <param name="boundary_margin" value="$(arg boundary_margin)"/>
+    <param name="log_dir" value="$(arg log_dir)"/>
+    <param name="min_samples" value="$(arg min_samples)"/>
+    <param name="min_travel_distance" value="$(arg min_travel_distance)"/>
+    <param name="min_arc_angle" value="$(arg min_arc_angle)"/>
+    <param name="max_fit_rms" value="$(arg max_fit_rms)"/>
+    <param name="max_radius_variation_ratio"
+           value="$(arg max_radius_variation_ratio)"/>
+    <param name="min_effective_increment" value="$(arg min_effective_increment)"/>
+    <param name="object_timeout" value="$(arg object_timeout)"/>
+    <param name="max_pose_jump" value="$(arg max_pose_jump)"/>
+    <param name="max_total_time" value="$(arg max_total_time)"/>
+    <param name="stop_frame_count" value="$(arg stop_frame_count)"/>
+  </node>
+</launch>

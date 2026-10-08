@@ -1,0 +1,59 @@
+<?xml version="1.0"?>
+<!-- 实车 realbridge 实验；vehicle_ids 是参与车辆的唯一选择参数。 -->
+<launch>
+  <arg name="server" default="10.1.1.198"/>
+  <arg name="vehicle_ids" default="0,1,2,3,4,5,6,7"/>
+  <arg name="controller" default="pp"/>
+  <arg name="lqr_q" default="1.0"/>
+  <arg name="pose_timeout" default="0.5"/>
+  <arg name="arrive_tol" default="0.05"/>
+  <arg name="emerg_margin" default="0.08"/>
+  <arg name="a_lat" default="0.10"/>
+  <arg name="log_dir" default="$(find forklift_planner)/../log"/>
+
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml"/>
+  <param name="/forklift_planner/multi_vehicle/a1_cycle_catalog_file"
+         value="$(find forklift_planner)/config/a1_cycle_path_catalog.yaml"/>
+  <param name="/forklift_planner/multi_vehicle/real_mode" value="true"/>
+  <param name="/forklift_planner/multi_vehicle/vehicle_ids"
+         value="$(arg vehicle_ids)"/>
+  <param name="/forklift_planner/multi_vehicle/real_pose_timeout"
+         value="$(arg pose_timeout)"/>
+  <param name="/forklift_planner/multi_vehicle/real_arrive_tol"
+         value="$(arg arrive_tol)"/>
+  <param name="/forklift_planner/multi_vehicle/real_emergency_margin"
+         value="$(arg emerg_margin)"/>
+  <param name="/forklift_planner/multi_vehicle/lat_accel_max"
+         value="$(arg a_lat)"/>
+
+  <rosparam command="load"
+            file="$(find chassis)/config/vehicle_chassis_gains.yaml"/>
+  <rosparam command="load"
+            file="$(find pure_pursuit)/config/vehicle_controller_gains.yaml"/>
+
+  <include file="$(find vrpn_client_ros)/launch/sample.launch">
+    <arg name="server" value="$(arg server)"/>
+  </include>
+  <node pkg="nokov_localization" type="nokov_localization_v2.py"
+        name="nokov" output="screen"/>
+  <node pkg="chassis" type="chassis_node" name="chassis" output="screen"/>
+  <node pkg="forklift_map" type="map_node" name="forklift_map"
+        output="screen"/>
+  <node pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find forklift_map)/config/forklift.rviz" required="false"/>
+
+  <node pkg="forklift_planner" type="multi_vehicle_patrol_node"
+        name="multi_vehicle_patrol_node" output="screen">
+    <param name="debug_log_dir" value="$(arg log_dir)"/>
+    <param name="coord_log_file"
+           value="$(arg log_dir)/multi_vehicle_coordination.log"/>
+  </node>
+
+  <node pkg="forklift_planner" type="realbridge_controller_launcher.py"
+        name="realbridge_controller_launcher" output="screen" required="true">
+    <param name="controller" value="$(arg controller)"/>
+    <param name="lqr_q" value="$(arg lqr_q)"/>
+    <param name="debug_log_dir" value="$(arg log_dir)"/>
+  </node>
+</launch>

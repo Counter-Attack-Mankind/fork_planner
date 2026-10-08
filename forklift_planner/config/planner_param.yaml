@@ -1,0 +1,152 @@
+forklift_planner:
+  # 单车运动模型参数
+  vehicle_speed:    0.20   # m/s，单车参考速度
+  stop_duration:    2.0    # s，泊车点等待时间
+  wheel_base:       0.143  # m，轴距
+  max_steer_angle:  0.40   # rad，Planner 路径可行性边界
+  max_steer_rate:   0.25   # rad/s，最大转向角速度
+  path_resolution:  0.01   # m，路径采样间隔
+
+  # 转弯/泊车路径模型
+  # turn_model: "arc" 或 "clothoid"；clothoid 为曲率连续版本
+  # terminal_docking_mode: "auto" / "forward" / "reverse"
+  # auto 表示末端空间不足时自动选择倒车入位
+  turn_model:       "clothoid"
+  terminal_docking_mode: "auto"
+
+  # 随机种子，保证仿真可复现
+  random_seed:  2026
+
+  # 主控制/仿真更新频率。10Hz 表示 dt=0.1s
+  update_rate:  10.0   # Hz
+  path_color_r: 0.2
+  path_color_g: 0.8
+  path_color_b: 1.0
+
+  # 地图坐标系，需与 forklift_map 保持一致
+  frame_id: "map"
+
+  multi_vehicle:
+    # 多车基础配置
+    vehicle_count: 2
+    random_seed: 2026
+    # true: 固定伪随机序列，使用 random_seed，便于重复实验与横向比较
+    # false: 每次启动使用系统随机种子，任务目标序列会变化
+    reproducible_task_random: true
+
+    # 预设起点/终点货位。按真实车辆 ID 索引；仿真 ID 仍为 0..vehicle_count-1。
+    # 当前这组是 8 对互不冲突、较长距离的全程前进测试任务。
+    start_slots:  [38, 20, 60, 35, 56, 40, 57, 21]
+    target_slots: [ 9, 10,  8,  41, 52, 55, 42, 64]
+    randomize_start: false
+
+    # 简化实车冒烟测试：为每辆车选择较近且全程前进的目标，覆盖上面的 target_slots。
+    simple_forward_demo: false
+
+    # 多车仿真/协调运动学参数
+    nominal_speed: 0.20
+    max_speed: 0.26
+    max_accel: 0.20
+    max_decel: 0.30
+    lat_accel_max: 0.06
+    safety_margin: 0.00
+    conflict_margin: 0.04
+
+    # Stateless correction after a real synchronized-OBB conflict.
+    bridge_opposing_threshold: -0.50     # local actual-motion-heading dot threshold
+    bridge_backtrack_step: 0.01         # m，bridge relation/static OBB 几何回溯精度
+
+    # 滚动轨迹与休眠配置
+    dwell_time: 5.0               # s，到达目标货位后的休眠/等待时间
+    pickup_dwell_time: 5.0        # s，A1取货作业时间
+    unload_dwell_time: 5.0        # s，B库位卸货作业时间
+
+    # A1 独立取货设施。pickup_center 是装货姿态下的车身几何中心；
+    # 路径仍以后轴为参考点，由车辆几何参数自动换算。
+    a1_pickup_center_x: 1.250
+    a1_pickup_center_y: 4.375
+    a1_pickup_theta: 1.5707963267948966
+    a1_pre_dock_x: 1.250
+    a1_pre_dock_y: 4.100
+    # A1 waiter control stop line upstream of the bare-body conflict boundary (m).
+    a1_stop_margin: 0.30
+    # Future A1 owner reservation window only; independent of rolling/TTC horizons.
+    a1_owner_horizon: 25.0      # s
+    rolling_horizon: 15.0         # s，每次生成未来多长时间的轨迹
+    rolling_refresh_period: 2.0   # s，每隔多久重新计算并覆盖发布轨迹
+
+    # 实车模式：true 时读取 /object，发布 /traj_i 与 /coord_speed_i
+    real_mode: false
+    one_shot_traj: false        # true=一次性规划，false=滚动时域
+
+    # 前瞻预测参数
+    prediction_horizon: 15.0
+    prediction_step: 0.05
+    # NOMINAL baseline TimedConflict first_t intervention bands (s).
+    # [far, horizon] stays NOMINAL; [near, far) directly requests YIELD;
+    # [0, near) directly requests CREEP. Insufficient braking margin is the
+    # independent condition that tightens the yielding side to STOP.
+    dynamic_speed_far_threshold: 10.0
+    dynamic_speed_near_threshold: 5.0
+    # Ordinary NEAR STOP time reserve: first_t <= rolling refresh period
+    # + CREEP braking time + this margin. Unit: s.
+    dynamic_stop_time_margin: 0.10
+
+    # 离散动作速度比例
+    creep_ratio: 0.25
+    yield_ratio: 0.50
+    boost_ratio: 1.20
+    enable_boost: true
+
+    # 局部规则时间阈值
+    emergency_time: 0.80
+    final_decision_time: 2.00
+    warning_time: 5.00
+    starvation_wait_time: 8.0
+
+    # 动作保持时间：防止 STOP/NOMINAL、YIELD/NOMINAL 每拍抖动。
+    # 制动更强的动作会立即生效；放松动作至少保持该时间后才允许发生。
+    action_hold_time: 0.4
+
+    # 协调规则开关。硬碰撞保护始终启用，这些只是策略层开关。
+    #===================(死锁)=========================
+    enable_priority_tiebreak: true    # 对称冲突时使用优先级打破平局
+    deadlock_enabled: true
+    deadlock_confirm_time: 4.0             # s; live STOP/STOP confirmation
+    deadlock_retreat_distance: 0.50         # 每次回退的距离
+    deadlock_retreat_max_attempts: 3        # 死锁最大迭代
+    deadlock_retreat_speed: 0.10           # m/s; RETREAT only
+
+    # 目标货位/泊车队列窗口
+    target_request_distance: 0.45
+    target_stop_distance: 0.12
+
+    # 跟车距离阈值
+    following_normal_distance: 0.35
+    following_creep_distance: 0.22
+    following_min_distance: 0.13
+
+    # 路径与任务过滤
+    skip_arc_fallback_paths: false
+    reject_curvature_discontinuity: false
+    reject_boundary_violations: true
+    reject_shelf_collisions: false
+    reject_path_kinks: true
+    kink_min_angle: 0.61    # rad，约 35deg；小于该角度视为平滑转弯
+    kink_cusp_angle: 2.53   # rad，约 145deg；大于该角度视为正常换向尖点
+    path_validation_step: 0.01
+    precompute_task_filter: true
+    log_invalid_task_pairs: false
+    quiet_task_filter_precompute: true
+
+    # 运输业务状态机：空载B->A1，取货后才分配目标B，再满载A1->B。
+    use_a1_cycle: true
+    save_a1_cycle_catalog: true
+
+    # 确定性任务选择记忆，避免频繁重复选择同一目标/同一排
+    recent_target_memory: 5
+    recent_row_memory: 4
+
+    # 可视化
+    show_paths: true
+    show_prediction_conflicts: true

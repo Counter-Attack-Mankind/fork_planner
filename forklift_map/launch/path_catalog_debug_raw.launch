@@ -1,0 +1,25 @@
+<launch>
+  <!-- Shows raw generated paths without task-style validation filtering. -->
+  <arg name="depot" default="A1"/>
+  <arg name="direction" default="from_depot"/>
+  <arg name="target_slot" default="-1"/>
+  <arg name="visualize_rejections" default="true"/>
+  <arg name="visualize_path_layers" default="false"/>
+  <arg name="visualize_turn_types" default="true"/>
+  <arg name="verbose_batch_paths" default="false"/>
+  <arg name="animate" default="true"/>
+  <arg name="animation_duration" default="8.0"/>
+
+  <include file="$(find forklift_map)/launch/path_catalog_debug.launch">
+    <arg name="depot" value="$(arg depot)"/>
+    <arg name="direction" value="$(arg direction)"/>
+    <arg name="target_slot" value="$(arg target_slot)"/>
+    <arg name="validate_paths" value="false"/>
+    <arg name="visualize_rejections" value="$(arg visualize_rejections)"/>
+    <arg name="visualize_path_layers" value="$(arg visualize_path_layers)"/>
+    <arg name="visualize_turn_types" value="$(arg visualize_turn_types)"/>
+    <arg name="verbose_batch_paths" value="$(arg verbose_batch_paths)"/>
+    <arg name="animate" value="$(arg animate)"/>
+    <arg name="animation_duration" value="$(arg animation_duration)"/>
+  </include>
+</launch>

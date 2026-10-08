@@ -1,0 +1,28 @@
+lfw : 0.0
+lrv : 0.0
+wheel_base : 0.143
+approaching_tolerance : 0.04
+final_approaching_tolerance : 0.02
+
+# 末端位姿到达判定（目标坐标系）
+final_lon_tolerance : 0.02       # m，纵向误差
+final_lat_tolerance : 0.015      # m，横向误差
+final_yaw_tolerance : 0.0872665  # rad，约 5 deg
+final_stable_cycles : 5          # 连续满足次数，控制周期当前为 0.1 s
+
+# 末段控制：虚拟点只用于 PP 横向控制，纵向 PI 仍跟踪真实终点
+terminal_lookahead_extension : 0.12  # m，沿末段实际行驶方向延长
+terminal_slowdown_distance : 0.20    # m，进入末端限速区的距离
+terminal_max_speed : 0.08            # m/s，末端纵向速度上限
+control_dt : 0.01
+lookahead_distance_min : 0.10
+lookahead_distance_max : 0.15
+lookahead_distance_ratio : 0.8
+pp_max_steer_angle : 0.60  # rad, PP control correction boundary
+v_lookahead_lb : 0.125
+v_lookahead_ub : 0.25
+v_min : -0.26
+v_max : 0.26
+
+# Debug CSV logs for tuning PP gains.
+debug_log_enable : true

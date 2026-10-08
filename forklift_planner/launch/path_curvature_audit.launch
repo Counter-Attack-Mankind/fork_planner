@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="output_dir" default="$(find forklift_planner)/config"/>
+  <arg name="catalog_file"
+       default="$(find forklift_planner)/config/a1_cycle_path_catalog.yaml"/>
+
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml"/>
+
+  <node pkg="forklift_planner" type="path_curvature_audit"
+        name="path_curvature_audit" output="screen" required="true">
+    <param name="output_dir" value="$(arg output_dir)"/>
+    <param name="catalog_file" value="$(arg catalog_file)"/>
+  </node>
+</launch>

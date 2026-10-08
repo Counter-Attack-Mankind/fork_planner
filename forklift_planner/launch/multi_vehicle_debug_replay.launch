@@ -1,0 +1,21 @@
+<launch>
+  <!-- Replay only recorded visualization topics. No live planner/map publisher. -->
+  <arg name="snapshot"/>
+  <arg name="rate" default="0.25"/>
+  <arg name="paused" default="false"/>
+  <arg name="start_rviz" default="true"/>
+  <param name="/use_sim_time" value="true"/>
+
+  <node pkg="forklift_planner" type="replay_rviz_snapshot.py"
+        name="debug_bag_play" required="true" output="screen">
+    <param name="snapshot" value="$(arg snapshot)"/>
+    <param name="rate" value="$(arg rate)"/>
+    <param name="paused" value="$(arg paused)"/>
+  </node>
+
+  <node if="$(arg start_rviz)" pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find forklift_map)/config/forklift.rviz" required="false">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<!--
+  正式实车 B -> A1 -> B 循环任务。
+  vehicle_ids 是实车车辆选择的唯一来源，例如 vehicle_ids:=4,5,7。
+  启动/急停键盘请在另一终端运行 realbridge_keyboard_control.launch。
+-->
+<launch>
+  <arg name="server" default="10.1.1.198"/>
+  <arg name="vehicle_ids" default="0"/>
+  <arg name="controller" default="pp"/>
+  <arg name="lqr_q" default="1.0"/>
+  <arg name="start_rviz" default="true"/>
+  <arg name="log_dir" default="$(find forklift_planner)/../log"/>
+
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml"/>
+  <param name="/forklift_planner/multi_vehicle/a1_cycle_catalog_file"
+         value="$(find forklift_planner)/config/a1_cycle_path_catalog.yaml"/>
+  <param name="/forklift_planner/multi_vehicle/real_mode" value="true"/>
+  <param name="/forklift_planner/multi_vehicle/use_a1_cycle" value="true"/>
+  <param name="/forklift_planner/multi_vehicle/one_shot_traj" value="false"/>
+  <param name="/forklift_planner/multi_vehicle/vehicle_ids"
+         value="$(arg vehicle_ids)"/>
+
+  <rosparam command="load"
+            file="$(find chassis)/config/vehicle_chassis_gains.yaml"/>
+  <rosparam command="load"
+            file="$(find pure_pursuit)/config/vehicle_controller_gains.yaml"/>
+
+  <include file="$(find vrpn_client_ros)/launch/sample.launch">
+    <arg name="server" value="$(arg server)"/>
+  </include>
+  <node pkg="nokov_localization" type="nokov_localization_v2.py"
+        name="nokov" output="screen"/>
+  <node pkg="chassis" type="chassis_node" name="chassis" output="screen"/>
+  <node pkg="forklift_map" type="map_node" name="forklift_map"
+        output="screen"/>
+  <node if="$(arg start_rviz)" pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find forklift_map)/config/forklift.rviz"
+        required="false"/>
+
+  <node pkg="forklift_planner" type="multi_vehicle_patrol_node"
+        name="multi_vehicle_patrol_node" output="screen">
+    <param name="debug_log_dir" value="$(arg log_dir)"/>
+    <param name="coord_log_file"
+           value="$(arg log_dir)/multi_vehicle_coordination.log"/>
+  </node>
+
+  <node pkg="forklift_planner" type="realbridge_controller_launcher.py"
+        name="realbridge_controller_launcher" output="screen" required="true">
+    <param name="controller" value="$(arg controller)"/>
+    <param name="lqr_q" value="$(arg lqr_q)"/>
+    <param name="debug_log_dir" value="$(arg log_dir)"/>
+  </node>
+</launch>

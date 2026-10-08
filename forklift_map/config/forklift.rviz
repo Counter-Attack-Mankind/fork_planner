@@ -1,0 +1,145 @@
+Panels:
+  - Class: rviz/Displays
+    Help Height: 70
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /MarkerArray1
+        - /MarkerArray1/Namespaces1
+        - /MarkerArray2
+        - /MarkerArray2/Namespaces1
+        - /PurePursuitReference1
+        - /PurePursuitReference1/Namespaces1
+      Splitter Ratio: 0.5
+    Tree Height: 538
+  - Class: rviz/Selection
+    Name: Selection
+  - Class: rviz/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+  - Class: rviz/Time
+    Name: Time
+    SyncMode: 0
+    SyncSource: ""
+Preferences:
+  PromptSaveOnExit: true
+Toolbars:
+  toolButtonStyle: 2
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /forklift_map/markers
+      Name: MarkerArray
+      Namespaces:
+        boundary: true
+        floor: true
+        roads_arc: true
+        roads_h: true
+        roads_v: true
+        shelf_double: true
+        shelf_single: true
+        slot_ids: true
+        slots: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /forklift_planner/markers
+      Name: MarkerArray
+      Namespaces:
+        multi_patrol_arrow: true
+        multi_patrol_body: true
+        multi_patrol_conflict: false
+        multi_patrol_label: true
+        multi_patrol_path: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /pure_pursuit
+      Name: PurePursuitReference
+      Namespaces:
+        Markers_0: true
+        Markers_1: true
+        Markers_2: true
+        Markers_3: true
+        Markers_4: true
+        Markers_5: true
+        Markers_6: true
+        Markers_7: true
+        Reference_0: true
+        Reference_1: true
+        Reference_2: true
+        Reference_3: true
+        Reference_4: true
+        Reference_5: true
+        Reference_6: true
+        Reference_7: true
+      Queue Size: 100
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 20; 20; 20
+    Default Light: true
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz/Interact
+      Hide Inactive Objects: true
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+    - Class: rviz/FocusCamera
+    - Class: rviz/Measure
+    - Class: rviz/SetInitialPose
+      Theta std deviation: 0.2617993950843811
+      Topic: initialpose
+      X std deviation: 0.5
+      Y std deviation: 0.5
+    - Class: rviz/SetGoal
+      Topic: goal
+  Value: true
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 5.913599967956543
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Field of View: 0.7853981852531433
+      Focal Point:
+        X: 1.25
+        Y: 2.25
+        Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 1.5697963237762451
+      Target Frame: <Fixed Frame>
+      Yaw: 4.7181830406188965
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1376
+  Hide Left Dock: false
+  Hide Right Dock: true
+  QMainWindow State: 000000ff00000000fd00000001000000000000041800000506fc0200000004fb000000100044006900730070006c006100790073010000003d0000029d000000c900fffffffb0000001200530065006c0065006300740069006f006e01000002e0000000b20000005c00fffffffb0000000a0056006900650077007301000003980000014a000000a400fffffffb0000000800540069006d006501000004e80000005b0000003900ffffff0000059a0000050600000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Selection:
+    collapsed: false
+  Time:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 2488
+  X: 72
+  Y: 27

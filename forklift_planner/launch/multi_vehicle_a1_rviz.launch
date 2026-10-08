@@ -1,0 +1,48 @@
+<launch>
+  <!-- RViz A1-cycle patrol simulation (1-8 vehicles). -->
+
+  <arg name="one_shot" default="false"/>
+  <arg name="start_rviz" default="true"/>
+  <arg name="a1_cycle_catalog_file" default="$(find forklift_planner)/config/a1_cycle_path_catalog.yaml"/>
+  <arg name="coord_log_file" default="$(find forklift_planner)/logs/multi_vehicle_a1_rviz.log"/>
+  <arg name="snapshot_debug_enabled" default="false"/>
+  <arg name="snapshot_output_dir" default="$(env HOME)/forklift_debug_bags"/>
+  <arg name="snapshot_segment_duration" default="10.0"/>
+  <arg name="snapshot_max_splits" default="11"/>
+
+  <param name="/use_sim_time" value="false"/>
+
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml" />
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml" />
+
+  <param name="/forklift_planner/multi_vehicle/a1_cycle_catalog_file" value="$(arg a1_cycle_catalog_file)"/>
+  <param name="/forklift_planner/multi_vehicle/real_mode" value="false"/>
+
+  <node pkg="forklift_map" type="map_node" name="forklift_map" output="screen" />
+
+  <node pkg="forklift_planner"
+        type="multi_vehicle_patrol_node"
+        name="multi_vehicle_patrol_node"
+        output="screen">
+    <!-- false means: after reaching one target and dwelling, assign the next reachable target. -->
+    <param name="one_shot" value="$(arg one_shot)"/>
+    <param name="coord_log_file" value="$(arg coord_log_file)"/>
+    <param name="snapshot_debug_enabled" value="$(arg snapshot_debug_enabled)"/>
+  </node>
+
+  <node if="$(arg snapshot_debug_enabled)"
+        pkg="forklift_planner" type="rolling_rviz_bag_recorder.py"
+        name="rolling_rviz_bag_recorder" output="screen" required="false">
+    <param name="output_dir" value="$(arg snapshot_output_dir)"/>
+    <param name="segment_duration" value="$(arg snapshot_segment_duration)"/>
+    <param name="max_splits" value="$(arg snapshot_max_splits)"/>
+    <rosparam param="topics">[/forklift_map/markers, /forklift_planner/markers]</rosparam>
+  </node>
+
+  <node if="$(arg start_rviz)" pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find forklift_map)/config/forklift.rviz"
+        required="false">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

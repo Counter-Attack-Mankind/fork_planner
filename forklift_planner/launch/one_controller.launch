@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- 单车控制器:按 controller 参数选 pure_pursuit 或 lqr,节点名统一 controller_<target>。
+     PP 订 /traj_<target> + /estop；LQR 订 /traj_<target> + /coord_speed_<target>。
+     两者都发 /chassis(target)。 -->
+<launch>
+  <arg name="target"/>
+  <arg name="controller" default="pp"/>   <!-- pp | lqr -->
+  <arg name="debug_log_dir" default="$(find forklift_planner)/../log"/>
+  <arg name="lqr_q" default="1.0"/>        <!-- LQR 横向权重 Q(0,0): 1.0原版 | 8调后(二选一实测) -->
+  <arg name="_lqr" value="$(eval arg('controller') == 'lqr')"/>
+
+  <!-- Pure Pursuit(默认) -->
+  <node unless="$(arg _lqr)" pkg="pure_pursuit" type="pure_pursuit_node"
+        name="controller_$(arg target)" output="screen">
+    <rosparam command="load" file="$(find pure_pursuit)/config/pure_pursuit.yaml"/>
+    <param name="target" value="$(arg target)"/>
+    <param name="debug_log_dir" value="$(arg debug_log_dir)"/>
+    <!-- longitude_kp / longitude_ki / lookahead_scale are per-vehicle gains
+         loaded from vehicle_controller_gains.yaml as /controller_<target>/... -->
+  </node>
+
+  <!-- LQR(横向状态反馈;纵向用 /coord_speed) -->
+  <node if="$(arg _lqr)" pkg="lqr_controller" type="lqr_controller_node"
+        name="controller_$(arg target)" output="screen">
+    <param name="target" value="$(arg target)"/>
+    <param name="q_lat" value="$(arg lqr_q)"/>
+    <param name="longitude_kp" value="2.0"/>
+    <param name="longitude_ki" value="0.01"/>
+  </node>
+</launch>

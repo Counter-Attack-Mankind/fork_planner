@@ -1,0 +1,39 @@
+<launch>
+  <!-- Phase-2 reproducible two-vehicle validation. This launch only
+       overrides experiment identity and output locations; production
+       planner parameters continue to come from planner_param.yaml. -->
+  <arg name="minutes" default="10"/>
+  <arg name="vehicle_count" default="2"/>
+  <arg name="random_seed" default="2026"/>
+  <arg name="start_slot_a" default="38"/>
+  <arg name="start_slot_b" default="20"/>
+  <arg name="coord_log_file" default="/tmp/phase2_coordination.log"/>
+  <arg name="debug_log_dir" default="/tmp/phase2_debug"/>
+  <arg name="node_output" default="screen"/>
+
+  <param name="/use_sim_time" value="false"/>
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml"/>
+
+  <param name="/forklift_planner/multi_vehicle/vehicle_count"
+         value="$(arg vehicle_count)"/>
+  <param name="/forklift_planner/multi_vehicle/random_seed"
+         value="$(arg random_seed)"/>
+  <param name="/forklift_planner/multi_vehicle/reproducible_task_random"
+         value="true"/>
+  <rosparam param="/forklift_planner/multi_vehicle/start_slots"
+            subst_value="true">[$(arg start_slot_a), $(arg start_slot_b)]</rosparam>
+  <param name="/forklift_planner/multi_vehicle/save_a1_cycle_catalog"
+         value="false"/>
+  <param name="/forklift_planner/multi_vehicle/real_mode" value="false"/>
+
+  <node pkg="forklift_planner"
+        type="multi_vehicle_patrol_node"
+        name="multi_vehicle_patrol_node"
+        output="$(arg node_output)" required="true">
+    <param name="one_shot" value="false"/>
+    <param name="batch_minutes" value="$(arg minutes)"/>
+    <param name="coord_log_file" value="$(arg coord_log_file)"/>
+    <param name="debug_log_dir" value="$(arg debug_log_dir)"/>
+  </node>
+</launch>
