@@ -54,6 +54,8 @@ target_link_libraries(two_vehicle_sim_node
 
 add_executable(multi_vehicle_patrol_node
   ${PATH_GENERATOR_SOURCES}
+  src/diagnostics/diagnostic_logger.cpp
+  src/diagnostics/diagnostic_snapshot.cpp
   src/multi_vehicle/footprint.cpp
   src/multi_vehicle/bridge_ttc_correction.cpp
   src/multi_vehicle/dynamic_speed_coordination.cpp

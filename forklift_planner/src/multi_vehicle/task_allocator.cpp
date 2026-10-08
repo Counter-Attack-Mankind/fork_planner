@@ -1220,6 +1220,13 @@ bool TaskAllocator::assignPickupLeg(VehicleAgent& vehicle, bool emit_log) {
             ROS_ERROR("[multi_patrol][A1] V%d has no valid B%d->A1 leg (%s)",
                       vehicle.id, vehicle.current_slot,
                       rejectReasonName(leg.reject_reason));
+            if (coord_log_sink_) {
+                std::ostringstream line;
+                line << "[PATH_FAILURE] V" << vehicle.id << " leg=B_TO_A1 source=B"
+                     << vehicle.current_slot << " reason="
+                     << rejectReasonName(leg.reject_reason);
+                coord_log_sink_(line.str());
+            }
         }
         return false;
     }
@@ -1516,6 +1523,13 @@ bool TaskAllocator::assignNextTask(VehicleAgent& vehicle,
         vehicle.reason = "no_forward_task";
         ROS_ERROR("[multi_patrol][simple] V%d 从 %s 找不到全程前进的目标(无尖点路径)",
                   vehicle.id, slotLabel(map_, vehicle.current_slot).c_str());
+        if (coord_log_sink_) {
+            std::ostringstream line;
+            line << "[PATH_FAILURE] V" << vehicle.id << " source="
+                 << slotLabel(map_, vehicle.current_slot)
+                 << " reason=no_forward_task";
+            coord_log_sink_(line.str());
+        }
         return false;
     }
     int target = chooseNextTarget(vehicle, all, prefer_no_arc);
@@ -1560,6 +1574,12 @@ bool TaskAllocator::assignNextTask(VehicleAgent& vehicle,
     vehicle.reason = "no_valid_task";
     ROS_ERROR("[multi_patrol] V%d has no valid next task from %s",
               vehicle.id, slotLabel(map_, vehicle.current_slot).c_str());
+    if (coord_log_sink_) {
+        std::ostringstream line;
+        line << "[PATH_FAILURE] V" << vehicle.id << " source="
+             << slotLabel(map_, vehicle.current_slot) << " reason=no_valid_task";
+        coord_log_sink_(line.str());
+    }
     return false;
 }
 

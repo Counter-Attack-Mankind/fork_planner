@@ -26,6 +26,8 @@
 
 #include "forklift_map/forklift_map.h"
 #include "forklift_map/map_param.h"
+#include "forklift_planner/diagnostics/diagnostic_logger.h"
+#include "forklift_planner/diagnostics/diagnostic_snapshot.h"
 #include "forklift_planner/multi_vehicle/footprint.h"
 #include "forklift_planner/multi_vehicle/marker_publisher.h"
 #include "forklift_planner/multi_vehicle/multi_vehicle_config.h"
@@ -92,7 +94,6 @@ public:
             snapshot_trigger_pub_ = nh_.advertise<std_msgs::String>(
                 snapshot_trigger_topic_, 2, false);
         }
-        onset_log_file_ = debug_log_dir_ + "/forklift_onset.log";
         realbridge_positions_file_ =
             debug_log_dir_ + "/realbridge_positions.txt";
         rb_horizon_ = cfg_.rolling_horizon;
@@ -140,9 +141,6 @@ public:
         marker_pub_ = std::make_unique<forklift_planner::multi_vehicle::MarkerPublisher>(
             nh_, mp_, pp_, map_->slots(), cfg_, a1_pickup);
         initAgents();
-        if (cfg_.real_mode && !rb_one_shot_traj_) {
-            initRealProjectionLogs();
-        }
         visited_slots_.assign(map_->slots().size(), false);
         one_shot_done_.assign(agents_.size(), false);
         if (stress_quiet_) {
@@ -279,74 +277,10 @@ private:
     };
 
     void initCoordLog() {
-        if (!coord_log_enabled_) return;
-        std::error_code error;
-        std::filesystem::create_directories(debug_log_dir_, error);
-        if (error) {
-            ROS_WARN("[multi_patrol] failed to create debug log directory %s: %s",
-                     debug_log_dir_.c_str(), error.message().c_str());
-            return;
-        }
-        const std::filesystem::path log_path(coord_log_file_);
-        if (log_path.has_parent_path()) {
-            std::filesystem::create_directories(log_path.parent_path(), error);
-        }
-        if (error) {
-            ROS_WARN("[multi_patrol] failed to create log directory %s: %s",
-                     log_path.parent_path().string().c_str(),
-                     error.message().c_str());
-            return;
-        }
-        coord_log_.open(coord_log_file_, std::ios::out | std::ios::trunc);
-        if (!coord_log_) {
-            ROS_WARN("[multi_patrol] failed to open coordination log: %s",
-                     coord_log_file_.c_str());
-            return;
-        }
-        coord_log_ << "[multi_patrol] coordination log started\n";
-        coord_log_ << "vehicle_count=" << cfg_.vehicle_count
-                   << " one_shot=" << (one_shot_ ? 1 : 0)
-                   << " use_a1_cycle=" << (cfg_.use_a1_cycle ? 1 : 0)
-                   << "\n";
-        coord_log_.flush();
-        ROS_WARN("[multi_patrol] coordination log: %s",
-                 coord_log_file_.c_str());
-    }
-
-    void initRealProjectionLogs() {
-        std::error_code error;
-        std::filesystem::create_directories(debug_log_dir_, error);
-        if (error) {
-            ROS_WARN("[real_projection] failed to create log directory %s: %s",
-                     debug_log_dir_.c_str(), error.message().c_str());
-            return;
-        }
-        real_projection_logs_.resize(agents_.size());
-        for (size_t i = 0; i < agents_.size(); ++i) {
-            const std::string path =
-                debug_log_dir_ + "/real_projection_V" +
-                std::to_string(agents_[i].id) + ".csv";
-            real_projection_logs_[i].open(
-                path, std::ios::out | std::ios::trunc);
-            if (!real_projection_logs_[i]) {
-                ROS_WARN("[real_projection] failed to open %s", path.c_str());
-                continue;
-            }
-            real_projection_logs_[i]
-                << "wall_time,sim_time,vehicle_id,real_x,real_y,real_yaw,"
-                << "path_gen,mode,mission_phase,leg_target,previous_path_s,"
-                << "projected_path_s,delta_s,projected_x,projected_y,"
-                << "projected_yaw,projection_distance,"
-                << "yaw_error_to_projected_path,wp_type,current_speed,action,"
-                << "real_plan_id,search_s_min,search_s_max,"
-                << "raw_single_step_speed,window_speed,speed_window_duration,"
-                << "speed_window_samples,best_xy_distance,"
-                << "selected_heading_error,selected_continuity_error,"
-                << "projection_candidate_count\n";
-            real_projection_logs_[i].flush();
-            ROS_WARN("[real_projection] V%d log: %s", agents_[i].id,
-                     path.c_str());
-        }
+        diagnostics_ = std::make_unique<forklift_planner::diagnostics::DiagnosticLogger>(
+            debug_log_dir_, coord_log_file_, coord_log_enabled_);
+        diagnostics_->initialize(cfg_.vehicle_count, cfg_.random_seed, one_shot_,
+                                 cfg_.use_a1_cycle);
     }
 
     void logRealProjectionSample(size_t i, double previous_path_s,
@@ -357,48 +291,11 @@ private:
                                      ArcLengthSpeedResult& speed,
                                  const forklift_planner::multi_vehicle::
                                      RealProjectionResult& projection) {
-        if (i >= agents_.size() || i >= real_projection_logs_.size() ||
-            !real_projection_logs_[i] || !real_pose_ok_[i]) {
-            return;
-        }
-        const VehicleAgent& v = agents_[i];
-        const double nan = std::numeric_limits<double>::quiet_NaN();
-        RoughWp projected{nan, nan, nan, WpType::FORWARD};
-        std::string wp_type = "NONE";
-        if (!v.track.empty()) {
-            const double s = std::max(
-                0.0, std::min(projected_path_s, v.track.length()));
-            projected = v.track.poseAtS(s);
-            wp_type = v.track.typeAtS(s) == WpType::REVERSE
-                ? "REVERSE" : "FORWARD";
-        }
-        const double dx = projected.x - real_x_[i];
-        const double dy = projected.y - real_y_[i];
-        const double projection_distance = std::hypot(dx, dy);
-        const double yaw_error = std::atan2(
-            std::sin(real_yaw_[i] - projected.theta),
-            std::cos(real_yaw_[i] - projected.theta));
-        std::ofstream& log = real_projection_logs_[i];
-        log << std::setprecision(15) << ros::Time::now().toSec() << ","
-            << sim_time_ << "," << v.id << "," << real_x_[i] << ","
-            << real_y_[i] << "," << real_yaw_[i] << "," << v.path_gen
-            << "," << static_cast<int>(v.mode) << ","
-            << static_cast<int>(v.mission_phase) << ","
-            << static_cast<int>(v.leg_target) << "," << previous_path_s
-            << "," << projected_path_s << ","
-            << (projected_path_s - previous_path_s) << "," << projected.x
-            << "," << projected.y << "," << projected.theta << ","
-            << projection_distance << "," << yaw_error << "," << wp_type
-            << "," << v.current_speed << "," << actionName(v.action) << ","
-            << static_cast<unsigned long long>(sim_plan_id_) << ","
-            << search_s_min << "," << search_s_max << ","
-            << speed.raw_single_step_speed << "," << speed.window_speed << ","
-            << speed.window_duration << "," << speed.window_samples << ","
-            << projection.best_xy_distance << ","
-            << projection.selected_heading_error << ","
-            << projection.selected_continuity_error << ","
-            << projection.candidate_count << "\n";
-        log.flush();
+        if (i >= agents_.size() || !real_pose_ok_[i] || !diagnostics_) return;
+        diagnostics_->realProjection(
+            agents_[i], real_x_[i], real_y_[i], real_yaw_[i], previous_path_s,
+            projected_path_s, search_s_min, search_s_max, speed, projection,
+            ros::Time::now().toSec());
     }
 
     void publishTrajectoryWithPathGen(
@@ -419,25 +316,28 @@ private:
                               const std::string& source,
                               uint64_t plan_id, int frame_id,
                               int rollout_step) const {
-        char prefix[160];
-        std::snprintf(prefix, sizeof(prefix),
-                      "[SOURCE=%s] [plan=%llu] [frame=%d] "
-                      "[rollout_step=%d] ",
-                      source.c_str(),
-                      static_cast<unsigned long long>(plan_id), frame_id,
-                      rollout_step);
-        return std::string(prefix) + line;
+        if (!diagnostics_) return line;
+        auto context = diagnostics_->context();
+        context.source = source;
+        context.plan_id = plan_id;
+        context.frame_id = frame_id;
+        context.rollout_step = rollout_step;
+        return diagnostics_->contextualize(line, context);
     }
 
     void coordLogWithContext(const std::string& line,
                              const std::string& source,
                              uint64_t plan_id, int frame_id,
                              int rollout_step) {
-        if (!coord_log_ || coord_log_suppressed_) return;
-        coord_log_ << contextualLog(line, source, plan_id, frame_id,
-                                    rollout_step)
-                   << "\n";
-        coord_log_.flush();
+        if (!diagnostics_) return;
+        auto context = diagnostics_->context();
+        context.source = source;
+        context.plan_id = plan_id;
+        context.frame_id = frame_id;
+        context.rollout_step = rollout_step;
+        context.tick = tick_count_;
+        context.sim_time = sim_time_;
+        diagnostics_->coordination(line, context);
     }
 
     void setCoordLogContext(const std::string& source, uint64_t plan_id,
@@ -446,6 +346,16 @@ private:
         coord_log_plan_id_ = plan_id;
         coord_log_frame_id_ = frame_id;
         coord_log_rollout_step_ = rollout_step;
+        if (diagnostics_) {
+            forklift_planner::diagnostics::LogContext context;
+            context.source = source;
+            context.plan_id = plan_id;
+            context.frame_id = frame_id;
+            context.rollout_step = rollout_step;
+            context.tick = tick_count_;
+            context.sim_time = sim_time_;
+            diagnostics_->setContext(context);
+        }
         if (rule_engine_) {
             rule_engine_->setDebugLogContext(source, plan_id, frame_id,
                                              rollout_step);
@@ -453,43 +363,19 @@ private:
     }
 
     std::string readableSimTime(double seconds) const {
-        const double nonnegative = std::max(0.0, seconds);
-        const long long tenths =
-            static_cast<long long>(std::llround(nonnegative * 10.0));
-        const long long minutes = tenths / 600;
-        const double remainder = static_cast<double>(tenths % 600) / 10.0;
-        char text[80];
-        std::snprintf(text, sizeof(text), "%lldmin%.1fs", minutes, remainder);
-        return text;
+        return forklift_planner::diagnostics::readableSimTime(seconds);
     }
 
     const char* modeName(VehicleMode mode) const {
-        switch (mode) {
-            case VehicleMode::NEED_TASK: return "NEED_TASK";
-            case VehicleMode::ACTIVE: return "ACTIVE";
-            case VehicleMode::DWELL: return "DWELL";
-        }
-        return "UNKNOWN";
+        return forklift_planner::diagnostics::modeName(mode);
     }
 
     const char* missionPhaseName(MissionPhase phase) const {
-        switch (phase) {
-            case MissionPhase::DIRECT_TO_B: return "DIRECT_TO_B";
-            case MissionPhase::TO_A1: return "TO_A1";
-            case MissionPhase::PICKUP_DWELL: return "PICKUP_DWELL";
-            case MissionPhase::WAIT_DROPOFF_TASK: return "WAIT_DROPOFF_TASK";
-            case MissionPhase::TO_B: return "TO_B";
-            case MissionPhase::UNLOAD_DWELL: return "UNLOAD_DWELL";
-        }
-        return "UNKNOWN";
+        return forklift_planner::diagnostics::missionPhaseName(phase);
     }
 
     const char* legTargetName(LegTargetKind target) const {
-        switch (target) {
-            case LegTargetKind::B_SLOT: return "B_SLOT";
-            case LegTargetKind::A1: return "A1";
-        }
-        return "UNKNOWN";
+        return forklift_planner::diagnostics::legTargetName(target);
     }
 
     void initAgents() {
@@ -848,12 +734,12 @@ private:
         //将沙盒预测造成所有的改动恢复
         agents_ = sa;
         visited_slots_ = sv;
-        coord_log_suppressed_ = true;
+        if (diagnostics_) diagnostics_->setSuppressed(true);
         rule_engine_->restore(sr);
         rule_engine_->restoreLiveA1IntrusionCorrections(
             live_a1_intrusion_corrections);
         allocator_->restore(sl);
-        coord_log_suppressed_ = false;
+        if (diagnostics_) diagnostics_->setSuppressed(false);
         sim_mode_ = prev;
         setCoordLogContext(previous_log_source, previous_log_plan,
                            previous_log_frame, previous_rollout_step);
@@ -992,6 +878,15 @@ private:
                  static_cast<unsigned long long>(sim_plan_id_),
                  sim_time_, rb_horizon_, frame_count,
                  rb_horizon_refresh_);
+        if (diagnostics_) {
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(3)
+                 << "[PLAN_REFRESH] mode=" << (install_simulation_plan ? "SIM" : "REAL")
+                 << " plan=" << sim_plan_id_ << " start=" << sim_time_
+                 << " horizon=" << rb_horizon_ << " frames=" << frame_count
+                 << " commit_frames=" << rb_horizon_refresh_;
+            diagnostics_->rolling(line.str());
+        }
         for (const VehicleAgent& v : agents_) {
             if (v.mode != VehicleMode::DWELL ||
                 v.mission_phase != MissionPhase::PICKUP_DWELL ||
@@ -1831,6 +1726,11 @@ private:
                     ROS_ERROR("[multi_patrol][A1 EXIT PREPARE FAILED] V%d "
                               "has no reservable A1->B task at pickup start",
                               v.id);
+                    if (diagnostics_) {
+                        diagnostics_->event("[PATH_FAILURE] vehicle=V" +
+                                            std::to_string(v.id) +
+                                            " leg=A1_TO_B reason=no_reservable_task");
+                    }
                 }
             }
             return;
@@ -2081,11 +1981,18 @@ private:
                         }
                     }
                     if (!sim_mode_) {  // 前瞻仿真中只要其物理挡停效果,不计数/不打日志
+                        const bool first_guard = first_guard_tick_ == 0;
                         ++hard_guard_events_;
                         hard_guard_pairs_.insert(
                             {std::min(agents_[i].id, agents_[j].id),
                              std::max(agents_[i].id, agents_[j].id)});
                         if (first_guard_tick_ == 0) first_guard_tick_ = tick_count_;
+                        if (first_guard && diagnostics_) {
+                            diagnostics_->event(
+                                "[HARD_GUARD] pair=V" + std::to_string(agents_[i].id) +
+                                "/V" + std::to_string(agents_[j].id) +
+                                " reason=planned_body_overlap minimal_stop=1");
+                        }
                         ROS_ERROR_THROTTLE(
                             1.0,
                             "[multi_patrol] hard collision guard: V%d vs V%d; "
@@ -2207,6 +2114,7 @@ private:
                 buf, "REAL", coord_log_plan_id_, coord_log_frame_id_, -1);
             ROS_INFO("%s", console_line.c_str());
             coordLog(buf);
+            if (diagnostics_) diagnostics_->vehicleState(v);
 
             last_logged_mode_[i] = v.mode;
             last_logged_action_[i] = v.action;
@@ -2462,6 +2370,10 @@ private:
                     1.0,
                     "[real_plan] no frozen rolling decision; using one "
                     "current-step decision");
+                if (diagnostics_) {
+                    diagnostics_->event(
+                        "[ROLLING_PLAN_FAILURE] mode=REAL fallback=current_step_decision");
+                }
                 rule_engine_->decide(agents_, dt);
                 marker_pub_->setRollingDecision(
                     rule_engine_->lastRollingDynamicDecision());
@@ -2513,6 +2425,10 @@ private:
                         1.0,
                         "[sim_plan] no executable frame; using one safe "
                         "current-step decision");
+                    if (diagnostics_) {
+                        diagnostics_->event(
+                            "[ROLLING_PLAN_FAILURE] mode=SIM fallback=current_step_decision");
+                    }
                     rule_engine_->decide(agents_, dt);
                     marker_pub_->setRollingDecision(
                         rule_engine_->lastRollingDynamicDecision());
@@ -3082,20 +2998,17 @@ private:
     std::string debug_log_dir_;
     std::string coord_log_file_;
     bool coord_log_enabled_ = true;
+    std::unique_ptr<forklift_planner::diagnostics::DiagnosticLogger> diagnostics_;
     bool stress_watchdog_enabled_ = false;
     bool stress_quiet_ = false;
     double stress_progress_timeout_ = 120.0;
     std::string stress_result_file_;
     std::string stress_failure_file_;
-    std::string onset_log_file_;
     std::string realbridge_positions_file_;
-    std::ofstream coord_log_;
-    std::vector<std::ofstream> real_projection_logs_;
     std::string coord_log_source_ = "REAL";
     uint64_t coord_log_plan_id_ = 0;
     int coord_log_frame_id_ = -1;
     int coord_log_rollout_step_ = -1;
-    bool coord_log_suppressed_ = false;
     uint64_t rollout_log_id_ = 0;
 
     // ── 实车模式(real_mode)I/O ──────────────────────────────────────────────
@@ -3288,20 +3201,10 @@ public:
 
     // 一辆车的紧凑状态行(诊断用,信息尽量全)。
     std::string vehLine(const VehicleAgent& v) const {
-        char buf[256];
-        snprintf(buf, sizeof(buf),
-                 "  V%d mode=%d act=%d reason=%s blk=%d task=%d slot=%d->%d "
-                 "s=%.3f/%.3f rem=%.3f spd=%.3f wait=%.1f gen=%d",
-                 v.id, (int)v.mode, (int)v.action, v.reason.c_str(), v.blocker_id,
-                 v.task_count, v.current_slot,
-                 v.target_slot, v.path_s, v.track.length(), v.remainingS(),
-                 v.current_speed, v.wait_time, v.path_gen);
-        return buf;
+        return forklift_planner::diagnostics::formatVehicleCompact(v);
     }
     std::string fleetSnapshot() const {
-        std::string s = "tick=" + std::to_string(tick_count_);
-        for (const VehicleAgent& v : agents_) s += "\n" + vehLine(v);
-        return s;
+        return forklift_planner::diagnostics::formatFleetSnapshot(agents_, tick_count_);
     }
     VehicleAgent* agentById(int id) {
         for (VehicleAgent& v : agents_)
@@ -3326,161 +3229,50 @@ public:
 
     // 一次性全面 dump 首个持续死锁簇:每个成员的路径要点 + 簇内两两冲突几何(same_dir 决定
     // 对向/同向 → 判定单向环流能否治)。只打一次,只读。用于源头修复的精确诊断。
-    // 持久 onset 文件:把关键现场同时写到统一的 debug_log_dir。
+    // 关键异常统一交给 diagnostics 写入 exception_events.log。
     // 长测排错专用——只在出问题那一刻写,故文件小、不刷屏。
     void onsetLog(const std::string& s) {
         const std::string console_line = contextualLog(
             s, "REAL", coord_log_plan_id_, coord_log_frame_id_, -1);
         ROS_ERROR("%s", console_line.c_str());
-        coordLog(s);
-        std::ofstream f(onset_log_file_, std::ios::app);
-        if (f) f << s << "\n";
+        if (diagnostics_) diagnostics_->event(s);
     }
     // 把碰撞/楔死前的全队历史(含 gen=path_gen:刚被 recovery 重规划过则 gen 跳变=churn 撞)
     // 写进持久文件,供事后根因。
     void onsetDumpHist(const std::string& header, const std::deque<std::string>& hist) {
-        std::ofstream f(onset_log_file_, std::ios::app);
-        if (!f) return;
-        f << "\n========== " << header << " ==========\n";
-        coordLog("========== " + header + " ==========");
-        for (const std::string& snap : hist) f << snap << "\n";
-        for (const std::string& snap : hist) coordLog(snap);
-        f.flush();
+        if (diagnostics_) diagnostics_->eventHistory(header, hist);
     }
 
     std::string stressSnapshot(bool include_geometry) const {
-        std::ostringstream out;
-        out << std::fixed << std::setprecision(3)
-            << "tick=" << tick_count_ << " sim_t=" << sim_time_;
-        for (const VehicleAgent& v : agents_) {
-            out << "\n  V" << v.id
-                << " mode=" << modeName(v.mode)
-                << " phase=" << missionPhaseName(v.mission_phase)
-                << " gen=" << v.path_gen
-                << " task=" << v.task_count
-                << " slot=" << v.current_slot << "->" << v.target_slot
-                << " s=" << v.path_s
-                << " speed=" << v.current_speed
-                << " action=" << actionName(v.action)
-                << " requested=" << actionName(v.requested_action)
-                << " blocker=" << v.blocker_id
-                << " wait=" << v.wait_time
-                << " reason=" << v.reason;
-        }
-
-        const auto state = rule_engine_->snapshot();
-        for (const auto& item : state.reservations) {
-            const auto& key = item.first;
-            const auto& r = item.second;
-            out << "\n  reservation=V" << key.first << "/V" << key.second
-                << " owner=V" << r.owner_id
-                << " gen=" << r.gen_lo << "/" << r.gen_hi
-                << " lo=[" << r.enter_lo << "," << r.exit_lo << "]"
-                << " hi=[" << r.enter_hi << "," << r.exit_hi << "]"
-                << " raw=" << r.raw_zone_index;
-        }
-        for (const auto& item : state.a1.departure_clusters) {
-            const auto& c = item.second;
-            out << "\n  departure_cluster=V" << item.first.first << "/V"
-                << item.first.second << " owner=V" << c.owner_id
-                << " owner_gen=" << c.owner_path_gen
-                << " other=V" << c.other_id
-                << " other_gen=" << c.other_path_gen
-                << " active=" << (c.active ? 1 : 0)
-                << " intervals=" << c.intervals.size()
-                << " stop_boundary=" << c.waiter_stop_boundary_s
-                << " stop_s=" << c.waiter_stop_s
-                << " release=" << c.owner_release_exit_s << "/"
-                << c.other_release_exit_s;
-        }
-        const auto& future = rule_engine_->futureA1Commitment();
-        out << "\n  future_a1=";
-        if (future.valid()) {
-            out << "owner=V" << future.owner_id
-                << " gen=" << future.owner_path_gen
-                << " arrival=" << future.predicted_a1_arrival_time
-                << " to_b=" << future.predicted_to_b_time;
-        } else {
-            out << "none";
-        }
-
-        if (include_geometry) {
-            const auto markers = rule_engine_->conflictResourceMarkers(agents_);
-            for (const auto& m : markers) {
-                out << "\n  zone="
-                    << (m.kind == forklift_planner::multi_vehicle::
-                            ConflictMarkerKind::CONFLICT_RESERVATION
-                            ? "RESERVED" : "POTENTIAL")
-                    << " pair=V" << m.vehicle_a << "/V" << m.vehicle_b
-                    << " raw=" << m.raw_zone_index
-                    << " active=" << m.active_zone_index
-                    << " a=[" << m.s_a_enter << "," << m.s_a_exit << "]"
-                    << " b=[" << m.s_b_enter << "," << m.s_b_exit << "]"
-                    << " holder=" << m.holder_id
-                    << " waiter=" << m.waiter_id;
-            }
-        }
-        return out.str();
-    }
-
-    void ensureParentDirectory(const std::string& file) const {
-        if (file.empty()) return;
-        const std::filesystem::path parent =
-            std::filesystem::path(file).parent_path();
-        if (parent.empty()) return;
-        std::error_code error;
-        std::filesystem::create_directories(parent, error);
-        if (error) {
-            ROS_ERROR("[stress] cannot create result directory %s: %s",
-                      parent.string().c_str(), error.message().c_str());
-        }
+        return forklift_planner::diagnostics::formatStressSnapshot(
+            agents_, *rule_engine_, tick_count_, sim_time_, include_geometry);
     }
 
     void writeStressResult(const std::string& status,
                            const std::string& failure_type,
                            const std::vector<double>& max_wait,
                            unsigned long long wedge_episodes) const {
-        if (stress_result_file_.empty()) return;
-        ensureParentDirectory(stress_result_file_);
-        std::ofstream out(stress_result_file_, std::ios::trunc);
-        if (!out) {
+        if (!diagnostics_) return;
+        if (!stress_result_file_.empty() && !diagnostics_->writeStressResult(
+                stress_result_file_, status, failure_type, cfg_.random_seed, tick_count_,
+                sim_time_, hard_guard_events_, wedge_episodes, agents_, max_wait)) {
             ROS_ERROR("[stress] cannot write result file %s",
                       stress_result_file_.c_str());
-            return;
         }
-        out << "status=" << status << "\n"
-            << "failure_type=" << (failure_type.empty() ? "none" : failure_type)
-            << "\nseed=" << cfg_.random_seed
-            << "\nvehicle_count=" << agents_.size()
-            << "\nticks=" << tick_count_
-            << "\nsim_time_s=" << std::fixed << std::setprecision(3) << sim_time_
-            << "\nhard_guard_events=" << hard_guard_events_
-            << "\nwedge_episodes=" << wedge_episodes << "\n";
-        for (size_t i = 0; i < agents_.size(); ++i) {
-            out << "V" << agents_[i].id << "_tasks=" << agents_[i].task_count
-                << "\nV" << agents_[i].id << "_max_wait_s="
-                << (i < max_wait.size() ? max_wait[i] : 0.0) << "\n";
-        }
+        diagnostics_->runSummary(status, failure_type, tick_count_, sim_time_,
+                                 hard_guard_events_, wedge_episodes, agents_, max_wait);
     }
 
     void writeStressFailure(const std::string& failure_type,
                             const std::deque<std::string>& ring) const {
-        if (stress_failure_file_.empty()) return;
-        ensureParentDirectory(stress_failure_file_);
-        std::ofstream out(stress_failure_file_, std::ios::trunc);
-        if (!out) {
+        if (stress_failure_file_.empty() || !diagnostics_) return;
+        if (!diagnostics_->writeStressFailure(
+                stress_failure_file_, failure_type, cfg_.random_seed,
+                stress_progress_timeout_, ring, stressSnapshot(true))) {
             ROS_ERROR("[stress] cannot write failure file %s",
                       stress_failure_file_.c_str());
-            return;
         }
-        out << "failure_type=" << failure_type
-            << "\nseed=" << cfg_.random_seed
-            << "\nring_seconds=120"
-            << "\nprogress_timeout_s=" << stress_progress_timeout_
-            << "\n\n===== PRE-FAILURE RING =====\n";
-        for (const std::string& frame : ring) out << frame << "\n---\n";
-        out << "===== FAILURE GEOMETRY =====\n"
-            << stressSnapshot(true) << "\n";
+        diagnostics_->event("[STRESS_FAILURE] type=" + failure_type);
     }
 
     // 找「所有」持续死锁环的成员并集:对每辆车跟 blocker 链,若绕回自身则其环成员全部入集。
@@ -3488,9 +3280,7 @@ public:
     // dump 全队历史+碰撞对几何,并对其后 kPost 拍逐拍详打;结尾 dump 永久楔死现场。
     bool runBatch(unsigned long long ticks) {
         const double dt = 1.0 / pp_.update_rate;
-        if (!stress_watchdog_enabled_) {
-            std::ofstream(onset_log_file_, std::ios::trunc);
-        }
+        if (!stress_watchdog_enabled_ && diagnostics_) diagnostics_->truncateEventLog();
         const unsigned long long progress = ticks / 10 ? ticks / 10 : 1;
         constexpr size_t kHist = 80;    // 碰撞前回看的拍数
         constexpr unsigned long long kPost = 150;  // 碰撞后逐拍详打的拍数
@@ -3536,6 +3326,7 @@ public:
         for (unsigned long long k = 0; k < ticks && ros::ok(); ++k) {
             ++tick_count_;
             sim_time_ += dt;
+            setCoordLogContext("REAL", sim_plan_id_, coord_log_frame_id_, -1);
             updateDwellAndTasks(dt);
             if (simulationPlanNeedsRefresh()) {
                 std::vector<sandbox_msgs::Trajectory> trajs;
@@ -3573,6 +3364,9 @@ public:
             }
             const unsigned long long guards_before = hard_guard_events_;
             advanceVehicles(dt);
+            if (diagnostics_) {
+                for (const VehicleAgent& vehicle : agents_) diagnostics_->vehicleState(vehicle);
+            }
             diagnoseA1ExitIntrusions();
             recordDebugTimelineTick();
             const bool new_collision = hard_guard_events_ > guards_before;
@@ -3877,6 +3671,12 @@ public:
         ROS_WARN("[BATCH_RUNTIME] requested_ticks=%llu completed_ticks=%llu "
                  "real_sim_t=%.1f dt=%.3f wedge_episodes=%llu",
                  ticks, completed_ticks, sim_time_, dt, wedge_episodes);
+        if (diagnostics_) {
+            diagnostics_->runSummary(hard_guard_events_ > 0 ? "FAIL" : "PASS",
+                                     hard_guard_events_ > 0 ? "HARD_GUARD" : "",
+                                     tick_count_, sim_time_, hard_guard_events_,
+                                     wedge_episodes, agents_, max_wait_by_vehicle);
+        }
         return hard_guard_events_ > 0;
     }
     bool batchMode() const { return cfg_batch_ticks_ > 0; }
