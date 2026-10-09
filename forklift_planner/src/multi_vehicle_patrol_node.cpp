@@ -77,7 +77,7 @@ public:
                                default_log_dir);
         nh_.param<std::string>("coord_log_file", coord_log_file_,
                                debug_log_dir_ +
-                                   "/multi_vehicle_coordination.log");
+                                   "/simulation_diagnosis.log");
         nh_.param("coord_log_enabled", coord_log_enabled_, true);
         nh_.param("stress_watchdog_enabled", stress_watchdog_enabled_, false);
         nh_.param("stress_quiet", stress_quiet_, false);
@@ -151,6 +151,7 @@ public:
         dumpResourceSpans();  // Phase 1.3 验证:打印各车路径经过的资源占用区间
 
         if (cfg_.real_mode) {
+            if (diagnostics_) diagnostics_->summary("runtime_mode=REAL");
             setupRealIO();  // 实车模式:建 /object 订阅 + /traj_i//coord_speed_i 发布,打印摆位
             timer_ = nh_.createTimer(ros::Duration(1.0 / pp_.update_rate),
                                      &MultiVehiclePatrolNode::tick, this);
@@ -170,6 +171,7 @@ public:
             batch_ticks = static_cast<int>(batch_minutes * 60.0 * pp_.update_rate);
         cfg_batch_ticks_ = batch_ticks > 0 ? static_cast<unsigned long long>(batch_ticks) : 0;
         if (cfg_batch_ticks_ > 0) {
+            if (diagnostics_) diagnostics_->summary("runtime_mode=BATCH");
             ROS_WARN("[batch] 无头快速回归模式:将狂跑 %llu 拍(≈%.0f 仿真分钟),"
                      "不发 marker、不按实时。", cfg_batch_ticks_,
                      cfg_batch_ticks_ / (pp_.update_rate * 60.0));
@@ -180,6 +182,7 @@ public:
 
         timer_ = nh_.createTimer(ros::Duration(1.0 / pp_.update_rate),
                                  &MultiVehiclePatrolNode::tick, this);
+        if (diagnostics_) diagnostics_->summary("runtime_mode=RVIZ_SIM");
 
         ROS_INFO("[multi_patrol] started RViz timestamp simulation: vehicles=%d "
                  "seed=%d speed=%.2f max=%.2f dwell=%.2f horizon=%.2f step=%.2f "
@@ -280,8 +283,22 @@ private:
     void initCoordLog() {
         diagnostics_ = std::make_unique<forklift_planner::diagnostics::DiagnosticLogger>(
             debug_log_dir_, coord_log_file_, coord_log_enabled_);
-        diagnostics_->initialize(cfg_.vehicle_count, cfg_.random_seed, one_shot_,
-                                 cfg_.use_a1_cycle);
+        diagnostics_->setRolloutCommitFrames(rb_horizon_refresh_);
+        if (!diagnostics_->initialize(cfg_.vehicle_count, cfg_.random_seed, one_shot_,
+                                      cfg_.use_a1_cycle)) {
+            ROS_ERROR("[diagnostics] unified diagnosis log is unavailable");
+        } else {
+            std::ostringstream config;
+            config << std::fixed << std::setprecision(3)
+                   << "update_rate=" << pp_.update_rate
+                   << " simulation_speed=" << pp_.simulation_speed
+                   << " rolling_horizon=" << rb_horizon_
+                   << " rolling_refresh_period=" << rb_horizon_refresh_period_
+                   << " prediction_horizon=" << cfg_.prediction_horizon
+                   << " prediction_step=" << cfg_.prediction_step
+                   << " deadlock_confirm_time=" << cfg_.deadlock_confirm_time;
+            diagnostics_->summary(config.str());
+        }
     }
 
     void logRealProjectionSample(size_t i, double previous_path_s,
@@ -544,7 +561,7 @@ private:
             const auto spans = resource_map_->spansForPath(v.track);
             for (const auto& sp : spans) {
                 const auto* r = resource_map_->byId(sp.resource_id);
-                ROS_INFO("[res_map] V%d uses %s s=[%.3f,%.3f] (len=%.3f)",
+                ROS_DEBUG("[res_map] V%d uses %s s=[%.3f,%.3f] (len=%.3f)",
                          v.id, r ? r->name.c_str() : "?",
                          sp.s_enter, sp.s_exit, v.track.length());
             }
@@ -559,8 +576,6 @@ private:
         last_logged_blocker_.assign(n, -999);
         last_logged_task_count_.assign(n, -1);
         last_logged_mission_phase_.assign(n, MissionPhase::DIRECT_TO_B);
-        last_status_log_time_.assign(n, ros::Time(0));
-        last_diag_time_.assign(n, ros::Time(0));
     }
 
     double limitedSpeed(double current, double desired, double dt) const {
@@ -773,6 +788,38 @@ private:
             recovery.retreat_distance);
     }
 
+    std::string describeA1ExecutionState(
+        const forklift_planner::multi_vehicle::A1Coordinator::Snapshot& state) const {
+        std::ostringstream out;
+        const auto append_owner = [&](const char* name, const auto& owner) {
+            out << " " << name << "=";
+            if (owner.valid()) {
+                out << "V" << owner.owner_id << ":gen" << owner.owner_path_gen
+                    << ":eta" << std::fixed << std::setprecision(3)
+                    << owner.predicted_a1_arrival_time;
+            } else {
+                out << "none";
+            }
+        };
+        append_owner("future_owner", state.future_a1_commitment);
+        append_owner("reserved_owner", state.reserved_a1_commitment);
+        out << " reservation_reason=" << state.reservation_selection_reason;
+        for (const auto& entry : state.departure_clusters) {
+            const auto& cluster = entry.second;
+            out << " cluster=V" << entry.first.first << "/V"
+                << entry.first.second << ":ownerV" << cluster.owner_id
+                << ":owner_gen" << cluster.owner_path_gen
+                << ":waiterV" << cluster.other_id
+                << ":waiter_gen" << cluster.other_path_gen
+                << ":active" << (cluster.active ? 1 : 0)
+                << ":boundary" << cluster.waiter_stop_boundary_s
+                << ":stop" << cluster.waiter_stop_s
+                << ":release" << cluster.owner_release_exit_s << "/"
+                << cluster.other_release_exit_s;
+        }
+        return out.str();
+    }
+
     void rememberRealPlanIdentity() {
         real_plan_agents_ = captureRealPlanAgentIdentity();
         real_plan_departure_transactions_ =
@@ -873,7 +920,7 @@ private:
                 coordLog(line.str());
             }
         }
-        ROS_INFO("[%s_plan] built plan=%llu start=%.2f horizon=%.2f "
+        ROS_DEBUG("[%s_plan] built plan=%llu start=%.2f horizon=%.2f "
                  "frames=%zu commit_frames=%d",
                  install_simulation_plan ? "sim" : "real",
                  static_cast<unsigned long long>(sim_plan_id_),
@@ -894,7 +941,7 @@ private:
                 !v.pending_dropoff_valid) {
                 continue;
             }
-            ROS_WARN("[multi_patrol][A1 EXIT HORIZON] V%d target=B%d "
+            ROS_DEBUG("[multi_patrol][A1 EXIT HORIZON] V%d target=B%d "
                      "dwell_part=%.2fs departure_window=%.2fs "
                      "total_horizon=%.2fs",
                      v.id, v.pending_dropoff_slot,
@@ -953,11 +1000,34 @@ private:
                            static_cast<int>(sim_plan_cursor_), -1);
         const SimPlanFrame& frame = sim_plan_frames_[sim_plan_cursor_];
         const auto before_rule_state = rule_engine_->snapshot();
+        const std::string a1_execution_state =
+            describeA1ExecutionState(frame.rule_state.a1);
+        if (a1_execution_state != last_executed_a1_state_) {
+            coordLogWithContext("[A1_STATE_COMMIT]" + a1_execution_state,
+                                "REAL", sim_plan_id_,
+                                static_cast<int>(sim_plan_cursor_), -1);
+            last_executed_a1_state_ = a1_execution_state;
+        }
         for (const auto& incoming : frame.rule_state.reservations) {
             const auto before =
                 before_rule_state.reservations.find(incoming.first);
             if (before == before_rule_state.reservations.end()) {
                 ++executed_rolling_metrics_.reservation_creates;
+                std::ostringstream line;
+                line << std::fixed << std::setprecision(3)
+                     << "[RESERVATION_COMMIT] event=CREATE pair=V"
+                     << incoming.first.first << "/V" << incoming.first.second
+                     << " owner=V" << incoming.second.owner_id
+                     << " gen=" << incoming.second.gen_lo << "/"
+                     << incoming.second.gen_hi << " lo=["
+                     << incoming.second.enter_lo << ","
+                     << incoming.second.exit_lo << "] hi=["
+                     << incoming.second.enter_hi << ","
+                     << incoming.second.exit_hi << "] raw_zone="
+                     << incoming.second.raw_zone_index << " reason="
+                     << incoming.second.create_reason;
+                coordLogWithContext(line.str(), "REAL", sim_plan_id_,
+                                    static_cast<int>(sim_plan_cursor_), -1);
                 const std::string& reason = incoming.second.create_reason;
                 if (reason == "ordinary_dynamic") {
                     ++executed_rolling_metrics_.
@@ -980,14 +1050,55 @@ private:
                 }
             } else {
                 ++executed_rolling_metrics_.existing_reservation_holds;
-                if (before->second.owner_id != incoming.second.owner_id) {
+                const bool owner_changed =
+                    before->second.owner_id != incoming.second.owner_id;
+                if (owner_changed) {
                     ++executed_rolling_metrics_.reservation_updates;
+                }
+                const bool reservation_changed = owner_changed ||
+                    before->second.gen_lo != incoming.second.gen_lo ||
+                    before->second.gen_hi != incoming.second.gen_hi ||
+                    before->second.enter_lo != incoming.second.enter_lo ||
+                    before->second.exit_lo != incoming.second.exit_lo ||
+                    before->second.enter_hi != incoming.second.enter_hi ||
+                    before->second.exit_hi != incoming.second.exit_hi ||
+                    before->second.raw_zone_index != incoming.second.raw_zone_index ||
+                    before->second.create_reason != incoming.second.create_reason;
+                if (reservation_changed) {
+                    std::ostringstream line;
+                    line << std::fixed << std::setprecision(3)
+                         << "[RESERVATION_COMMIT] event=UPDATE pair=V"
+                         << incoming.first.first << "/V" << incoming.first.second
+                         << " owner=V" << before->second.owner_id << "->V"
+                         << incoming.second.owner_id << " gen="
+                         << before->second.gen_lo << "/" << before->second.gen_hi
+                         << "->" << incoming.second.gen_lo << "/"
+                         << incoming.second.gen_hi << " lo=["
+                         << before->second.enter_lo << "," << before->second.exit_lo
+                         << "]->[" << incoming.second.enter_lo << ","
+                         << incoming.second.exit_lo << "] hi=["
+                         << before->second.enter_hi << "," << before->second.exit_hi
+                         << "]->[" << incoming.second.enter_hi << ","
+                         << incoming.second.exit_hi << "] raw_zone="
+                         << before->second.raw_zone_index << "->"
+                         << incoming.second.raw_zone_index << " reason="
+                         << before->second.create_reason << "->"
+                         << incoming.second.create_reason;
+                    coordLogWithContext(line.str(), "REAL", sim_plan_id_,
+                                        static_cast<int>(sim_plan_cursor_), -1);
                 }
             }
         }
         for (const auto& current : before_rule_state.reservations) {
             if (frame.rule_state.reservations.count(current.first) == 0) {
                 ++executed_rolling_metrics_.reservation_deletes;
+                std::ostringstream line;
+                line << "[RESERVATION_COMMIT] event=DELETE pair=V"
+                     << current.first.first << "/V" << current.first.second
+                     << " owner=V" << current.second.owner_id << " reason="
+                     << current.second.create_reason;
+                coordLogWithContext(line.str(), "REAL", sim_plan_id_,
+                                    static_cast<int>(sim_plan_cursor_), -1);
             }
         }
         rule_engine_->restore(frame.rule_state, false, true);
@@ -1984,15 +2095,28 @@ private:
                     if (!sim_mode_) {  // 前瞻仿真中只要其物理挡停效果,不计数/不打日志
                         const bool first_guard = first_guard_tick_ == 0;
                         ++hard_guard_events_;
-                        hard_guard_pairs_.insert(
+                        const bool new_guard_pair = hard_guard_pairs_.insert(
                             {std::min(agents_[i].id, agents_[j].id),
-                             std::max(agents_[i].id, agents_[j].id)});
+                             std::max(agents_[i].id, agents_[j].id)}).second;
                         if (first_guard_tick_ == 0) first_guard_tick_ = tick_count_;
-                        if (first_guard && diagnostics_) {
-                            diagnostics_->event(
-                                "[HARD_GUARD] pair=V" + std::to_string(agents_[i].id) +
-                                "/V" + std::to_string(agents_[j].id) +
-                                " reason=planned_body_overlap minimal_stop=1");
+                        if ((first_guard || new_guard_pair) && diagnostics_) {
+                            std::ostringstream evidence;
+                            evidence << "[HARD_GUARD] pair=V" << agents_[i].id
+                                     << "/V" << agents_[j].id
+                                     << " reason=planned_body_overlap minimal_stop=1"
+                                     << " pre_V" << agents_[i].id << "_action="
+                                     << actionName(agents_[i].action)
+                                     << " pre_V" << agents_[i].id << "_reason="
+                                     << agents_[i].reason
+                                     << " pre_V" << agents_[i].id << "_blocker=V"
+                                     << agents_[i].blocker_id
+                                     << " pre_V" << agents_[j].id << "_action="
+                                     << actionName(agents_[j].action)
+                                     << " pre_V" << agents_[j].id << "_reason="
+                                     << agents_[j].reason
+                                     << " pre_V" << agents_[j].id << "_blocker=V"
+                                     << agents_[j].blocker_id;
+                            diagnostics_->event(evidence.str());
                         }
                         ROS_ERROR_THROTTLE(
                             1.0,
@@ -2075,7 +2199,6 @@ private:
     }
 
     void logAgentStatus() {
-        const ros::Time now = ros::Time::now();
         for (size_t i = 0; i < agents_.size(); ++i) {
             const VehicleAgent& v = agents_[i];
             const bool changed =
@@ -2085,13 +2208,7 @@ private:
                 v.blocker_id != last_logged_blocker_[i] ||
                 v.task_count != last_logged_task_count_[i] ||
                 v.mission_phase != last_logged_mission_phase_[i];
-            const bool stopped_active =
-                v.mode == VehicleMode::ACTIVE && v.action == VehicleAction::STOP;
-            const bool periodic =
-                stopped_active &&
-                (last_status_log_time_[i].isZero() ||
-                 (now - last_status_log_time_[i]).toSec() >= 2.0);
-            if (!changed && !periodic) continue;
+            if (!changed) continue;
 
             const double length = v.track.empty() ? 0.0 : v.track.length();
             const double rem = v.track.empty() ? 0.0 : v.remainingS();
@@ -2113,7 +2230,7 @@ private:
                 v.dwell_remaining);
             const std::string console_line = contextualLog(
                 buf, "REAL", coord_log_plan_id_, coord_log_frame_id_, -1);
-            ROS_INFO("%s", console_line.c_str());
+            ROS_DEBUG("%s", console_line.c_str());
             coordLog(buf);
             if (diagnostics_) diagnostics_->vehicleState(v);
 
@@ -2123,56 +2240,6 @@ private:
             last_logged_blocker_[i] = v.blocker_id;
             last_logged_task_count_[i] = v.task_count;
             last_logged_mission_phase_[i] = v.mission_phase;
-            last_status_log_time_[i] = now;
-        }
-    }
-
-    // TEMPORARY: dump relative geometry of any vehicle stuck (speed~0, wait>5s)
-    // against its blocker, to classify head-on vs follower-misclassification vs
-    // priority circularity. Remove once the V6/V7 deadlock root cause is fixed.
-    void logStuckDiagnostics() {
-        const ros::Time now = ros::Time::now();
-        auto motionHeading = [](const VehicleAgent& v) {
-            constexpr double kPi = 3.14159265358979323846;
-            double h = v.track.poseAtS(v.path_s).theta;
-            if (v.track.typeAtS(v.path_s) == WpType::REVERSE) h += kPi;
-            return h;
-        };
-        for (size_t i = 0; i < agents_.size(); ++i) {
-            const VehicleAgent& v = agents_[i];
-            if (v.mode != VehicleMode::ACTIVE) continue;
-            if (v.current_speed > 1e-3 || v.wait_time < 5.0) continue;
-            if (!last_diag_time_[i].isZero() &&
-                (now - last_diag_time_[i]).toSec() < 3.0) continue;
-            last_diag_time_[i] = now;
-
-            const RoughWp pv = v.track.poseAtS(v.path_s);
-            const int wt = static_cast<int>(v.track.typeAtS(v.path_s));
-            const VehicleAgent* blocker = agentById_c(v.blocker_id);
-            if (blocker == nullptr) {
-                ROS_DEBUG("[DIAG stuck] V%d wait=%.1f reason=%s wp=%d "
-                         "pose=(%.3f,%.3f) blocker=none",
-                         v.id, v.wait_time, v.reason.c_str(), wt, pv.x, pv.y);
-                continue;
-            }
-            const VehicleAgent& b = *blocker;
-            const RoughWp pb = b.track.poseAtS(b.path_s);
-            const double hv = motionHeading(v);
-            const double hb = motionHeading(b);
-            const double dx = pb.x - pv.x;
-            const double dy = pb.y - pv.y;
-            const double dot = std::cos(hv) * std::cos(hb) +
-                               std::sin(hv) * std::sin(hb);
-            const double fwd = dx * std::cos(hv) + dy * std::sin(hv);
-            const double lat = std::abs(-dx * std::sin(hv) + dy * std::cos(hv));
-            const double gap = std::hypot(dx, dy) - mp_.vehicle_length;
-            ROS_DEBUG("[DIAG stuck] V%d wait=%.1f reason=%s wp=%d | "
-                     "blkV%d(act=%s spd=%.3f wp=%d) dot=%.2f fwd=%.3f lat=%.3f "
-                     "gap=%.3f vw=%.3f",
-                     v.id, v.wait_time, v.reason.c_str(), wt, b.id,
-                     actionName(b.action), b.current_speed,
-                     static_cast<int>(b.track.typeAtS(b.path_s)), dot, fwd, lat,
-                     gap, mp_.vehicle_width);
         }
     }
 
@@ -2350,7 +2417,10 @@ private:
         }
 
         logAgentStatus();
-        logStuckDiagnostics();
+        if (diagnostics_) {
+            diagnostics_->observeSimulationTick(agents_, *rule_engine_, tick_count_,
+                                                sim_time_);
+        }
     }
 
     void tick(const ros::TimerEvent&) {
@@ -2476,7 +2546,7 @@ private:
         const ros::WallTime callback_end = ros::WallTime::now();
         max_sim_callback_time_ = std::max(max_sim_callback_time_, (callback_end - callback_start).toSec());
         const double stats_wall_time = (callback_end - speed_stats_start_wall_).toSec();
-        if (stats_wall_time >= 5.0) {
+        if (stats_wall_time >= 60.0) {
             const double actual_speed = (sim_time_ - speed_stats_start_sim_time_) / stats_wall_time;
             ROS_INFO("[simulation_speed] requested=%.3fx actual=%.3fx "
                      "max_callback=%.3fs",
@@ -3069,6 +3139,7 @@ private:
     bool sim_plan_valid_ = false;
     uint64_t sim_plan_id_ = 0;
     double sim_plan_start_time_ = 0.0;
+    std::string last_executed_a1_state_;
     bool real_plan_valid_ = false;
     double real_plan_start_time_ = 0.0;
     forklift_planner::multi_vehicle::RuleEngine::RollingDynamicDecision
@@ -3107,8 +3178,6 @@ private:
     std::vector<std::string> last_logged_reason_;
     std::vector<int> last_logged_blocker_;
     std::vector<int> last_logged_task_count_;
-    std::vector<ros::Time> last_status_log_time_;
-    std::vector<ros::Time> last_diag_time_;  // TEMPORARY: [DIAG stuck] throttle
     unsigned long long tick_count_ = 0;
     std::set<std::pair<int, int>> active_a1_exit_intrusions_;
     double sim_time_ = 0.0;
@@ -3261,7 +3330,7 @@ public:
 
     // 一次性全面 dump 首个持续死锁簇:每个成员的路径要点 + 簇内两两冲突几何(same_dir 决定
     // 对向/同向 → 判定单向环流能否治)。只打一次,只读。用于源头修复的精确诊断。
-    // 关键异常统一交给 diagnostics 写入 exception_events.log。
+    // 关键异常统一交给 diagnostics 写入 simulation_diagnosis.log。
     // 长测排错专用——只在出问题那一刻写,故文件小、不刷屏。
     void onsetLog(const std::string& s) {
         const std::string console_line = contextualLog(

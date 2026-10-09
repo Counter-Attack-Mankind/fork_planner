@@ -54,9 +54,7 @@ RoughPath PathGenerator::generateRouteA2ToB(const Slot& src, const Slot& tgt,
         case PathGeneratorRouteMode::B_TO_A2: route_mode_name = "B_TO_A2"; break;
         case PathGeneratorRouteMode::AUTO: break;
     }
-    const bool debug_row1_target =
-        (tgt.row_id == 1 || tgt.row_id == 5 ||
-         (target_is_endpoint && (src.row_id == 1 || src.row_id == 5)));
+    const bool debug_row1_target = false;
 
     const double max_curvature  = mp_.turn_max_curvature();
     const double steer_ramp_len = mp_.turn_ramp_len();

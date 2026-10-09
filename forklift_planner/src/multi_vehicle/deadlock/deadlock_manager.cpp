@@ -292,6 +292,15 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                 transaction_.reason ="both_stopped_retry_retreat";
 
                 refreshDirective();
+                std::ostringstream retry;
+                retry << "pair=V" << retreat->id << "-V" << passer->id
+                      << " retreat=V" << retreat->id
+                      << " pass=V" << passer->id
+                      << " attempt=" << transaction_.retreat_attempt
+                      << " start_s=" << retreat->path_s
+                      << " target_s=" << next_target_s
+                      << " reason=both_stopped_retry_retreat";
+                emit("RETREAT_RETRY", retry.str(), emit_logs);
                 return;
             }
 
@@ -454,6 +463,13 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
         transaction_.pass_clear_elapsed = 0.0;
         transaction_.reason = "retreater_already_at_path_start";
         refreshDirective();
+        emit("PASS_START",
+             "pair=V" + std::to_string(retreat->id) + "-V" +
+                 std::to_string(passer->id) + " retreat=V" +
+                 std::to_string(retreat->id) + " pass=V" +
+                 std::to_string(passer->id) +
+                 " reason=retreater_already_at_path_start",
+             emit_logs);
         return;
     }
 

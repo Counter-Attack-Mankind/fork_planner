@@ -943,7 +943,7 @@ int TaskAllocator::chooseNextTarget(const VehicleAgent& vehicle,
         }
     }
     candidate_log << "\n************";
-    ROS_WARN("%s", candidate_log.str().c_str());
+    ROS_DEBUG("%s", candidate_log.str().c_str());
 
     if (candidates.empty()) return -1;
 

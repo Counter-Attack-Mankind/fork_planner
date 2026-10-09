@@ -840,10 +840,29 @@ double RuleEngine::timeToReachS(const VehicleAgent& v, VehicleAction action,
 void RuleEngine::applyActionRequest(VehicleAgent& v, VehicleAction action,
                                     const std::string& reason,
                                     int blocker_id) {
-    if (moreRestrictive(action, v.requested_action)) {
+    const VehicleAction previous_action = v.requested_action;
+    const std::string previous_reason = v.reason;
+    const int previous_blocker = v.blocker_id;
+    const bool applied = moreRestrictive(action, previous_action);
+    if (applied) {
         v.requested_action = action;
         v.reason = reason;
         v.blocker_id = blocker_id;
+    }
+    if (coord_log_sink_) {
+        std::ostringstream line;
+        line << "[ACTION_REQUEST] vehicle=V" << v.id
+             << " rule=" << reason
+             << " blocker=V" << blocker_id
+             << " requested=" << actionName(action)
+             << " previous=" << actionName(previous_action)
+             << " previous_rule=" << previous_reason
+             << " previous_blocker=V" << previous_blocker
+             << " result=" << (applied ? "APPLIED" : "COVERED_BY_EXISTING")
+             << " effective=" << actionName(v.requested_action)
+             << " effective_rule=" << v.reason
+             << " effective_blocker=V" << v.blocker_id;
+        coord_log_sink_(line.str());
     }
 }
 
@@ -2020,6 +2039,29 @@ void RuleEngine::enforceForwardClearance(std::vector<VehicleAgent>& vehicles,
             }
         }
         if (block_id >= 0) {
+            if (coord_log_sink_) {
+                const VehicleAgent* blocker = nullptr;
+                for (const VehicleAgent& other : vehicles) {
+                    if (other.id == block_id) {
+                        blocker = &other;
+                        break;
+                    }
+                }
+                std::ostringstream line;
+                line << std::fixed << std::setprecision(3)
+                     << "[FORWARD_CLEARANCE] vehicle=V" << v.id
+                     << " blocker=V" << block_id
+                     << " vehicle_s=" << v.path_s
+                     << " tested_s=" << s_end
+                     << " blocker_s=" << (blocker ? blocker->path_s : -1.0)
+                     << " blocker_tested_s=" << (blocker ? nextS(*blocker) : -1.0)
+                     << " requested_before=" << actionName(v.requested_action)
+                     << " result=STOP reason="
+                     << (motion.a1_intrusion
+                             ? "a1_intrusion_next_step_blocked"
+                             : "emergency_next_step");
+                coord_log_sink_(line.str());
+            }
             if (motion.a1_intrusion) {
                 a1_coordinator_.holdIntrusionCorrection(
                     v.id, "a1_intrusion_next_step_blocked", block_id);
@@ -2069,6 +2111,20 @@ void RuleEngine::resolveTargetSlotOccupancy(
                 (o.mode == VehicleMode::DWELL) ||
                 (o.active() && o.path_s < kSlotClear);
             if (!occupying) continue;
+            if (coord_log_sink_) {
+                std::ostringstream line;
+                line << std::fixed << std::setprecision(3)
+                     << "[TARGET_SLOT_OCCUPANCY] vehicle=V" << v.id
+                     << " blocker=V" << o.id
+                     << " target_slot=" << v.target_slot
+                     << " remaining_s=" << v.remainingS()
+                     << " stop_boundary_remaining=" << kMouthWait
+                     << " occupant_mode=" << static_cast<int>(o.mode)
+                     << " occupant_s=" << o.path_s
+                     << " clear_s=" << kSlotClear
+                     << " result=STOP";
+                coord_log_sink_(line.str());
+            }
             applyActionRequest(v, VehicleAction::STOP,
                                "wait_slot_V" + std::to_string(o.id), o.id);
             break;
@@ -2097,6 +2153,16 @@ void RuleEngine::applyRequestedActions(std::vector<VehicleAgent>& vehicles,
             v.ttc_stop_hold_remaining = std::max(
                 0.0, v.ttc_stop_hold_remaining - dt);
             if (v.reason == "clear") v.reason = "ttc_stop_hold";
+            if (coord_log_sink_) {
+                std::ostringstream line;
+                line << std::fixed << std::setprecision(3)
+                     << "[ACTION_HOLD] vehicle=V" << v.id
+                     << " kind=TTC_STOP previous=" << actionName(prev)
+                     << " requested=" << actionName(req)
+                     << " remaining=" << v.ttc_stop_hold_remaining
+                     << " result=STOP";
+                coord_log_sink_(line.str());
+            }
         }
 
         if (hold <= 0.0) {                              // smoothing disabled
@@ -2116,6 +2182,16 @@ void RuleEngine::applyRequestedActions(std::vector<VehicleAgent>& vehicles,
             if (v.action_hold_remaining > 0.0) {
                 v.action = prev;
                 if (v.reason == "clear") v.reason = "action_hold";
+                if (coord_log_sink_) {
+                    std::ostringstream line;
+                    line << std::fixed << std::setprecision(3)
+                         << "[ACTION_HOLD] vehicle=V" << v.id
+                         << " kind=SMOOTHING previous=" << actionName(prev)
+                         << " requested=" << actionName(req)
+                         << " remaining=" << v.action_hold_remaining
+                         << " result=" << actionName(v.action);
+                    coord_log_sink_(line.str());
+                }
             } else {
                 v.action = minAction(relaxOneStep(prev), req);
                 v.action_hold_remaining = hold;

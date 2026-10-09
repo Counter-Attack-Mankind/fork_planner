@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace forklift_planner {
@@ -49,19 +50,33 @@ std::string readableSimTime(double seconds) {
 }
 
 std::string formatVehicleCompact(const multi_vehicle::VehicleAgent& vehicle) {
-    char text[320];
+    char text[420];
     const double length = vehicle.track.empty() ? 0.0 : vehicle.track.length();
     const double remaining = vehicle.track.empty() ? 0.0 : vehicle.remainingS();
+    double x = std::numeric_limits<double>::quiet_NaN();
+    double y = x;
+    double yaw = x;
+    if (vehicle.real_pose_valid) {
+        x = vehicle.real_x;
+        y = vehicle.real_y;
+        yaw = vehicle.real_yaw;
+    } else if (!vehicle.track.empty()) {
+        const RoughWp pose = vehicle.track.poseAtS(
+            std::min(vehicle.path_s, vehicle.track.length()));
+        x = pose.x;
+        y = pose.y;
+        yaw = pose.theta;
+    }
     std::snprintf(text, sizeof(text),
                   "  V%d mode=%s phase=%s action=%s requested=%s reason=%s "
                   "blocker=%d task=%d slot=%d->%d s=%.3f/%.3f rem=%.3f "
-                  "speed=%.3f wait=%.1f dwell=%.1f gen=%d",
+                  "pose=(%.3f,%.3f,%.3f) speed=%.3f wait=%.1f dwell=%.1f gen=%d",
                   vehicle.id, modeName(vehicle.mode), missionPhaseName(vehicle.mission_phase),
                   multi_vehicle::actionName(vehicle.action),
                   multi_vehicle::actionName(vehicle.requested_action),
                   vehicle.reason.empty() ? "-" : vehicle.reason.c_str(), vehicle.blocker_id,
                   vehicle.task_count, vehicle.current_slot, vehicle.target_slot, vehicle.path_s,
-                  length, remaining, vehicle.current_speed, vehicle.wait_time,
+                  length, remaining, x, y, yaw, vehicle.current_speed, vehicle.wait_time,
                   vehicle.dwell_remaining, vehicle.path_gen);
     return text;
 }
@@ -113,6 +128,46 @@ std::string formatStressSnapshot(
     } else {
         out << "none";
     }
+    const auto& reserved = state.a1.reserved_a1_commitment;
+    out << "\n  reserved_a1=";
+    if (reserved.valid()) {
+        out << "owner=V" << reserved.owner_id
+            << " gen=" << reserved.owner_path_gen
+            << " arrival=" << reserved.predicted_a1_arrival_time
+            << " to_b=" << reserved.predicted_to_b_time
+            << " selection_reason=" << state.a1.reservation_selection_reason
+            << " cohort=[";
+        bool first = true;
+        for (const auto& entry : state.a1.reservation_cohort_path_gen) {
+            if (!first) out << ",";
+            first = false;
+            out << "V" << entry.first << ":gen" << entry.second;
+        }
+        out << "]";
+    } else {
+        out << "none";
+    }
+    const auto& candidate = state.deadlock.candidate;
+    const auto& transaction = state.deadlock.transaction;
+    out << "\n  deadlock_candidate=";
+    if (candidate.valid) {
+        out << "V" << candidate.vehicle_a << "/V" << candidate.vehicle_b
+            << " gen=" << candidate.path_gen_a << "/" << candidate.path_gen_b
+            << " duration=" << candidate.duration
+            << " anchor_s=" << candidate.anchor_s_a << "/"
+            << candidate.anchor_s_b;
+    } else {
+        out << "none";
+    }
+    out << "\n  deadlock_recovery phase="
+        << multi_vehicle::recoveryPhaseName(transaction.phase)
+        << " retreat=V" << transaction.retreat_vehicle_id
+        << " pass=V" << transaction.pass_vehicle_id
+        << " attempt=" << transaction.retreat_attempt
+        << " target_s=" << transaction.retreat_target_s
+        << " retreat_clear_elapsed=" << transaction.retreat_clear_elapsed
+        << " pass_clear_elapsed=" << transaction.pass_clear_elapsed
+        << " reason=" << transaction.reason;
 
     if (include_geometry) {
         const auto markers = rule_engine.conflictResourceMarkers(vehicles);

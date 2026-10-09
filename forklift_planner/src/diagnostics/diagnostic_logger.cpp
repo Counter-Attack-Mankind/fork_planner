@@ -3,10 +3,12 @@
 #include <ros/ros.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <utility>
 
@@ -18,9 +20,8 @@ namespace diagnostics {
 DiagnosticLogger::DiagnosticLogger(std::string log_dir, std::string coordination_file,
                                    bool enabled)
     : log_dir_(std::move(log_dir)), coordination_file_(std::move(coordination_file)),
-      rolling_file_(log_dir_ + "/rolling_planning.log"),
-      event_file_(log_dir_ + "/exception_events.log"),
-      summary_file_(log_dir_ + "/run_summary.log"), coordination_enabled_(enabled) {}
+      rolling_file_(coordination_file_), event_file_(coordination_file_),
+      summary_file_(coordination_file_), coordination_enabled_(enabled) {}
 
 bool DiagnosticLogger::ensureParentDirectory(const std::string& path) {
     if (path.empty()) return false;
@@ -38,42 +39,24 @@ bool DiagnosticLogger::ensureParentDirectory(const std::string& path) {
 
 bool DiagnosticLogger::initialize(int vehicle_count, int seed, bool one_shot,
                                   bool use_a1_cycle) {
-    if ((coordination_enabled_ && !ensureParentDirectory(coordination_file_)) ||
-        !ensureParentDirectory(rolling_file_) || !ensureParentDirectory(event_file_) ||
-        !ensureParentDirectory(summary_file_)) {
+    if (!coordination_enabled_) return true;
+    if (!ensureParentDirectory(coordination_file_)) {
         return false;
     }
-    if (coordination_enabled_) {
-        coordination_log_.open(coordination_file_, std::ios::out | std::ios::trunc);
-    }
-    rolling_log_.open(rolling_file_, std::ios::out | std::ios::trunc);
-    event_log_.open(event_file_, std::ios::out | std::ios::app);
-    summary_log_.open(summary_file_, std::ios::out | std::ios::trunc);
-    if ((coordination_enabled_ && !coordination_log_) || !rolling_log_ ||
-        !event_log_ || !summary_log_) {
-        ROS_WARN("[diagnostics] failed to open one or more classified logs under %s",
-                 log_dir_.c_str());
+    diagnosis_log_.open(coordination_file_, std::ios::out | std::ios::trunc);
+    if (!diagnosis_log_) {
+        ROS_WARN("[diagnostics] failed to open unified diagnosis log: %s",
+                 coordination_file_.c_str());
         return false;
     }
-    if (coordination_enabled_) {
-        coordination_log_ << "[multi_patrol] coordination log started\n"
-                          << "vehicle_count=" << vehicle_count
-                          << " one_shot=" << (one_shot ? 1 : 0)
-                          << " use_a1_cycle=" << (use_a1_cycle ? 1 : 0) << "\n";
-    }
-    rolling_log_ << "[multi_patrol] rolling planning log started\n";
-    summary_log_ << "seed=" << seed << "\nvehicle_count=" << vehicle_count
-                 << "\none_shot=" << (one_shot ? 1 : 0)
-                 << "\nuse_a1_cycle=" << (use_a1_cycle ? 1 : 0) << "\n";
-    if (coordination_enabled_) coordination_log_.flush();
-    rolling_log_.flush();
-    summary_log_.flush();
-    if (coordination_enabled_) {
-        ROS_WARN("[diagnostics] coordination log: %s", coordination_file_.c_str());
-    }
-    ROS_WARN("[diagnostics] rolling log: %s", rolling_file_.c_str());
-    ROS_WARN("[diagnostics] event log: %s", event_file_.c_str());
-    ROS_WARN("[diagnostics] summary log: %s", summary_file_.c_str());
+    diagnosis_log_ << "schema=simulation_diagnosis_v1\n"
+                   << "mode=MULTI_VEHICLE seed=" << seed
+                   << " vehicle_count=" << vehicle_count
+                   << " one_shot=" << (one_shot ? 1 : 0)
+                   << " use_a1_cycle=" << (use_a1_cycle ? 1 : 0) << "\n";
+    diagnosis_log_.flush();
+    ROS_WARN("[diagnostics] unified diagnosis log: %s",
+             coordination_file_.c_str());
     return true;
 }
 
@@ -87,20 +70,118 @@ std::string DiagnosticLogger::contextualize(const std::string& line,
     out << "[SOURCE=" << context.source << "] [plan=" << context.plan_id
         << "] [frame=" << context.frame_id << "] [rollout_step="
         << context.rollout_step << "] [tick=" << context.tick << "] [sim_t="
-        << std::fixed << std::setprecision(3) << context.sim_time << "] " << line;
+        << std::fixed << std::setprecision(3) << context.sim_time << "] [scope="
+        << (context.source == "ROLLOUT" ? "PREDICTED" : "EXECUTED")
+        << "] " << line;
     return out.str();
 }
 
-bool DiagnosticLogger::isRollingLine(const std::string& line,
-                                     const LogContext& context) {
-    return context.source == "ROLLOUT" || line.rfind("[ROLLING", 0) == 0 ||
-           line.rfind("[TIMELINE_", 0) == 0;
+bool DiagnosticLogger::isIncidentLine(const std::string& line) {
+    return line.find("HARD_GUARD") != std::string::npos ||
+           line.find("PATH_FAILURE") != std::string::npos ||
+           line.find("ROLLING_PLAN_FAILURE") != std::string::npos ||
+           line.find("A1_ADMISSION_INVARIANT_VIOLATION") != std::string::npos ||
+           line.find("event=UNRESOLVED") != std::string::npos ||
+           line.find("[DEADLOCK] event=ABORT") != std::string::npos ||
+           line.find("[STRESS_FAILURE]") != std::string::npos;
 }
 
-void DiagnosticLogger::write(std::ofstream& stream, const std::string& line) {
-    if (suppressed_ || !stream) return;
-    stream << line << "\n";
-    stream.flush();
+bool DiagnosticLogger::persistDuringNormalRun(const std::string& line,
+                                              const LogContext& context) {
+    if (context.source != "REAL") return false;
+    if (line.rfind("[multi_patrol][state]", 0) == 0) return false;
+    if (line.find(" event=HOLD") != std::string::npos) return false;
+    return line.find("[PATH_FAILURE]") != std::string::npos ||
+           line.find("[PREPARE_DROPOFF]") != std::string::npos ||
+           line.find("[ACTIVATE_DROPOFF]") != std::string::npos ||
+           line.find("[FUTURE_A1]") != std::string::npos ||
+           line.find("[A1_SERVICE]") != std::string::npos ||
+           line.find("[A1_HANDOFF]") != std::string::npos ||
+           line.find("[DEPARTURE_CLUSTER]") != std::string::npos ||
+           line.find("[A1_STATE_COMMIT]") != std::string::npos ||
+           line.find("[RESERVATION_COMMIT]") != std::string::npos ||
+           line.find("[DEADLOCK]") != std::string::npos ||
+           line.find("[HARD_GUARD]") != std::string::npos ||
+           line.find("[ROLLING_PLAN_FAILURE]") != std::string::npos;
+}
+
+bool DiagnosticLogger::keepRolloutEvidence(const std::string& line,
+                                           const LogContext& context) const {
+    if (context.source != "ROLLOUT") return true;
+    if (context.frame_id < 0 || context.frame_id >= rollout_commit_frames_) {
+        return false;
+    }
+    return line.find("[DYN-TTC]") != std::string::npos ||
+           line.find("[DYN-SPEED]") != std::string::npos ||
+           line.find("[DYN-PHYSICAL]") != std::string::npos ||
+           line.find("[BRIDGE-TTC]") != std::string::npos ||
+           line.find("[FORWARD_CLEARANCE]") != std::string::npos ||
+           line.find("[TARGET_SLOT_OCCUPANCY]") != std::string::npos ||
+           line.find("[ACTION_HOLD]") != std::string::npos ||
+           line.find("[ACTION_REQUEST]") != std::string::npos ||
+           line.find("[A1_") != std::string::npos ||
+           line.find("[A1-") != std::string::npos ||
+           line.find("[FUTURE_A1]") != std::string::npos ||
+           line.find("[SLOT_DEPARTURE]") != std::string::npos ||
+           line.find("[DEPARTURE_CLUSTER]") != std::string::npos ||
+           line.find("[CONFLICT_RESERVATION]") != std::string::npos ||
+           line.find("[DEADLOCK]") != std::string::npos ||
+           line.find("[PATH_FAILURE]") != std::string::npos;
+}
+
+void DiagnosticLogger::appendHistory(const std::string& line, double sim_time) {
+    if (suppressed_) return;
+    history_.emplace_back(sim_time, line);
+    while (!history_.empty() && sim_time - history_.front().first > 120.0) {
+        history_.pop_front();
+    }
+    while (history_.size() > 50000) history_.pop_front();
+    if (incident_active_) writeDiagnosis(line);
+}
+
+void DiagnosticLogger::writeDiagnosis(const std::string& line, bool flush) {
+    if (suppressed_ || !coordination_enabled_ || !diagnosis_log_) return;
+    diagnosis_log_ << line << "\n";
+    if (flush) diagnosis_log_.flush();
+}
+
+void DiagnosticLogger::startIncident(const std::string& type,
+                                     const std::string& details,
+                                     const std::string& snapshot) {
+    if (!coordination_enabled_) return;
+    if (!incident_active_) {
+        incident_active_ = true;
+        incident_snapshot_written_ = false;
+        incident_start_time_ = context_.sim_time;
+        last_incident_update_time_ = context_.sim_time;
+        ++incident_id_;
+        std::ostringstream begin;
+        begin << "===== INCIDENT_BEGIN id=F" << incident_id_
+              << " type=" << type << " tick=" << context_.tick
+              << " sim_t=" << std::fixed << std::setprecision(3)
+              << context_.sim_time << " details=\"" << details << "\" =====";
+        writeDiagnosis(begin.str());
+        writeDiagnosis("===== PRE_INCIDENT_HISTORY seconds=120 =====");
+        for (const auto& item : history_) writeDiagnosis(item.second);
+        writeDiagnosis("===== INCIDENT_STATE =====");
+    } else {
+        std::ostringstream update;
+        update << "[INCIDENT_TRIGGER] id=F" << incident_id_ << " type=" << type
+               << " tick=" << context_.tick << " sim_t=" << context_.sim_time
+               << " details=\"" << details << "\"";
+        writeDiagnosis(update.str());
+    }
+    if (!snapshot.empty()) {
+        writeDiagnosis(snapshot);
+        incident_snapshot_written_ = true;
+    }
+    diagnosis_log_.flush();
+}
+
+void DiagnosticLogger::triggerIncident(const std::string& type,
+                                       const std::string& details,
+                                       const std::string& snapshot) {
+    startIncident(type, details, snapshot);
 }
 
 void DiagnosticLogger::coordination(const std::string& line) {
@@ -108,24 +189,59 @@ void DiagnosticLogger::coordination(const std::string& line) {
 }
 
 void DiagnosticLogger::coordination(const std::string& line, const LogContext& context) {
-    if (isRollingLine(line, context)) {
-        write(rolling_log_, contextualize(line, context));
-    } else if (line.find("HARD_GUARD") != std::string::npos ||
-        line.find("PATH_FAILURE") != std::string::npos ||
-        line.find("FAILED") != std::string::npos ||
-        line.find("[STRESS_FAILURE]") != std::string::npos) {
-        write(event_log_, contextualize(line, context));
-    } else {
-        write(coordination_log_, contextualize(line, context));
+    const std::string contextual = contextualize(line, context);
+    const bool incident_line = isIncidentLine(line) && context.source == "REAL";
+    if (keepRolloutEvidence(line, context)) {
+        appendHistory(contextual, context.sim_time);
+        if (context.source == "ROLLOUT") {
+            for (size_t pos = 0; pos + 1 < line.size(); ++pos) {
+                if (line[pos] != 'V' ||
+                    !std::isdigit(static_cast<unsigned char>(line[pos + 1]))) {
+                    continue;
+                }
+                size_t end = pos + 2;
+                while (end < line.size() &&
+                       std::isdigit(static_cast<unsigned char>(line[end]))) {
+                    ++end;
+                }
+                const int vehicle_id = std::stoi(line.substr(pos + 1, end - pos - 1));
+                rollout_evidence_vehicles_.insert(
+                    {context.plan_id, context.frame_id, vehicle_id});
+                pos = end - 1;
+            }
+            while (rollout_evidence_vehicles_.size() > 12000) {
+                rollout_evidence_vehicles_.erase(
+                    rollout_evidence_vehicles_.begin());
+            }
+        }
+    }
+    if (persistDuringNormalRun(line, context) && !incident_active_ &&
+        !incident_line) {
+        writeDiagnosis(contextual);
+    }
+    if (incident_line) {
+        const LogContext previous = context_;
+        context_ = context;
+        startIncident("RULE_OR_PLANNING_FAILURE", line, "");
+        context_ = previous;
     }
 }
 
 void DiagnosticLogger::rolling(const std::string& line) {
-    write(rolling_log_, contextualize(line));
+    const std::string contextual = contextualize(line);
+    appendHistory(contextual, context_.sim_time);
 }
 
 void DiagnosticLogger::event(const std::string& line) {
-    write(event_log_, contextualize(line));
+    const std::string contextual = contextualize(line);
+    appendHistory(contextual, context_.sim_time);
+    if (context_.source == "REAL") {
+        if (isIncidentLine(line)) {
+            startIncident("SAFETY_OR_SYSTEM_EVENT", line, "");
+        } else if (!incident_active_) {
+            writeDiagnosis(contextual, true);
+        }
+    }
 }
 
 void DiagnosticLogger::eventHistory(const std::string& header,
@@ -135,7 +251,7 @@ void DiagnosticLogger::eventHistory(const std::string& header,
 }
 
 void DiagnosticLogger::summary(const std::string& line) {
-    write(summary_log_, line);
+    writeDiagnosis("[RUN_SUMMARY] " + line);
 }
 
 void DiagnosticLogger::runSummary(
@@ -158,58 +274,288 @@ void DiagnosticLogger::runSummary(
     }
 }
 
-std::ofstream& DiagnosticLogger::vehicleStream(int vehicle_id) {
-    auto inserted = vehicle_logs_.try_emplace(vehicle_id);
-    std::ofstream& stream = inserted.first->second;
-    if (!inserted.second) return stream;
-    const std::string path = log_dir_ + "/vehicle_state_V" +
-                             std::to_string(vehicle_id) + ".csv";
-    if (!ensureParentDirectory(path)) return stream;
-    stream.open(path, std::ios::out | std::ios::trunc);
-    if (stream) {
-        stream << "sim_time,tick,vehicle_id,plan_id,frame_id,mode,mission_phase,"
-               << "leg_target,current_slot,target_slot,task_count,path_gen,path_s,"
-               << "path_length,remaining_s,x,y,yaw,real_pose,speed,action,requested_action,"
-               << "blocker_id,wait_time,dwell_remaining,reason\n";
-    } else {
-        ROS_WARN("[diagnostics] failed to open vehicle state log: %s", path.c_str());
-    }
-    return stream;
-}
-
 void DiagnosticLogger::vehicleState(const multi_vehicle::VehicleAgent& vehicle) {
     if (suppressed_) return;
-    double x = std::numeric_limits<double>::quiet_NaN();
-    double y = x;
-    double yaw = x;
-    if (vehicle.real_pose_valid) {
-        x = vehicle.real_x;
-        y = vehicle.real_y;
-        yaw = vehicle.real_yaw;
-    } else if (!vehicle.track.empty()) {
-        const double s = vehicle.mode == multi_vehicle::VehicleMode::DWELL
-            ? vehicle.track.length() : std::min(vehicle.path_s, vehicle.track.length());
-        const RoughWp pose = vehicle.track.poseAtS(s);
-        x = pose.x;
-        y = pose.y;
-        yaw = pose.theta;
+    appendHistory(contextualize("[STATE_CHANGE] " + formatVehicleCompact(vehicle)),
+                  context_.sim_time);
+}
+
+std::string DiagnosticLogger::waitCycleSignature(
+    const std::vector<multi_vehicle::VehicleAgent>& vehicles) const {
+    std::unordered_map<int, int> edges;
+    for (const auto& vehicle : vehicles) {
+        if (vehicle.mode == multi_vehicle::VehicleMode::ACTIVE &&
+            vehicle.action == multi_vehicle::VehicleAction::STOP &&
+            vehicle.blocker_id >= 0) {
+            edges[vehicle.id] = vehicle.blocker_id;
+        }
     }
-    const double length = vehicle.track.empty() ? 0.0 : vehicle.track.length();
-    std::ofstream& stream = vehicleStream(vehicle.id);
-    if (!stream) return;
-    stream << std::setprecision(15) << context_.sim_time << "," << context_.tick << ","
-           << vehicle.id << "," << context_.plan_id << "," << context_.frame_id << ","
-           << modeName(vehicle.mode) << "," << missionPhaseName(vehicle.mission_phase) << ","
-           << legTargetName(vehicle.leg_target) << "," << vehicle.current_slot << ","
-           << vehicle.target_slot << "," << vehicle.task_count << "," << vehicle.path_gen
-           << "," << vehicle.path_s << "," << length << ","
-           << (vehicle.track.empty() ? 0.0 : vehicle.remainingS()) << "," << x << "," << y
-           << "," << yaw << "," << (vehicle.real_pose_valid ? 1 : 0) << ","
-           << vehicle.current_speed << "," << multi_vehicle::actionName(vehicle.action) << ","
-           << multi_vehicle::actionName(vehicle.requested_action) << "," << vehicle.blocker_id
-           << "," << vehicle.wait_time << "," << vehicle.dwell_remaining << ",\""
-           << vehicle.reason << "\"\n";
-    stream.flush();
+    std::set<int> globally_seen;
+    for (const auto& start : edges) {
+        std::vector<int> chain;
+        std::unordered_map<int, size_t> position;
+        int current = start.first;
+        while (edges.count(current) != 0 && globally_seen.count(current) == 0) {
+            const auto existing = position.find(current);
+            if (existing != position.end()) {
+                std::vector<int> cycle(chain.begin() + existing->second, chain.end());
+                if (cycle.size() < 2) break;
+                const auto minimum = std::min_element(cycle.begin(), cycle.end());
+                std::rotate(cycle.begin(), minimum, cycle.end());
+                std::ostringstream out;
+                for (size_t i = 0; i < cycle.size(); ++i) {
+                    if (i != 0) out << "->";
+                    out << "V" << cycle[i];
+                }
+                out << "->V" << cycle.front();
+                return out.str();
+            }
+            position[current] = chain.size();
+            chain.push_back(current);
+            current = edges.at(current);
+        }
+        globally_seen.insert(chain.begin(), chain.end());
+    }
+    return "";
+}
+
+void DiagnosticLogger::observeSimulationTick(
+    const std::vector<multi_vehicle::VehicleAgent>& vehicles,
+    const multi_vehicle::RuleEngine& rule_engine,
+    unsigned long long tick, double sim_time) {
+    context_.tick = tick;
+    context_.sim_time = sim_time;
+    if (last_history_sample_time_ < 0.0 ||
+        sim_time - last_history_sample_time_ >= 1.0 - 1e-9) {
+        last_history_sample_time_ = sim_time;
+        appendHistory(contextualize("[FLEET_SAMPLE] " +
+                                    formatFleetSnapshot(vehicles, tick)),
+                      sim_time);
+    }
+    bool no_progress_active = false;
+    bool stopped_active = false;
+
+    for (const auto& vehicle : vehicles) {
+        VehicleHistoryState& previous = vehicle_history_[vehicle.id];
+        if (previous.initialized &&
+            (previous.mode != vehicle.mode || previous.phase != vehicle.mission_phase ||
+             previous.task_count != vehicle.task_count ||
+             previous.path_gen != vehicle.path_gen)) {
+            std::ostringstream transition;
+            transition << "[TASK_STATE_CHANGE] scope=EXECUTED vehicle=V"
+                       << vehicle.id << " mode=" << modeName(previous.mode)
+                       << "->" << modeName(vehicle.mode) << " phase="
+                       << missionPhaseName(previous.phase) << "->"
+                       << missionPhaseName(vehicle.mission_phase) << " task="
+                       << previous.task_count << "->" << vehicle.task_count
+                       << " path_gen=" << previous.path_gen << "->"
+                       << vehicle.path_gen << " slot=" << vehicle.current_slot
+                       << "->" << vehicle.target_slot;
+            const std::string contextual = contextualize(transition.str());
+            appendHistory(contextual, sim_time);
+            if (!incident_active_) writeDiagnosis(contextual);
+        }
+        const bool constrained = vehicle.mode == multi_vehicle::VehicleMode::ACTIVE &&
+            (vehicle.action == multi_vehicle::VehicleAction::STOP ||
+             vehicle.action == multi_vehicle::VehicleAction::CREEP ||
+             vehicle.action == multi_vehicle::VehicleAction::YIELD);
+        const bool was_constrained = previous.initialized &&
+            previous.mode == multi_vehicle::VehicleMode::ACTIVE &&
+            (previous.action == multi_vehicle::VehicleAction::STOP ||
+             previous.action == multi_vehicle::VehicleAction::CREEP ||
+             previous.action == multi_vehicle::VehicleAction::YIELD);
+        const bool signature_changed = !previous.initialized ||
+            previous.action != vehicle.action ||
+            previous.blocker_id != vehicle.blocker_id ||
+            previous.reason != vehicle.reason ||
+            previous.path_gen != vehicle.path_gen;
+
+        if (was_constrained && (!constrained || signature_changed)) {
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(3)
+                 << "[CONSTRAINT_END] scope=EXECUTED constraint_id="
+                 << previous.constraint_id << " vehicle=V" << vehicle.id
+                 << " action=" << multi_vehicle::actionName(previous.action)
+                 << " blocker=V" << previous.blocker_id
+                 << " reason=" << previous.reason
+                 << " established_at=" << previous.constraint_since
+                 << " duration=" << (sim_time - previous.constraint_since)
+                 << " end=" << (constrained ? "COVERED" : "RELEASED");
+            appendHistory(contextualize(line.str()), sim_time);
+        }
+        if (constrained && (!was_constrained || signature_changed)) {
+            previous.constraint_since = sim_time;
+            previous.last_constraint_heartbeat = sim_time;
+            previous.last_evidence_plan = context_.plan_id;
+            previous.constraint_id = "C" + std::to_string(++constraint_id_);
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(3)
+                 << "[CONSTRAINT_BEGIN] scope=EXECUTED constraint_id="
+                 << previous.constraint_id << " vehicle=V" << vehicle.id
+                 << " plan=" << context_.plan_id << " frame=" << context_.frame_id
+                 << " path_gen=" << vehicle.path_gen
+                 << " phase=" << missionPhaseName(vehicle.mission_phase)
+                 << " action=" << multi_vehicle::actionName(vehicle.action)
+                 << " requested=" << multi_vehicle::actionName(vehicle.requested_action)
+                 << " blocker=V" << vehicle.blocker_id
+                 << " reason=" << vehicle.reason;
+            const bool evidence_available = rollout_evidence_vehicles_.count(
+                {context_.plan_id, context_.frame_id, vehicle.id}) != 0;
+            line << " evidence=ROLLOUT(plan=" << context_.plan_id
+                 << ",frame=" << context_.frame_id << ")"
+                 << " evidence_status="
+                 << (evidence_available ? "AVAILABLE" : "MISSING");
+            if (!evidence_available) {
+                line << " missing=rule_specific_ttc_priority_boundary";
+            }
+            appendHistory(contextualize(line.str()), sim_time);
+        } else if (constrained && previous.last_evidence_plan != context_.plan_id) {
+            previous.last_evidence_plan = context_.plan_id;
+            const bool evidence_available = rollout_evidence_vehicles_.count(
+                {context_.plan_id, context_.frame_id, vehicle.id}) != 0;
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(3)
+                 << "[CONSTRAINT_REAFFIRMED] scope=EXECUTED constraint_id="
+                 << previous.constraint_id << " vehicle=V" << vehicle.id
+                 << " duration=" << (sim_time - previous.constraint_since)
+                 << " plan=" << context_.plan_id << " frame=" << context_.frame_id
+                 << " action=" << multi_vehicle::actionName(vehicle.action)
+                 << " blocker=V" << vehicle.blocker_id
+                 << " reason=" << vehicle.reason
+                 << " evidence_status="
+                 << (evidence_available ? "AVAILABLE" : "MISSING");
+            if (!evidence_available) {
+                line << " missing=rule_specific_ttc_priority_boundary";
+            }
+            appendHistory(contextualize(line.str()), sim_time);
+        } else if (constrained &&
+                   sim_time - previous.last_constraint_heartbeat >= 10.0) {
+            previous.last_constraint_heartbeat = sim_time;
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(3)
+                 << "[CONSTRAINT_CONTINUE] scope=EXECUTED constraint_id="
+                 << previous.constraint_id << " vehicle=V" << vehicle.id
+                 << " duration=" << (sim_time - previous.constraint_since)
+                 << " plan=" << context_.plan_id << " frame=" << context_.frame_id
+                 << " action=" << multi_vehicle::actionName(vehicle.action)
+                 << " blocker=V" << vehicle.blocker_id
+                 << " reason=" << vehicle.reason;
+            appendHistory(contextualize(line.str()), sim_time);
+        }
+
+        const bool progressed = !previous.initialized ||
+            std::abs(vehicle.path_s - previous.path_s) > 1e-4 ||
+            vehicle.path_gen != previous.path_gen ||
+            vehicle.task_count != previous.task_count ||
+            vehicle.mission_phase != previous.phase ||
+            vehicle.mode != previous.mode;
+        if (progressed || vehicle.mode != multi_vehicle::VehicleMode::ACTIVE) {
+            previous.last_progress_time = sim_time;
+            previous.no_progress_reported = false;
+        }
+        const double no_progress_duration = sim_time - previous.last_progress_time;
+        if (vehicle.mode == multi_vehicle::VehicleMode::ACTIVE &&
+            no_progress_duration >= 60.0) {
+            no_progress_active = true;
+            if (!previous.no_progress_reported) {
+                previous.no_progress_reported = true;
+                std::ostringstream details;
+                details << "vehicle=V" << vehicle.id
+                        << " duration=" << no_progress_duration
+                        << " action=" << multi_vehicle::actionName(vehicle.action)
+                        << " blocker=V" << vehicle.blocker_id
+                        << " reason=" << vehicle.reason;
+                startIncident("NO_PROGRESS", details.str(),
+                              formatStressSnapshot(vehicles, rule_engine, tick,
+                                                   sim_time, true));
+            }
+        }
+        stopped_active = stopped_active ||
+            (vehicle.mode == multi_vehicle::VehicleMode::ACTIVE &&
+             vehicle.action == multi_vehicle::VehicleAction::STOP);
+
+        previous.initialized = true;
+        previous.mode = vehicle.mode;
+        previous.phase = vehicle.mission_phase;
+        previous.action = vehicle.action;
+        previous.blocker_id = vehicle.blocker_id;
+        previous.path_gen = vehicle.path_gen;
+        previous.task_count = vehicle.task_count;
+        previous.path_s = vehicle.path_s;
+        previous.reason = vehicle.reason;
+    }
+
+    const std::string cycle = waitCycleSignature(vehicles);
+    if (cycle != wait_cycle_signature_) {
+        if (!wait_cycle_signature_.empty()) {
+            std::ostringstream line;
+            line << std::fixed << std::setprecision(3)
+                 << "[WAIT_CYCLE_END] scope=EXECUTED cycle="
+                 << wait_cycle_signature_ << " duration="
+                 << (sim_time - wait_cycle_since_)
+                 << " end=" << (cycle.empty() ? "RELEASED" : "CHANGED");
+            appendHistory(contextualize(line.str()), sim_time);
+        }
+        wait_cycle_signature_ = cycle;
+        wait_cycle_since_ = sim_time;
+        if (!cycle.empty()) {
+            appendHistory(contextualize("[WAIT_CYCLE_BEGIN] scope=EXECUTED cycle=" + cycle),
+                          sim_time);
+        }
+    }
+    const bool cycle_active = !cycle.empty() && sim_time - wait_cycle_since_ >= 8.0;
+    if (cycle_active && (!incident_active_ ||
+        sim_time - last_incident_update_time_ >= 30.0)) {
+        startIncident("WAIT_CYCLE", "cycle=" + cycle,
+                      formatStressSnapshot(vehicles, rule_engine, tick,
+                                           sim_time, true));
+        last_incident_update_time_ = sim_time;
+    }
+
+    if (!incident_snapshot_written_ && incident_active_) {
+        writeDiagnosis(formatStressSnapshot(vehicles, rule_engine, tick,
+                                            sim_time, true));
+        incident_snapshot_written_ = true;
+    }
+
+    if (sim_time - last_progress_log_time_ >= 60.0) {
+        last_progress_log_time_ = sim_time;
+        std::ostringstream progress;
+        progress << "[PROGRESS] tick=" << tick << " sim_t=" << std::fixed
+                 << std::setprecision(1) << sim_time;
+        for (const auto& vehicle : vehicles) {
+            progress << " V" << vehicle.id << "=" << modeName(vehicle.mode)
+                     << "/" << missionPhaseName(vehicle.mission_phase)
+                     << "/task" << vehicle.task_count;
+        }
+        writeDiagnosis(progress.str());
+    }
+
+    const auto& recovery = rule_engine.recoveryDirective();
+    const bool recovery_active = recovery.active();
+    if (incident_active_ && sim_time - last_incident_update_time_ >= 10.0) {
+        last_incident_update_time_ = sim_time;
+        std::ostringstream update;
+        update << "[INCIDENT_STATUS] id=F" << incident_id_
+               << " tick=" << tick << " sim_t=" << sim_time
+               << " stopped=" << (stopped_active ? 1 : 0)
+               << " wait_cycle=" << (cycle.empty() ? "none" : cycle)
+               << " recovery_phase="
+               << multi_vehicle::recoveryPhaseName(recovery.phase)
+               << " recovery_reason=" << recovery.reason;
+        writeDiagnosis(update.str(), true);
+    }
+    if (incident_active_ && sim_time - incident_start_time_ >= 20.0 &&
+        !stopped_active && !cycle_active && !no_progress_active &&
+        !recovery_active) {
+        std::ostringstream end;
+        end << "===== INCIDENT_END id=F" << incident_id_
+            << " tick=" << tick << " sim_t=" << sim_time
+            << " result=RECOVERED =====";
+        writeDiagnosis(end.str(), true);
+        incident_active_ = false;
+        incident_snapshot_written_ = false;
+    }
 }
 
 std::ofstream& DiagnosticLogger::projectionStream(int vehicle_id) {
@@ -312,8 +658,8 @@ bool DiagnosticLogger::writeStressFailure(
 }
 
 void DiagnosticLogger::truncateEventLog() {
-    event_log_.close();
-    event_log_.open(event_file_, std::ios::out | std::ios::trunc);
+    if (!diagnosis_log_) return;
+    diagnosis_log_.flush();
 }
 
 }  // namespace diagnostics

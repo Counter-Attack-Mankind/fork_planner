@@ -4,7 +4,7 @@
   <arg name="one_shot" default="false"/>
   <arg name="start_rviz" default="true"/>
   <arg name="a1_cycle_catalog_file" default="$(find forklift_planner)/config/a1_cycle_path_catalog.yaml"/>
-  <arg name="coord_log_file" default="$(find forklift_planner)/logs/multi_vehicle_a1_rviz.log"/>
+  <arg name="coord_log_file" default="$(find forklift_planner)/../log/simulation_diagnosis.log"/>
   <arg name="snapshot_debug_enabled" default="false"/>
   <arg name="snapshot_output_dir" default="$(env HOME)/forklift_debug_bags"/>
   <arg name="snapshot_segment_duration" default="10.0"/>
