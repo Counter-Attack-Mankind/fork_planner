@@ -1,8 +1,8 @@
-#include <cmath>
 #include <iostream>
 #include <vector>
 
 #include "forklift_planner/multi_vehicle/deadlock/deadlock_manager.h"
+#include "forklift_planner/multi_vehicle/rule_engine.h"
 
 namespace {
 int fail(const char* message) {
@@ -13,76 +13,142 @@ int fail(const char* message) {
 
 int main() {
     using namespace forklift_planner::multi_vehicle;
+
     MapParam map;
     MultiVehicleConfig config;
-    config.deadlock_confirm_time = 0.2;
-    config.deadlock_retreat_search_step = 0.05;
-    config.deadlock_retreat_clearance = 0.01;
-    config.deadlock_retreat_speed = 0.10;
+    config.deadlock_retreat_distance = 0.50;
+    config.deadlock_retreat_max_attempts = 3;
+    config.rolling_refresh_period = 0.10;
 
-    VehicleAgent a;
-    a.id = 0; a.mode = VehicleMode::ACTIVE;
-    a.action = VehicleAction::STOP; a.requested_action = VehicleAction::STOP;
-    a.blocker_id = 1; a.path_gen = 3; a.path_s = 0.60;
-    a.track.set(RoughPath{
-        RoughWp{-1.0, 0.0, 0.0, WpType::FORWARD},
-        RoughWp{1.0, 0.0, 0.0, WpType::FORWARD}});
+    VehicleAgent retreat;
+    retreat.id = 0;
+    retreat.mode = VehicleMode::ACTIVE;
+    retreat.action = VehicleAction::STOP;
+    retreat.requested_action = VehicleAction::STOP;
+    retreat.blocker_id = 1;
+    retreat.path_gen = 3;
+    retreat.path_s = 1.50;
+    retreat.track.set(RoughPath{
+        RoughWp{0.0, 0.0, 0.0, WpType::FORWARD},
+        RoughWp{4.0, 0.0, 0.0, WpType::FORWARD}});
 
-    VehicleAgent b;
-    b.id = 1; b.mode = VehicleMode::ACTIVE;
-    b.action = VehicleAction::STOP; b.requested_action = VehicleAction::STOP;
-    b.blocker_id = 0; b.path_gen = 7; b.path_s = 0.60;
-    b.track.set(RoughPath{
-        RoughWp{0.0, -1.0, M_PI_2, WpType::FORWARD},
-        RoughWp{0.0, 1.0, M_PI_2, WpType::FORWARD}});
+    VehicleAgent passer;
+    passer.id = 1;
+    passer.mode = VehicleMode::ACTIVE;
+    passer.action = VehicleAction::STOP;
+    passer.requested_action = VehicleAction::STOP;
+    passer.blocker_id = 0;
+    passer.path_gen = 7;
+    passer.path_s = 2.00;
+    passer.track.set(RoughPath{
+        RoughWp{0.0, 5.0, 0.0, WpType::FORWARD},
+        RoughWp{4.0, 5.0, 0.0, WpType::FORWARD}});
 
-    DeadlockPairGeometry geometry;
-    geometry.vehicle_a = a.id; geometry.vehicle_b = b.id;
-    geometry.path_gen_a = a.path_gen; geometry.path_gen_b = b.path_gen;
-    geometry.preferred_priority_vehicle_id = b.id;
-
-    std::vector<VehicleAgent> vehicles{a, b};
+    std::vector<VehicleAgent> vehicles{retreat, passer};
     DeadlockManager manager(map, config);
-    const auto clean = manager.snapshot();
-    manager.update(vehicles, {geometry}, 0.1, false);
-    manager.restore(clean);
-    manager.update(vehicles, {geometry}, 0.1, false);
-    if (manager.directive().phase != RecoveryPhase::NONE) {
-        return fail("restored rollout time leaked into live confirmation");
+    DeadlockManager::Snapshot state;
+    state.transaction.phase = RecoveryPhase::RETREAT;
+    state.transaction.retreat_attempt = 1;
+    state.transaction.retreat_vehicle_id = retreat.id;
+    state.transaction.pass_vehicle_id = passer.id;
+    state.transaction.retreat_path_gen = retreat.path_gen;
+    state.transaction.pass_path_gen = passer.path_gen;
+    state.transaction.retreat_target_s = retreat.path_s;
+    state.transaction.retreat_distance = config.deadlock_retreat_distance;
+    manager.restore(state);
+
+    manager.update(vehicles, {}, 0.10, false);
+    if (manager.directive().phase != RecoveryPhase::RETREAT_HOLD ||
+        manager.directive().motionFor(retreat.id) != RecoveryMotion::HOLD ||
+        manager.directive().motionFor(passer.id) != RecoveryMotion::NORMAL) {
+        return fail("RETREAT completion did not hold only the retreat vehicle");
     }
 
-    manager.update(vehicles, {geometry}, 0.1, false);
-    const RecoveryDirective selected = manager.directive();
-    if (selected.phase != RecoveryPhase::RETREAT ||
-        selected.retreat_vehicle_id != 0 || selected.pass_vehicle_id != 1 ||
-        selected.retreat_target_s >= vehicles[0].path_s) {
-        return fail("deterministic minimum retreat was not selected");
+    for (int i = 0; i < 19; ++i) manager.update(vehicles, {}, 0.10, false);
+    if (manager.directive().phase != RecoveryPhase::RETREAT_HOLD) {
+        return fail("RETREAT_HOLD ended before 2.0 seconds");
     }
-    if (std::abs(selected.estimated_retreat_time -
-                 selected.retreat_distance / config.deadlock_retreat_speed) >
-        1e-9) {
-        return fail("retreat estimate did not use dedicated recovery speed");
-    }
-    vehicles[0].path_s = selected.retreat_target_s;
-    manager.update(vehicles, {geometry}, 0.1, false);
+    manager.update(vehicles, {}, 0.10, false);
     if (manager.directive().phase != RecoveryPhase::PASS ||
-        manager.directive().motionFor(0) != RecoveryMotion::HOLD ||
-        manager.directive().motionFor(1) != RecoveryMotion::NORMAL) {
-        return fail("PASS did not hold retreat and release passer");
+        manager.directive().motionFor(retreat.id) != RecoveryMotion::NORMAL ||
+        manager.snapshot().transaction.retreat_clear_elapsed != 0.0 ||
+        manager.snapshot().transaction.pass_clear_elapsed != 0.0) {
+        return fail("RETREAT_HOLD did not enter a fresh PASS observation");
     }
-    manager.update(vehicles, {geometry}, 0.1, false);
-    if (manager.directive().phase != RecoveryPhase::PASS ||
-        manager.directive().cooldownActive()) {
-        return fail("PASS cleared before passer reached pass_clear_s");
+
+    manager.update(vehicles, {}, 0.10, false);
+    if (manager.directive().phase != RecoveryPhase::RETREAT ||
+        manager.directive().retreat_attempt != 2) {
+        return fail("failed PASS did not start the second retreat");
     }
-    vehicles[1].path_s = selected.pass_clear_s;
-    manager.update(vehicles, {geometry}, 0.1, false);
-    if (manager.directive().phase != RecoveryPhase::NONE ||
-        !manager.directive().cooldownActive() ||
-        manager.directive().cooldown_vehicle_id != 0 ||
-        manager.directive().motionFor(0) != RecoveryMotion::HOLD ||
-        manager.directive().motionFor(1) != RecoveryMotion::NORMAL) {
-        return fail("PASS did not clear into retreat-only cooldown");
+    vehicles[0].path_s = manager.directive().retreat_target_s;
+    manager.update(vehicles, {}, 0.10, false);
+    if (manager.directive().phase != RecoveryPhase::RETREAT_HOLD) {
+        return fail("second retreat did not enter RETREAT_HOLD");
+    }
+    for (int i = 0; i < 20; ++i) manager.update(vehicles, {}, 0.10, false);
+    manager.update(vehicles, {}, 0.10, false);
+    if (manager.directive().phase != RecoveryPhase::RETREAT ||
+        manager.directive().retreat_attempt != 3) {
+        return fail("failed PASS did not start the third retreat");
+    }
+    vehicles[0].path_s = manager.directive().retreat_target_s;
+    manager.update(vehicles, {}, 0.10, false);
+    if (manager.directive().phase != RecoveryPhase::RETREAT_HOLD) {
+        return fail("third retreat did not enter RETREAT_HOLD");
+    }
+    for (int i = 0; i < 20; ++i) manager.update(vehicles, {}, 0.10, false);
+    manager.update(vehicles, {}, 0.10, false);
+    if (manager.directive().phase != RecoveryPhase::UNRESOLVED) {
+        return fail("third failed PASS did not stop at the retry limit");
+    }
+
+    DeadlockManager ordinary_stop_manager(map, config);
+    vehicles[0].blocker_id = -1;
+    vehicles[1].blocker_id = -1;
+    for (int i = 0; i < 30; ++i) {
+        ordinary_stop_manager.update(vehicles, {}, 0.10, false);
+    }
+    if (ordinary_stop_manager.directive().phase != RecoveryPhase::NONE) {
+        return fail("ordinary STOP incorrectly entered RETREAT_HOLD");
+    }
+
+    RuleEngine engine(map, config);
+    RuleEngine::SimSnapshot engine_state = engine.snapshot();
+    engine_state.deadlock.transaction.phase = RecoveryPhase::RETREAT_HOLD;
+    engine_state.deadlock.transaction.retreat_attempt = 1;
+    engine_state.deadlock.transaction.retreat_vehicle_id = retreat.id;
+    engine_state.deadlock.transaction.pass_vehicle_id = passer.id;
+    engine_state.deadlock.transaction.retreat_path_gen = retreat.path_gen;
+    engine_state.deadlock.transaction.pass_path_gen = passer.path_gen;
+    engine_state.deadlock.transaction.retreat_target_s = retreat.path_s;
+    engine_state.deadlock.directive.phase = RecoveryPhase::RETREAT_HOLD;
+    engine_state.deadlock.directive.retreat_attempt = 1;
+    engine_state.deadlock.directive.retreat_vehicle_id = retreat.id;
+    engine_state.deadlock.directive.pass_vehicle_id = passer.id;
+    engine_state.deadlock.directive.retreat_path_gen = retreat.path_gen;
+    engine_state.deadlock.directive.pass_path_gen = passer.path_gen;
+    engine_state.deadlock.directive.retreat_target_s = retreat.path_s;
+    engine.restore(engine_state);
+
+    vehicles[0].action = VehicleAction::NOMINAL;
+    vehicles[0].requested_action = VehicleAction::NOMINAL;
+    vehicles[0].current_speed = config.nominal_speed;
+    vehicles[0].path_s = retreat.path_s;
+    vehicles[1].action = VehicleAction::NOMINAL;
+    vehicles[1].requested_action = VehicleAction::NOMINAL;
+    vehicles[1].current_speed = config.nominal_speed;
+    engine.decide(vehicles, 0.10);
+    engine.applyRecoveryDirectiveToOutput(vehicles);
+    if (vehicles[0].action != VehicleAction::STOP ||
+        vehicles[0].requested_action != VehicleAction::STOP ||
+        vehicles[0].current_speed != 0.0 ||
+        vehicles[1].action == VehicleAction::STOP ||
+        engine.motionOverrideFor(vehicles[0].id).motion !=
+            RecoveryMotion::HOLD ||
+        engine.motionOverrideFor(vehicles[1].id).motion !=
+            RecoveryMotion::NORMAL) {
+        return fail("RETREAT_HOLD output did not stop only the retreat vehicle");
     }
 
     std::cout << "deadlock_manager_test: PASS\n";

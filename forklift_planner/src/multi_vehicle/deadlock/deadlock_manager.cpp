@@ -16,6 +16,8 @@ namespace multi_vehicle {
 
 namespace {
 
+constexpr double kRetreatHoldDuration = 2.0;
+
 //得到一辆车当前用于几何检测的路径纵向位置s，若休眠则证明在库位，走完路径。
 double vehiclePoseS(const VehicleAgent& vehicle) {
     return vehicle.mode == VehicleMode::DWELL
@@ -45,6 +47,7 @@ const char* recoveryPhaseName(RecoveryPhase phase) {
     switch (phase) {
         case RecoveryPhase::NONE: return "NONE";
         case RecoveryPhase::RETREAT: return "RETREAT";
+        case RecoveryPhase::RETREAT_HOLD: return "RETREAT_HOLD";
         case RecoveryPhase::PASS: return "PASS";
         case RecoveryPhase::CLEAR: return "CLEAR";
         case RecoveryPhase::UNRESOLVED: return "UNRESOLVED";
@@ -62,6 +65,11 @@ RecoveryMotion RecoveryDirective::motionFor(int vehicle_id) const {
             return RecoveryMotion::RETREAT;
 
         if (vehicle_id == pass_vehicle_id)
+            return RecoveryMotion::HOLD;
+    }
+    else if (phase == RecoveryPhase::RETREAT_HOLD)
+    {
+        if (vehicle_id == retreat_vehicle_id)
             return RecoveryMotion::HOLD;
     }
     else if (phase == RecoveryPhase::UNRESOLVED)
@@ -161,7 +169,8 @@ void DeadlockManager::emit(const char* event, const std::string& details,
     if (log_sink_) log_sink_(line);
     const std::string name(event);
     if (name == "CONFIRMED" || name == "SELECT" ||
-        name == "RETREAT_DONE" || name == "PASS_START" ||
+        name == "RETREAT_DONE" || name == "RETREAT_HOLD_START" ||
+        name == "RETREAT_HOLD_DONE" || name == "PASS_START" ||
         name == "CLEAR" || name == "UNRESOLVED" || name == "ABORT") {
         ROS_WARN_STREAM(line);
     }
@@ -214,6 +223,37 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
         if (retreat == nullptr || passer == nullptr)
         {
             abort("recovery_vehicle_missing", emit_logs);
+            return;
+        }
+        if (retreat->mode != VehicleMode::ACTIVE ||
+            passer->mode != VehicleMode::ACTIVE ||
+            retreat->path_gen != transaction_.retreat_path_gen ||
+            passer->path_gen != transaction_.pass_path_gen) {
+            abort("vehicle_or_path_identity_changed", emit_logs);
+            return;
+        }
+        if (transaction_.phase == RecoveryPhase::RETREAT_HOLD)
+        {
+            transaction_.retreat_hold_elapsed += std::max(0.0, dt);
+            if (transaction_.retreat_hold_elapsed + 1e-9 >=
+                kRetreatHoldDuration) {
+                transaction_.phase = RecoveryPhase::PASS;
+                transaction_.retreat_clear_elapsed = 0.0;
+                transaction_.pass_clear_elapsed = 0.0;
+                transaction_.reason = "retreat_hold_done_recheck";
+                refreshDirective();
+
+                std::ostringstream details;
+                details << "pair=V" << retreat->id << "-V" << passer->id
+                        << " retreat=V" << retreat->id
+                        << " pass=V" << passer->id
+                        << " attempt=" << transaction_.retreat_attempt
+                        << " hold=" << kRetreatHoldDuration;
+                emit("RETREAT_HOLD_DONE", details.str(), emit_logs);
+                emit("PASS_START", details.str(), emit_logs);
+            } else {
+                refreshDirective();
+            }
             return;
         }
         if (transaction_.phase == RecoveryPhase::PASS)
@@ -308,15 +348,6 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
             return;
         }
 
-        if (
-            retreat->mode != VehicleMode::ACTIVE ||
-            passer->mode != VehicleMode::ACTIVE ||
-            retreat->path_gen != transaction_.retreat_path_gen ||
-            passer->path_gen != transaction_.pass_path_gen) {
-            abort("vehicle_or_path_identity_changed", emit_logs);
-            return;
-        }
-
         //如果处在死锁恢复阶段---真正执行的状态机
         if (transaction_.phase == RecoveryPhase::RETREAT) {
             // 每一拍都重新检查：从当前实际位置继续退到本次 target 是否仍然安全，不安全则直接退出
@@ -327,13 +358,14 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
             }
             const double tolerance = std::max(0.005, config_.path_validation_step);
             
-            // 已经到达本次固定退让目标，则低优先级车停住，优先车恢复 NORMAL，进入观察阶段。
+            // 已经到达本次固定退让目标，则低优先级车强制静止 2 秒。
             if (retreat->path_s <=transaction_.retreat_target_s + tolerance) 
             {
-                transaction_.phase = RecoveryPhase::PASS;
+                transaction_.phase = RecoveryPhase::RETREAT_HOLD;
+                transaction_.retreat_hold_elapsed = 0.0;
                 transaction_.retreat_clear_elapsed = 0.0;
                 transaction_.pass_clear_elapsed = 0.0;
-                transaction_.reason = "retreat_step_done_recheck";
+                transaction_.reason = "retreat_step_done_hold";
                 refreshDirective();
 
                 std::ostringstream details;
@@ -345,7 +377,7 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                 << " target_s=" << transaction_.retreat_target_s
                 << " actual_s=" << retreat->path_s;
                 emit("RETREAT_DONE", details.str(), emit_logs);
-                emit("PASS_START", details.str(), emit_logs);
+                emit("RETREAT_HOLD_START", details.str(), emit_logs);
             }
             return;
         }

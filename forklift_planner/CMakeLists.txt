@@ -121,6 +121,24 @@ target_link_libraries(conflict_zone_geometry_diag
 )
 
 if(CATKIN_ENABLE_TESTING)
+  add_executable(deadlock_manager_test
+    test/deadlock_manager_test.cpp
+    src/multi_vehicle/bridge_ttc_correction.cpp
+    src/multi_vehicle/dynamic_speed_coordination.cpp
+    src/multi_vehicle/deadlock/deadlock_manager.cpp
+    src/multi_vehicle/footprint.cpp
+    src/multi_vehicle/path_track.cpp
+    src/multi_vehicle/a1/a1_coordinator.cpp
+    src/multi_vehicle/rule_engine.cpp
+    src/multi_vehicle/spatiotemporal_interaction.cpp
+    src/multi_vehicle/traffic_resource_map.cpp
+  )
+  add_dependencies(deadlock_manager_test ${catkin_EXPORTED_TARGETS})
+  target_link_libraries(deadlock_manager_test ${catkin_LIBRARIES})
+  add_test(NAME deadlock_manager_test
+           COMMAND ${CATKIN_DEVEL_PREFIX}/env.sh
+                   $<TARGET_FILE:deadlock_manager_test>)
+
   add_executable(real_state_estimation_test
     test/real_state_estimation_test.cpp
     src/multi_vehicle/path_track.cpp

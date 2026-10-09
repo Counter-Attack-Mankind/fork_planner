@@ -165,6 +165,7 @@ std::string formatStressSnapshot(
         << " pass=V" << transaction.pass_vehicle_id
         << " attempt=" << transaction.retreat_attempt
         << " target_s=" << transaction.retreat_target_s
+        << " retreat_hold_elapsed=" << transaction.retreat_hold_elapsed
         << " retreat_clear_elapsed=" << transaction.retreat_clear_elapsed
         << " pass_clear_elapsed=" << transaction.pass_clear_elapsed
         << " reason=" << transaction.reason;

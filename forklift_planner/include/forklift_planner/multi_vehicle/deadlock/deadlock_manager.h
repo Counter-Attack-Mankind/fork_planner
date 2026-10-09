@@ -16,6 +16,7 @@ namespace multi_vehicle {
 enum class RecoveryPhase {
     NONE,
     RETREAT,
+    RETREAT_HOLD,
     PASS,
     CLEAR,
     UNRESOLVED,
@@ -80,6 +81,7 @@ public:
         int pass_path_gen = -1;
         double retreat_target_s = 0.0;
         double retreat_distance = 0.0;
+        double retreat_hold_elapsed = 0.0;
         double retreat_clear_elapsed = 0.0; //两车独立计时器，判断2周期内是否有车没有失活，则判断死锁解除
         double pass_clear_elapsed = 0.0;
         std::string reason;
