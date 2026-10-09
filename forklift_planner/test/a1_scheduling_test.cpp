@@ -30,6 +30,48 @@ VehicleAgent requestVehicle(int id, double distance) {
     return vehicle;
 }
 
+VehicleAgent departingOwner(int id) {
+    VehicleAgent vehicle;
+    vehicle.id = id;
+    vehicle.mode = VehicleMode::ACTIVE;
+    vehicle.mission_phase = MissionPhase::TO_B;
+    vehicle.leg_target = LegTargetKind::B_SLOT;
+    vehicle.path_gen = 2;
+    vehicle.loaded = true;
+    vehicle.target_slot = 12;
+    vehicle.a1_departure_committed = true;
+    vehicle.a1_departure_priority_until_s = 1.0;
+    vehicle.track.set(RoughPath{wp(0.0), wp(2.0)});
+    return vehicle;
+}
+
+A1Coordinator::FutureA1Commitment commitment(int owner_id, int path_gen) {
+    A1Coordinator::FutureA1Commitment result;
+    result.owner_id = owner_id;
+    result.owner_path_gen = path_gen;
+    result.predicted_a1_arrival_time = 0.0;
+    result.predicted_to_b_time = 0.0;
+    return result;
+}
+
+void seedDepartureTransaction(A1Coordinator& coordinator, int owner_id,
+                              int owner_path_gen, int waiter_id,
+                              int waiter_path_gen) {
+    A1Coordinator::Snapshot snapshot = coordinator.snapshot();
+    snapshot.future_a1_commitment = commitment(owner_id, owner_path_gen);
+    A1Coordinator::DepartureClusterCommitment cluster;
+    cluster.owner_id = owner_id;
+    cluster.transaction_owner_path_gen = owner_path_gen - 1;
+    cluster.owner_path_gen = owner_path_gen;
+    cluster.other_id = waiter_id;
+    cluster.other_path_gen = waiter_path_gen;
+    cluster.owner_release_exit_s = 1.0;
+    cluster.active = true;
+    snapshot.departure_clusters[{std::min(owner_id, waiter_id),
+                                 std::max(owner_id, waiter_id)}] = cluster;
+    coordinator.restore(snapshot);
+}
+
 A1Coordinator::ArrivalKinematics kinematics() {
     A1Coordinator::ArrivalKinematics result;
     result.dt = 0.1;
@@ -182,6 +224,115 @@ int main() {
                                             arrival_kinematics);
     if (request_lifetime.bypassCount(10) != 0) {
         return fail("cancelled request retained bypass history");
+    }
+
+    A1Coordinator handoff = makeCoordinator(map_param, config);
+    std::vector<VehicleAgent> handoff_vehicles{
+        departingOwner(30), requestVehicle(10, 2.0),
+        requestVehicle(20, 5.0)};
+    seedDepartureTransaction(handoff, 30, 2, 10, 1);
+    handoff.refreshPlanningContext(handoff_vehicles, 45.0, 0.0,
+                                   arrival_kinematics);
+    if (handoff.futureA1Commitment().owner_id != 30 ||
+        handoff.reservedA1Commitment().owner_id != 10 ||
+        handoff.bypassCount(20) != 0) {
+        return fail("successor reservation changed authority or wait counts");
+    }
+
+    handoff_vehicles[1].track.set(RoughPath{wp(0.0), wp(10.0)});
+    handoff_vehicles[2].track.set(RoughPath{wp(0.0), wp(1.0)});
+    handoff.refreshPlanningContext(handoff_vehicles, 45.0, 2.0,
+                                   arrival_kinematics);
+    if (handoff.reservedA1Commitment().owner_id != 10) {
+        return fail("reservation HOLD reranked the successor");
+    }
+
+    const A1Coordinator::Snapshot before_promotion = handoff.snapshot();
+    handoff_vehicles[0].path_s = 1.01;
+    handoff.refreshDepartureClusterCommitments(handoff_vehicles);
+    if (handoff.futureA1Commitment().owner_id != 10 ||
+        handoff.reservedA1Commitment().valid() ||
+        !handoff.departureClusters().empty() ||
+        handoff.bypassCount(10) != 0 || handoff.bypassCount(20) != 1) {
+        return fail("last-cluster release did not atomically promote once");
+    }
+    const A1Coordinator::Snapshot after_promotion = handoff.snapshot();
+    handoff.refreshDepartureClusterCommitments(handoff_vehicles);
+    if (handoff.bypassCount(20) != 1) {
+        return fail("PROMOTE updated starvation counts more than once");
+    }
+    handoff.restore(before_promotion);
+    if (handoff.futureA1Commitment().owner_id != 30 ||
+        handoff.reservedA1Commitment().owner_id != 10 ||
+        handoff.bypassCount(20) != 0) {
+        return fail("rollout snapshot did not restore handoff state");
+    }
+    handoff.restore(after_promotion);
+    if (handoff.futureA1Commitment().owner_id != 10 ||
+        handoff.reservedA1Commitment().valid() ||
+        handoff.bypassCount(20) != 1) {
+        return fail("executed handoff snapshot did not install promotion");
+    }
+
+    handoff_vehicles[1].path_s = 0.0;
+    handoff_vehicles[1].requested_action = VehicleAction::NOMINAL;
+    handoff_vehicles[2].path_s = 0.95;
+    handoff_vehicles[2].requested_action = VehicleAction::NOMINAL;
+    handoff.enforceA1EntryControl(
+        handoff_vehicles, 0.1,
+        [](VehicleAgent& vehicle, VehicleAction action,
+           const std::string& reason, int blocker_id) {
+            vehicle.requested_action = action;
+            vehicle.reason = reason;
+            vehicle.blocker_id = blocker_id;
+        });
+    if (handoff_vehicles[1].requested_action != VehicleAction::NOMINAL ||
+        handoff_vehicles[2].requested_action != VehicleAction::STOP ||
+        handoff_vehicles[2].reason != "a1_entry_owner_not_ready") {
+        return fail("unprepared owner gate did not stop only entry traffic");
+    }
+
+    A1Coordinator ownerless = makeCoordinator(map_param, config);
+    std::vector<VehicleAgent> ownerless_vehicles{
+        requestVehicle(10, 1.0), requestVehicle(20, 10.0)};
+    ownerless_vehicles[0].path_s = 0.95;
+    ownerless_vehicles[0].requested_action = VehicleAction::NOMINAL;
+    ownerless_vehicles[1].requested_action = VehicleAction::NOMINAL;
+    ownerless.enforceA1EntryControl(
+        ownerless_vehicles, 0.1,
+        [](VehicleAgent& vehicle, VehicleAction action,
+           const std::string& reason, int blocker_id) {
+            vehicle.requested_action = action;
+            vehicle.reason = reason;
+            vehicle.blocker_id = blocker_id;
+        });
+    if (ownerless_vehicles[0].requested_action != VehicleAction::STOP ||
+        ownerless_vehicles[0].reason != "a1_entry_no_owner" ||
+        ownerless_vehicles[1].requested_action != VehicleAction::NOMINAL) {
+        return fail("ownerless gate stopped distant traffic or left entry open");
+    }
+
+    A1Coordinator b0_reservation = makeCoordinator(map_param, config);
+    VehicleAgent parked;
+    parked.id = 40;
+    parked.mode = VehicleMode::DWELL;
+    parked.mission_phase = MissionPhase::UNLOAD_DWELL;
+    parked.leg_target = LegTargetKind::B_SLOT;
+    parked.current_slot = 0;
+    parked.path_gen = 0;
+    std::vector<VehicleAgent> parked_vehicles{departingOwner(30), parked};
+    seedDepartureTransaction(b0_reservation, 30, 2, 40, 1);
+    auto parked_kinematics = arrival_kinematics;
+    parked_kinematics.pickup_leg_track = [](int, PathTrack& track) {
+        track.set(RoughPath{wp(0.0), wp(2.0)});
+        return true;
+    };
+    b0_reservation.refreshPlanningContext(parked_vehicles, 45.0, 0.0,
+                                           parked_kinematics);
+    if (b0_reservation.futureA1Commitment().owner_id != 30 ||
+        b0_reservation.reservedA1Commitment().owner_id != 40 ||
+        parked_vehicles[1].mode != VehicleMode::DWELL) {
+        return fail("B0 reservation granted formal authority or launched early");
     }
 
     std::cout << "a1_scheduling_test: PASS\n";

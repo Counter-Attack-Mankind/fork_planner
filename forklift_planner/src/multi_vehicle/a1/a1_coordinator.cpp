@@ -184,6 +184,7 @@ void A1Coordinator::setFutureA1Commitment(
 
 void A1Coordinator::clearFutureA1Commitment() {
     future_a1_commitment_ = FutureA1Commitment{};
+    clearReservedA1Owner("formal_owner_cleared");
 }
 
 A1Coordinator::ArrivalSummary A1Coordinator::predictA1Arrivals(
@@ -389,6 +390,158 @@ void A1Coordinator::updateBypassCountsOnCreate(
     }
 }
 
+bool A1Coordinator::requestIdentityMatches(
+    const VehicleAgent& vehicle, int service_path_gen) const {
+    if (vehicle.active() && vehicle.mission_phase == MissionPhase::TO_A1 &&
+        vehicle.leg_target == LegTargetKind::A1) {
+        return vehicle.path_gen == service_path_gen;
+    }
+    if (vehicle.active() && vehicle.mission_phase == MissionPhase::TO_B &&
+        vehicle.leg_target == LegTargetKind::B_SLOT) {
+        return vehicle.path_gen + 1 == service_path_gen;
+    }
+    return vehicle.mode == VehicleMode::DWELL &&
+           vehicle.mission_phase == MissionPhase::UNLOAD_DWELL &&
+           vehicle.path_gen + 1 == service_path_gen;
+}
+
+bool A1Coordinator::reservationValid(
+    const std::vector<VehicleAgent>& vehicles) const {
+    if (!reserved_a1_commitment_.valid()) return false;
+    const VehicleAgent* reserved = agentById(
+        vehicles, reserved_a1_commitment_.owner_id);
+    return reserved != nullptr &&
+           requestIdentityMatches(*reserved,
+                                  reserved_a1_commitment_.owner_path_gen);
+}
+
+void A1Coordinator::logA1Handoff(
+    const char* event, const char* reason,
+    const FutureA1Commitment& commitment, int formal_owner_id,
+    int formal_owner_path_gen) const {
+    if (!coord_log_sink_) return;
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(2)
+         << "[A1_HANDOFF] event=" << event
+         << " formal_owner=";
+    if (formal_owner_id >= 0) {
+        line << "V" << formal_owner_id
+             << " formal_gen=" << formal_owner_path_gen;
+    }
+    else line << "none";
+    line << " reserved_owner=";
+    if (commitment.valid()) {
+        line << "V" << commitment.owner_id
+             << " request_gen=" << commitment.owner_path_gen
+             << " eta=" << commitment.predicted_a1_arrival_time << "s";
+    } else {
+        line << "none request_gen=-1 eta=-1.00s";
+    }
+    line << " reason=" << reason;
+    coord_log_sink_(line.str());
+}
+
+void A1Coordinator::clearReservedA1Owner(const char* reason) {
+    if (reserved_a1_commitment_.valid()) {
+        logA1Handoff("CANCEL", reason, reserved_a1_commitment_,
+                     future_a1_commitment_.owner_id,
+                     future_a1_commitment_.owner_path_gen);
+    }
+    reserved_a1_commitment_ = FutureA1Commitment{};
+    reservation_cohort_path_gen_.clear();
+    reservation_selection_reason_.clear();
+}
+
+void A1Coordinator::refreshReservedA1Owner(
+    const std::vector<VehicleAgent>& vehicles,
+    const ArrivalSummary& arrivals) {
+    if (reserved_a1_commitment_.valid()) {
+        if (reservationValid(vehicles)) return;
+        clearReservedA1Owner("request_identity_invalid");
+    }
+    if (!future_a1_commitment_.valid()) return;
+    const VehicleAgent* formal = agentById(
+        vehicles, future_a1_commitment_.owner_id);
+    if (formal == nullptr || formal->mission_phase != MissionPhase::TO_B) {
+        return;
+    }
+    bool has_active_cluster = false;
+    for (const auto& entry : departure_cluster_commitments_) {
+        if (entry.second.active && entry.second.owner_id == formal->id) {
+            has_active_cluster = true;
+            break;
+        }
+    }
+    if (!has_active_cluster) return;
+
+    ArrivalSummary eligible;
+    for (const auto& item : arrivals.candidates) {
+        if (item.first == formal->id) continue;
+        const VehicleAgent* candidate = agentById(vehicles, item.first);
+        if (candidate == nullptr ||
+            !requestIdentityMatches(*candidate,
+                                    item.second.service_path_gen)) {
+            continue;
+        }
+        eligible.candidates.insert(item);
+    }
+    std::string selection_reason;
+    FutureA1Commitment reserved = selectFutureA1Owner(
+        vehicles, eligible, &selection_reason);
+    if (!reserved.valid()) return;
+    reserved_a1_commitment_ = reserved;
+    reservation_selection_reason_ = selection_reason;
+    reservation_cohort_path_gen_.clear();
+    for (const auto& item : eligible.candidates) {
+        reservation_cohort_path_gen_[item.first] =
+            item.second.service_path_gen;
+    }
+    logA1Handoff("RESERVE", selection_reason.c_str(), reserved,
+                 formal->id, formal->path_gen);
+}
+
+void A1Coordinator::updateBypassCountsOnPromotion(
+    const std::vector<VehicleAgent>& vehicles, int owner_id) {
+    for (const auto& item : reservation_cohort_path_gen_) {
+        const VehicleAgent* candidate = agentById(vehicles, item.first);
+        if (candidate == nullptr ||
+            !requestIdentityMatches(*candidate, item.second)) {
+            continue;
+        }
+        if (item.first == owner_id) bypass_count_[item.first] = 0;
+        else ++bypass_count_[item.first];
+    }
+}
+
+bool A1Coordinator::promoteReservedA1Owner(
+    std::vector<VehicleAgent>& vehicles, int released_owner_id,
+    int released_owner_path_gen) {
+    if (!reservationValid(vehicles)) {
+        if (reserved_a1_commitment_.valid()) {
+            clearReservedA1Owner("promotion_request_invalid");
+        }
+        setFutureA1Commitment(FutureA1Commitment{});
+        logA1Handoff("RELEASE", "no_valid_reservation",
+                     FutureA1Commitment{}, released_owner_id,
+                     released_owner_path_gen);
+        ++service_metrics_.releases;
+        service_metrics_.active_since = -1.0;
+        return false;
+    }
+
+    const FutureA1Commitment promoted = reserved_a1_commitment_;
+    updateBypassCountsOnPromotion(vehicles, promoted.owner_id);
+    setFutureA1Commitment(promoted);
+    reserved_a1_commitment_ = FutureA1Commitment{};
+    reservation_cohort_path_gen_.clear();
+    logA1Handoff("PROMOTE", reservation_selection_reason_.c_str(), promoted,
+                 released_owner_id, released_owner_path_gen);
+    reservation_selection_reason_.clear();
+    ++service_metrics_.changes;
+    service_metrics_.active_since = -1.0;
+    return true;
+}
+
 void A1Coordinator::logA1Scheduling(
     const ArrivalSummary& summary, int owner_id,
     const std::string& selection_reason) const {
@@ -532,12 +685,14 @@ void A1Coordinator::refreshPlanningContext(
     const FutureA1Commitment previous = future_a1_commitment_;
     const ArrivalSummary arrivals =
         predictA1Arrivals(vehicles, horizon, kinematics);
+    latest_arrivals_ = arrivals;
     std::string change_reason;
     FutureA1Commitment commitment =
         retainLockedFutureA1Owner(vehicles, arrivals, change_reason);
     // Preserve the old rolling behavior: invalidating an existing owner does
     // not select a replacement until the next rolling refresh.
     if (!previous.valid()) {
+        clearReservedA1Owner("direct_owner_selection");
         std::string selection_reason;
         commitment = selectFutureA1Owner(vehicles, arrivals,
                                          &selection_reason);
@@ -549,6 +704,11 @@ void A1Coordinator::refreshPlanningContext(
         }
     }
     setFutureA1Commitment(commitment);
+    if (commitment.valid()) {
+        refreshReservedA1Owner(vehicles, arrivals);
+    } else {
+        clearReservedA1Owner(change_reason.c_str());
+    }
     logFutureA1Transition(vehicles, previous, commitment, arrivals,
                           change_reason,
                           now, horizon);
@@ -664,12 +824,16 @@ void A1Coordinator::logFutureA1Transition(
 }
 
 A1Coordinator::Snapshot A1Coordinator::snapshot() const {
-    return Snapshot{departure_cluster_commitments_, bypass_count_,
-                    bypass_request_path_gen_};
+    return Snapshot{departure_cluster_commitments_, future_a1_commitment_,
+                    reserved_a1_commitment_, reservation_cohort_path_gen_,
+                    reservation_selection_reason_, latest_arrivals_,
+                    bypass_count_, bypass_request_path_gen_, service_metrics_};
 }
 
 void A1Coordinator::restore(const Snapshot& snapshot,
                             bool restore_persistent_state) {
+    const FutureA1Commitment previous_future = future_a1_commitment_;
+    const FutureA1Commitment previous_reserved = reserved_a1_commitment_;
     for (const auto& current : departure_cluster_commitments_) {
         const auto incoming = snapshot.departure_clusters.find(current.first);
         if (current.second.active &&
@@ -694,9 +858,35 @@ void A1Coordinator::restore(const Snapshot& snapshot,
         }
     }
     departure_cluster_commitments_ = snapshot.departure_clusters;
+    setFutureA1Commitment(snapshot.future_a1_commitment);
+    reserved_a1_commitment_ = snapshot.reserved_a1_commitment;
+    reservation_cohort_path_gen_ = snapshot.reservation_cohort_path_gen;
+    reservation_selection_reason_ = snapshot.reservation_selection_reason;
+    latest_arrivals_ = snapshot.latest_arrivals;
+    if (!previous_reserved.valid() && reserved_a1_commitment_.valid()) {
+        logA1Handoff("RESERVE", "snapshot_install",
+                     reserved_a1_commitment_, future_a1_commitment_.owner_id,
+                     future_a1_commitment_.owner_path_gen);
+    } else if (previous_reserved.valid() &&
+               !reserved_a1_commitment_.valid()) {
+        const bool promoted = future_a1_commitment_.valid() &&
+            future_a1_commitment_.owner_id == previous_reserved.owner_id &&
+            future_a1_commitment_.owner_path_gen ==
+                previous_reserved.owner_path_gen;
+        logA1Handoff(promoted ? "PROMOTE" : "CANCEL", "snapshot_install",
+                     promoted ? future_a1_commitment_ : previous_reserved,
+                     previous_future.owner_id,
+                     previous_future.owner_path_gen);
+    }
+    if (previous_future.valid() && !future_a1_commitment_.valid()) {
+        logA1Handoff("RELEASE", "snapshot_install", FutureA1Commitment{},
+                     previous_future.owner_id,
+                     previous_future.owner_path_gen);
+    }
     if (restore_persistent_state) {
         bypass_count_ = snapshot.bypass_count;
         bypass_request_path_gen_ = snapshot.bypass_request_path_gen;
+        service_metrics_ = snapshot.service_metrics;
     }
     // Intrusion correction is live, derived motion state. A rollout snapshot
     // must never install or complete it for the real executor.
@@ -981,6 +1171,7 @@ A1Coordinator::A1LaunchAdmission A1Coordinator::checkA1LaunchAdmission(
 
 void A1Coordinator::refreshDepartureClusterCommitments(
     std::vector<VehicleAgent>& vehicles) {
+    refreshReservedA1Owner(vehicles, latest_arrivals_);
     auto eraseWithEvent = [&](auto it, const char* event,
                               const char* reason) {
         VehicleAgent* owner = agentById(vehicles, it->second.owner_id);
@@ -1009,6 +1200,7 @@ void A1Coordinator::refreshDepartureClusterCommitments(
             !departureClusterCleared(owner->path_s, transaction.second)) {
             continue;
         }
+        bool released_transaction = false;
         for (auto it = departure_cluster_commitments_.begin();
              it != departure_cluster_commitments_.end();) {
             const DepartureClusterCommitment& commitment = it->second;
@@ -1017,9 +1209,15 @@ void A1Coordinator::refreshDepartureClusterCommitments(
                 commitment.owner_path_gen == transaction.first.second) {
                 it = eraseWithEvent(
                     it, "RELEASE", "owner_cleared_frozen_transaction");
+                released_transaction = true;
             } else {
                 ++it;
             }
+        }
+        if (released_transaction && future_a1_commitment_.valid() &&
+            future_a1_commitment_.owner_id == transaction.first.first) {
+            promoteReservedA1Owner(vehicles, transaction.first.first,
+                                   transaction.first.second);
         }
     }
 
@@ -1198,6 +1396,48 @@ void A1Coordinator::enforceFutureA1Admission(
                  << " waiter_phase=" << missionPhaseName(other.mission_phase)
                  << " already_inside=false";
             coord_log_sink_(line.str());
+        }
+    }
+}
+
+void A1Coordinator::enforceA1EntryControl(
+    std::vector<VehicleAgent>& vehicles, double dt,
+    const ActionRequest& request_action) {
+    const VehicleAgent* formal = future_a1_commitment_.valid()
+        ? agentById(vehicles, future_a1_commitment_.owner_id) : nullptr;
+    const bool formal_ready = formal != nullptr &&
+        formal->path_gen == future_a1_commitment_.owner_path_gen &&
+        (formal->mission_phase == MissionPhase::TO_A1 ||
+         formal->mission_phase == MissionPhase::PICKUP_DWELL) &&
+        formal->pending_dropoff_valid &&
+        !formal->pending_dropoff_track.empty() &&
+        formal->a1_departure_priority_until_s > 1e-9;
+    if (formal_ready) return;
+
+    const int blocker_id = future_a1_commitment_.valid()
+        ? future_a1_commitment_.owner_id
+        : reserved_a1_commitment_.valid()
+            ? reserved_a1_commitment_.owner_id : -1;
+    const char* reason = future_a1_commitment_.valid()
+        ? "a1_entry_owner_not_ready" : "a1_entry_no_owner";
+    for (VehicleAgent& vehicle : vehicles) {
+        if (!vehicle.active() ||
+            vehicle.mission_phase != MissionPhase::TO_A1 ||
+            vehicle.leg_target != LegTargetKind::A1 ||
+            vehicle.track.empty()) {
+            continue;
+        }
+        const double stop_s = std::max(
+            0.0, vehicle.track.length() - map_param_.body_front_ext() -
+                     std::max(0.0, cfg_.a1_stop_margin));
+        const double distance = stop_s - vehicle.path_s;
+        const double speed = std::max(0.0, vehicle.current_speed);
+        const double stopping_distance =
+            speed * speed / (2.0 * std::max(1e-6, cfg_.max_decel)) +
+            speed * dt;
+        if (distance > stopping_distance + 1e-9) continue;
+        if (request_action) {
+            request_action(vehicle, VehicleAction::STOP, reason, blocker_id);
         }
     }
 }

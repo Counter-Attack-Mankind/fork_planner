@@ -990,7 +990,7 @@ private:
                 ++executed_rolling_metrics_.reservation_deletes;
             }
         }
-        rule_engine_->restore(frame.rule_state, false);
+        rule_engine_->restore(frame.rule_state, false, true);
         for (size_t i = 0; i < agents_.size(); ++i) {
             VehicleAgent& v = agents_[i];
             const SimPlannedAgentDecision& d = frame.agents[i];

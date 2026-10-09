@@ -101,13 +101,6 @@ public:
         std::string reason;
     };
 
-    struct Snapshot {
-        std::map<std::pair<int, int>, DepartureClusterCommitment>
-            departure_clusters;
-        std::map<int, int> bypass_count;
-        std::map<int, int> bypass_request_path_gen;
-    };
-
     struct PairAuthority {
         int future_owner_id = -1;
         int departure_owner_id = -1;
@@ -173,6 +166,19 @@ public:
         double max_duration = 0.0;
     };
 
+    struct Snapshot {
+        std::map<std::pair<int, int>, DepartureClusterCommitment>
+            departure_clusters;
+        FutureA1Commitment future_a1_commitment;
+        FutureA1Commitment reserved_a1_commitment;
+        std::map<int, int> reservation_cohort_path_gen;
+        std::string reservation_selection_reason;
+        ArrivalSummary latest_arrivals;
+        std::map<int, int> bypass_count;
+        std::map<int, int> bypass_request_path_gen;
+        ServiceMetrics service_metrics;
+    };
+
     using DepartureTransactionIdentity =
         std::tuple<int, int, int, int, int, int, int, bool>;
 
@@ -192,6 +198,9 @@ public:
     void clearFutureA1Commitment();
     const FutureA1Commitment& futureA1Commitment() const {
         return future_a1_commitment_;
+    }
+    const FutureA1Commitment& reservedA1Commitment() const {
+        return reserved_a1_commitment_;
     }
     const ServiceMetrics& serviceMetrics() const { return service_metrics_; }
     int bypassCount(int vehicle_id) const {
@@ -216,6 +225,8 @@ public:
     void enforceFutureA1Admission(std::vector<VehicleAgent>& vehicles,
                                   double dt,
                                   const ActionRequest& request_action);
+    void enforceA1EntryControl(std::vector<VehicleAgent>& vehicles, double dt,
+                               const ActionRequest& request_action);
     void enforceDepartureClusterCommitments(
         std::vector<VehicleAgent>& vehicles, double dt,
         const ActionRequest& request_action);
@@ -275,8 +286,23 @@ private:
     void refreshBypassRequests(const std::vector<VehicleAgent>& vehicles);
     void updateBypassCountsOnCreate(const ArrivalSummary& summary,
                                     int owner_id);
+    void updateBypassCountsOnPromotion(
+        const std::vector<VehicleAgent>& vehicles, int owner_id);
     void logA1Scheduling(const ArrivalSummary& summary, int owner_id,
                          const std::string& selection_reason) const;
+    bool requestIdentityMatches(const VehicleAgent& vehicle,
+                                int service_path_gen) const;
+    bool reservationValid(const std::vector<VehicleAgent>& vehicles) const;
+    void refreshReservedA1Owner(const std::vector<VehicleAgent>& vehicles,
+                                const ArrivalSummary& arrivals);
+    bool promoteReservedA1Owner(std::vector<VehicleAgent>& vehicles,
+                                int released_owner_id,
+                                int released_owner_path_gen);
+    void clearReservedA1Owner(const char* reason);
+    void logA1Handoff(const char* event, const char* reason,
+                      const FutureA1Commitment& commitment,
+                      int formal_owner_id,
+                      int formal_owner_path_gen) const;
 
     FutureA1ZoneSelection selectFutureA1ProtectedZones(
         const std::vector<ConflictZone>& canonical_zones,
@@ -300,6 +326,10 @@ private:
     const MultiVehicleConfig& cfg_;
     Dependencies dependencies_;
     FutureA1Commitment future_a1_commitment_;
+    FutureA1Commitment reserved_a1_commitment_;
+    std::map<int, int> reservation_cohort_path_gen_;
+    std::string reservation_selection_reason_;
+    ArrivalSummary latest_arrivals_;
     std::map<std::pair<int, int>, DepartureClusterCommitment>
         departure_cluster_commitments_;
     std::map<int, IntrusionCorrection> intrusion_corrections_;

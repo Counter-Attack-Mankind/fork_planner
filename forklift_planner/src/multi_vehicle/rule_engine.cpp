@@ -151,7 +151,8 @@ RuleEngine::SimSnapshot RuleEngine::snapshot() const {
                        deadlock_manager_.snapshot(), now_};
 }
 
-void RuleEngine::restore(const SimSnapshot& s, bool restore_deadlock) {
+void RuleEngine::restore(const SimSnapshot& s, bool restore_deadlock,
+                         bool restore_a1_persistent_state) {
     for (const auto& current : conflict_reservations_) {
         if (s.reservations.count(current.first) == 0) {
             logConflictReservation(coord_log_sink_, current.first, "delete",
@@ -169,7 +170,7 @@ void RuleEngine::restore(const SimSnapshot& s, bool restore_deadlock) {
         }
     }
     conflict_reservations_ = s.reservations;
-    a1_coordinator_.restore(s.a1, restore_deadlock);
+    a1_coordinator_.restore(s.a1, restore_a1_persistent_state);
     following_pairs_ = s.following_pairs;
     tokens_ = s.tokens;
     conflicts_ = s.conflicts;
@@ -2512,6 +2513,11 @@ void RuleEngine::decide(std::vector<VehicleAgent>& vehicles, double dt,
     refreshDepartureClusterCommitments(vehicles);
     resolvePairwiseConflicts(vehicles, dt, pairwise_horizon,reuse_ordinary_coordination);
     enforceFutureA1Admission(vehicles, dt);
+    a1_coordinator_.enforceA1EntryControl(
+        vehicles, dt, [this](VehicleAgent& vehicle, VehicleAction action,
+                             const std::string& reason, int blocker_id) {
+            applyActionRequest(vehicle, action, reason, blocker_id);
+        });
     enforceDepartureClusterCommitments(vehicles, dt);
     resolveTargetSlotOccupancy(vehicles);  // slot-mouth queueing (spec 6/7)
     applyRecoveryPolicy(vehicles);

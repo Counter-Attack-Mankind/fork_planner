@@ -216,11 +216,15 @@ public:
         double now = 0.0;
     };
     SimSnapshot snapshot() const;
-    void restore(const SimSnapshot& s, bool restore_deadlock = true);
+    void restore(const SimSnapshot& s, bool restore_deadlock = true,
+                 bool restore_a1_persistent_state = true);
     // Read-only stress-test diagnostics. This exposes the current commitment
     // without creating, changing, or releasing any coordination state.
     const FutureA1Commitment& futureA1Commitment() const {
         return a1_coordinator_.futureA1Commitment();
+    }
+    const FutureA1Commitment& reservedA1Commitment() const {
+        return a1_coordinator_.reservedA1Commitment();
     }
     const A1ServiceMetrics& a1ServiceMetrics() const {
         return a1_coordinator_.serviceMetrics();
