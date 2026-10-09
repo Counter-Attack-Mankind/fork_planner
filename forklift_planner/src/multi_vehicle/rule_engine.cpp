@@ -148,7 +148,8 @@ void logA1Decision(const std::function<void(const std::string&)>& sink,
 RuleEngine::SimSnapshot RuleEngine::snapshot() const {
     return SimSnapshot{conflict_reservations_, a1_coordinator_.snapshot(),
                        following_pairs_, tokens_, conflicts_,
-                       deadlock_manager_.snapshot(), now_};
+                       deadlock_manager_.snapshot(), a1_auxiliary_retreat_,
+                       now_};
 }
 
 void RuleEngine::restore(const SimSnapshot& s, bool restore_deadlock,
@@ -175,6 +176,7 @@ void RuleEngine::restore(const SimSnapshot& s, bool restore_deadlock,
     tokens_ = s.tokens;
     conflicts_ = s.conflicts;
     if (restore_deadlock) deadlock_manager_.restore(s.deadlock);
+    a1_auxiliary_retreat_ = s.a1_auxiliary_retreat;
     now_ = s.now;
 }
 
@@ -982,6 +984,200 @@ void RuleEngine::enforceDepartureClusterCommitments(
             }
             applyActionRequest(vehicle, action, reason, blocker_id);
         });
+    updateA1AuxiliaryRetreat(vehicles, dt);
+    applyA1AuxiliaryRetreatOutput(vehicles);
+}
+
+bool RuleEngine::ordinaryRecoveryControls(int vehicle_id) const {
+    const RecoveryDirective& recovery = deadlock_manager_.directive();
+    return recovery.active() &&
+        (vehicle_id == recovery.retreat_vehicle_id ||
+         vehicle_id == recovery.pass_vehicle_id);
+}
+
+void RuleEngine::logA1AuxiliaryRetreat(const char* event) const {
+    if (!coord_log_sink_) return;
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(3)
+         << "[A1_AUX_RETREAT] event=" << event
+         << " owner=V" << a1_auxiliary_retreat_.owner_id
+         << " waiter=V" << a1_auxiliary_retreat_.waiter_id
+         << " helper=V" << a1_auxiliary_retreat_.helper_id
+         << " attempt=" << a1_auxiliary_retreat_.retreat_attempt
+         << " target_s=" << a1_auxiliary_retreat_.retreat_target_s
+         << " hold_elapsed=" << a1_auxiliary_retreat_.retreat_hold_elapsed
+         << " reason=" << a1_auxiliary_retreat_.reason;
+    coord_log_sink_(line.str());
+}
+
+void RuleEngine::updateA1AuxiliaryRetreat(
+    std::vector<VehicleAgent>& vehicles, double dt) {
+    auto vehicleById = [&](int id) -> VehicleAgent* {
+        const auto it = std::find_if(
+            vehicles.begin(), vehicles.end(),
+            [&](const VehicleAgent& vehicle) { return vehicle.id == id; });
+        return it == vehicles.end() ? nullptr : &*it;
+    };
+    constexpr double kStoppedSpeed = 1e-3;
+    const double tolerance = std::max(0.005, cfg_.path_validation_step);
+
+    if (a1_auxiliary_retreat_.active()) {
+        VehicleAgent* waiter = vehicleById(a1_auxiliary_retreat_.waiter_id);
+        VehicleAgent* helper = vehicleById(a1_auxiliary_retreat_.helper_id);
+        const A1Coordinator::IntrusionCorrection* correction =
+            a1_coordinator_.intrusionCorrectionFor(
+                a1_auxiliary_retreat_.waiter_id);
+        const bool valid = waiter != nullptr && helper != nullptr &&
+            waiter->mode == VehicleMode::ACTIVE &&
+            helper->mode == VehicleMode::ACTIVE &&
+            waiter->path_gen == a1_auxiliary_retreat_.waiter_path_gen &&
+            helper->path_gen == a1_auxiliary_retreat_.helper_path_gen &&
+            correction != nullptr &&
+            correction->owner_id == a1_auxiliary_retreat_.owner_id &&
+            correction->waiter_path_gen ==
+                a1_auxiliary_retreat_.waiter_path_gen;
+        if (!valid) {
+            a1_auxiliary_retreat_.reason =
+                "a1_intrusion_or_helper_identity_cleared";
+            logA1AuxiliaryRetreat("CLEAR");
+            a1_auxiliary_retreat_ = {};
+            return;
+        }
+        if (ordinaryRecoveryControls(waiter->id) ||
+            ordinaryRecoveryControls(helper->id)) {
+            return;
+        }
+
+        if (a1_auxiliary_retreat_.phase == RecoveryPhase::RETREAT) {
+            if (!deadlock_manager_.retreatSweepClear(
+                    *helper, *waiter, vehicles,
+                    a1_auxiliary_retreat_.retreat_target_s)) {
+                a1_auxiliary_retreat_.phase = RecoveryPhase::RETREAT_HOLD;
+                a1_auxiliary_retreat_.retreat_hold_elapsed = 0.0;
+                a1_auxiliary_retreat_.reason =
+                    "a1_aux_retreat_sweep_invalidated";
+                logA1AuxiliaryRetreat("BLOCKED");
+                return;
+            }
+            if (helper->path_s <=
+                a1_auxiliary_retreat_.retreat_target_s + tolerance) {
+                a1_auxiliary_retreat_.phase = RecoveryPhase::RETREAT_HOLD;
+                a1_auxiliary_retreat_.retreat_hold_elapsed = 0.0;
+                a1_auxiliary_retreat_.reason =
+                    "a1_aux_retreat_step_done_hold";
+                logA1AuxiliaryRetreat("RETREAT_HOLD_START");
+            }
+            return;
+        }
+
+        a1_auxiliary_retreat_.retreat_hold_elapsed += std::max(0.0, dt);
+        if (a1_auxiliary_retreat_.retreat_hold_elapsed + 1e-9 <
+            cfg_.rolling_refresh_period) {
+            return;
+        }
+        if (correction->motion ==
+                A1Coordinator::IntrusionCorrectionMotion::RETREAT ||
+            correction->blocker_id != helper->id) {
+            a1_auxiliary_retreat_.reason =
+                "a1_aux_hold_protecting_waiter_retreat";
+            return;
+        }
+        if (helper->path_s <= tolerance) {
+            a1_auxiliary_retreat_.reason = "a1_aux_no_retreat_space";
+            logA1AuxiliaryRetreat("BLOCKED");
+            return;
+        }
+        const double target_s = std::max(
+            0.0, helper->path_s - cfg_.deadlock_retreat_distance);
+        if (!deadlock_manager_.retreatSweepClear(
+                *helper, *waiter, vehicles, target_s)) {
+            a1_auxiliary_retreat_.retreat_hold_elapsed = 0.0;
+            a1_auxiliary_retreat_.reason = "a1_aux_retreat_sweep_blocked";
+            logA1AuxiliaryRetreat("BLOCKED");
+            return;
+        }
+        a1_auxiliary_retreat_.phase = RecoveryPhase::RETREAT;
+        a1_auxiliary_retreat_.retreat_target_s = target_s;
+        a1_auxiliary_retreat_.retreat_hold_elapsed = 0.0;
+        ++a1_auxiliary_retreat_.retreat_attempt;
+        a1_auxiliary_retreat_.reason = "a1_aux_repeated_fixed_retreat";
+        logA1AuxiliaryRetreat("RETREAT_RETRY");
+        return;
+    }
+
+    for (const auto& entry : a1_coordinator_.intrusionCorrections()) {
+        const A1Coordinator::IntrusionCorrection& correction = entry.second;
+        if (correction.motion !=
+                A1Coordinator::IntrusionCorrectionMotion::HOLD ||
+            correction.reason != "a1_intrusion_retreat_sweep_blocked" ||
+            correction.blocker_id < 0 ||
+            correction.blocker_id == correction.owner_id ||
+            correction.blocker_id == correction.waiter_id) {
+            continue;
+        }
+        VehicleAgent* waiter = vehicleById(correction.waiter_id);
+        VehicleAgent* helper = vehicleById(correction.blocker_id);
+        if (waiter == nullptr || helper == nullptr ||
+            helper->mode != VehicleMode::ACTIVE || helper->track.empty() ||
+            a1_coordinator_.intrusionCorrectionFor(helper->id) != nullptr ||
+            helper->action != VehicleAction::STOP ||
+            helper->wait_time <= 0.0 ||
+            helper->current_speed > kStoppedSpeed ||
+            ordinaryRecoveryControls(waiter->id) ||
+            ordinaryRecoveryControls(helper->id)) {
+            continue;
+        }
+
+        a1_auxiliary_retreat_.phase = RecoveryPhase::RETREAT_HOLD;
+        a1_auxiliary_retreat_.owner_id = correction.owner_id;
+        a1_auxiliary_retreat_.waiter_id = correction.waiter_id;
+        a1_auxiliary_retreat_.waiter_path_gen = correction.waiter_path_gen;
+        a1_auxiliary_retreat_.helper_id = helper->id;
+        a1_auxiliary_retreat_.helper_path_gen = helper->path_gen;
+        a1_auxiliary_retreat_.retreat_target_s = helper->path_s;
+        a1_auxiliary_retreat_.reason = "a1_aux_wait_before_first_retreat";
+
+        if (helper->path_s <= tolerance) {
+            a1_auxiliary_retreat_.reason = "a1_aux_no_retreat_space";
+            logA1AuxiliaryRetreat("BLOCKED");
+            return;
+        }
+        const double target_s = std::max(
+            0.0, helper->path_s - cfg_.deadlock_retreat_distance);
+        if (!deadlock_manager_.retreatSweepClear(
+                *helper, *waiter, vehicles, target_s)) {
+            a1_auxiliary_retreat_.reason = "a1_aux_retreat_sweep_blocked";
+            logA1AuxiliaryRetreat("BLOCKED");
+            return;
+        }
+        a1_auxiliary_retreat_.phase = RecoveryPhase::RETREAT;
+        a1_auxiliary_retreat_.retreat_attempt = 1;
+        a1_auxiliary_retreat_.retreat_target_s = target_s;
+        a1_auxiliary_retreat_.reason = "a1_aux_first_fixed_retreat";
+        logA1AuxiliaryRetreat("RETREAT_START");
+        return;
+    }
+}
+
+void RuleEngine::applyA1AuxiliaryRetreatOutput(
+    std::vector<VehicleAgent>& vehicles) {
+    if (!a1_auxiliary_retreat_.active() ||
+        ordinaryRecoveryControls(a1_auxiliary_retreat_.helper_id)) {
+        return;
+    }
+    const auto helper = std::find_if(
+        vehicles.begin(), vehicles.end(), [&](const VehicleAgent& vehicle) {
+            return vehicle.id == a1_auxiliary_retreat_.helper_id &&
+                vehicle.path_gen == a1_auxiliary_retreat_.helper_path_gen;
+        });
+    if (helper == vehicles.end()) return;
+    helper->action = VehicleAction::STOP;
+    helper->requested_action = VehicleAction::STOP;
+    helper->blocker_id = -1;
+    helper->reason = a1_auxiliary_retreat_.reason;
+    if (a1_auxiliary_retreat_.phase == RecoveryPhase::RETREAT_HOLD) {
+        helper->current_speed = 0.0;
+    }
 }
 
 PairInteractionResult RuleEngine::detectPairInteraction(
@@ -2417,6 +2613,15 @@ RuleEngine::MotionOverride RuleEngine::motionOverrideFor(int vehicle_id) const
     const bool recovery_vehicle =   recovery.active() &&    (vehicle_id == recovery.retreat_vehicle_id ||   vehicle_id == recovery.pass_vehicle_id);
     if (recovery_vehicle)
         return MotionOverride{recovery.motionFor(vehicle_id),recovery.retreat_target_s,false};
+
+    if (a1_auxiliary_retreat_.active() &&
+        vehicle_id == a1_auxiliary_retreat_.helper_id) {
+        const RecoveryMotion motion =
+            a1_auxiliary_retreat_.phase == RecoveryPhase::RETREAT
+                ? RecoveryMotion::RETREAT : RecoveryMotion::HOLD;
+        return MotionOverride{motion,
+                              a1_auxiliary_retreat_.retreat_target_s, true};
+    }
     
     // 非 deadlock recovery 车辆仍正常执行 A1 intrusion correction。
     if (const A1Coordinator::IntrusionCorrection* correction =  a1_coordinator_.intrusionCorrectionFor(vehicle_id))
@@ -2430,6 +2635,7 @@ void RuleEngine::refreshA1IntrusionCorrections(
     const A1IntrusionCorrections previous_corrections =
         a1_coordinator_.intrusionCorrections();
     a1_coordinator_.refreshIntrusionCorrections(vehicles);
+    updateA1AuxiliaryRetreat(vehicles, dt);
     if (coord_log_sink_) {
         for (const auto& entry : a1_coordinator_.intrusionCorrections()) {
             const A1Coordinator::IntrusionCorrection& correction =
@@ -2482,6 +2688,7 @@ void RuleEngine::refreshA1IntrusionCorrections(
         vehicle.requested_action = VehicleAction::STOP;
         vehicle.blocker_id = correction->blocker_id;
     }
+    applyA1AuxiliaryRetreatOutput(vehicles);
 }
 
 void RuleEngine::applyRecoveryDirectiveToOutput(
@@ -2602,6 +2809,7 @@ void RuleEngine::decide(std::vector<VehicleAgent>& vehicles, double dt,
     // 几何冲突(findConflictZones:沿固定路径采样车身OBB,只标真实重叠弧段)作唯一交叉
     // 协调权威。八竿子打不着的两车它根本不报冲突→各自全速。
     // arbitrateResources(vehicles, dt);   // 已停用(资源盒=幻象冲突源)
+    applyA1AuxiliaryRetreatOutput(vehicles);
     const double pairwise_horizon = prediction_horizon_override >= 0.0 ? prediction_horizon_override : cfg_.prediction_horizon;
 
     refreshDepartureClusterCommitments(vehicles);
@@ -2617,6 +2825,7 @@ void RuleEngine::decide(std::vector<VehicleAgent>& vehicles, double dt,
     applyRecoveryPolicy(vehicles);
     enforceForwardClearance(vehicles, dt);
     applyRequestedActions(vehicles, dt);
+    applyA1AuxiliaryRetreatOutput(vehicles);
     observeDeadlock(vehicles, dt, debug_log_source_ == "REAL");
 
     for (VehicleAgent& v : vehicles) {

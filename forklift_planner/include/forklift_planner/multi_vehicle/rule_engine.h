@@ -188,6 +188,21 @@ public:
         double target_s = 0.0;
         bool a1_intrusion = false;
     };
+
+    struct A1AuxiliaryRetreatState {
+        RecoveryPhase phase = RecoveryPhase::NONE;
+        int owner_id = -1;
+        int waiter_id = -1;
+        int waiter_path_gen = -1;
+        int helper_id = -1;
+        int helper_path_gen = -1;
+        int retreat_attempt = 0;
+        double retreat_target_s = 0.0;
+        double retreat_hold_elapsed = 0.0;
+        std::string reason;
+
+        bool active() const { return phase != RecoveryPhase::NONE; }
+    };
     MotionOverride motionOverrideFor(int vehicle_id) const;
     void refreshA1IntrusionCorrections(
         std::vector<VehicleAgent>& vehicles, double dt);
@@ -216,6 +231,7 @@ public:
         // rollout cannot leak its final predicted frame into current RViz.
         std::vector<ConflictMarker> conflicts;
         DeadlockManager::Snapshot deadlock;
+        A1AuxiliaryRetreatState a1_auxiliary_retreat;
         double now = 0.0;
     };
     SimSnapshot snapshot() const;
@@ -422,6 +438,12 @@ private:
         std::vector<VehicleAgent>& vehicles);
     void enforceDepartureClusterCommitments(
         std::vector<VehicleAgent>& vehicles, double dt);
+    void updateA1AuxiliaryRetreat(std::vector<VehicleAgent>& vehicles,
+                                  double dt);
+    void applyA1AuxiliaryRetreatOutput(
+        std::vector<VehicleAgent>& vehicles);
+    bool ordinaryRecoveryControls(int vehicle_id) const;
+    void logA1AuxiliaryRetreat(const char* event) const;
     int departureClusterOwnerForPair(const VehicleAgent& a,
                                      const VehicleAgent& b) const;
     void resolveFollowing(std::vector<VehicleAgent>& vehicles);
@@ -502,6 +524,7 @@ private:
     double now_ = 0.0;  // 内部仿真时钟(每 decide 累加 dt),供令牌防抖/超时用
     A1Coordinator a1_coordinator_;
     DeadlockManager deadlock_manager_;
+    A1AuxiliaryRetreatState a1_auxiliary_retreat_;
 };
 
 }  // namespace multi_vehicle

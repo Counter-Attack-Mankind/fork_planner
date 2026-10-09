@@ -107,6 +107,11 @@ public:
 
     const RecoveryDirective& directive() const { return directive_; }
 
+    bool retreatSweepClear(const VehicleAgent& retreat,
+                           const VehicleAgent& passer,
+                           const std::vector<VehicleAgent>& vehicles,
+                           double target_s) const;
+
     Snapshot snapshot() const;
     void restore(const Snapshot& snapshot);
 
@@ -118,10 +123,6 @@ private:
     const DeadlockPairGeometry* geometryFor(
         const std::vector<DeadlockPairGeometry>& geometry,
         int vehicle_a, int vehicle_b) const;
-    bool retreatSweepClear(const VehicleAgent& retreat,
-                           const VehicleAgent& passer,
-                           const std::vector<VehicleAgent>& vehicles,
-                           double target_s) const;
     void refreshDirective();
     void emit(const char* event, const std::string& details, bool enabled) const;
     void abort(const std::string& reason, bool emit_logs);
