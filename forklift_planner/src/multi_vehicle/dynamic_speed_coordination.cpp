@@ -33,6 +33,8 @@ PriorityPhysicalTtcEvaluation evaluatePriorityPhysicalTtc(
     const VehicleAgent& priority, const VehicleAgent& other,
     const std::vector<PredictedKinematicSample>& priority_prediction,
     const MapParam& map_param, const MultiVehicleConfig& config) {
+
+    return PriorityPhysicalTtcEvaluation{};  //暂时性去除物理车身检测，全权交给hard guard
     PriorityPhysicalTtcEvaluation result;
     if (!priority.active() || !other.active() || priority.track.empty() ||
         other.track.empty() || priority_prediction.empty()) {
