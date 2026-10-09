@@ -93,6 +93,12 @@ std::vector<PredictedKinematicSample> predictTrajectory(
     const MultiVehicleConfig& config, VehicleAction target_action,
     double prediction_horizon);
 
+// Fixed-pose prediction for a forced stationary recovery vehicle. In real
+// mode the measured rear-axle pose is authoritative; simulation uses path_s.
+std::vector<PredictedKinematicSample> predictStationaryTrajectory(
+    const VehicleAgent& vehicle, const MapParam& map_param,
+    const MultiVehicleConfig& config, double prediction_horizon);
+
 // Inverts one vehicle's existing kinematic prediction at its own path-space
 // danger position. Returns infinity when the prediction cannot reach target_s.
 double predictionTimeAtS(

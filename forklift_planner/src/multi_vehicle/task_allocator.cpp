@@ -1006,6 +1006,8 @@ bool TaskAllocator::tryPlan(VehicleAgent& vehicle, int target,
     vehicle.track.set(plan.path);
     ++vehicle.path_gen;  // 新固定路径实例 → 令 RuleEngine 的 C_ij 冲突块缓存失效重算
     vehicle.path_s = 0.0;
+    vehicle.slot_departure_clear_s =
+        slotDepartureClearS(vehicle.track, vehicle.current_slot);
     vehicle.current_speed = 0.0;
     vehicle.wait_time = 0.0;
     vehicle.dwell_remaining = 0.0;

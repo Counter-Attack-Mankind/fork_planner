@@ -1020,13 +1020,16 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
         if (vehicles[i].active() && !vehicles[i].track.empty()) {
             const RecoveryMotion recovery_motion =
                 deadlock_manager_.directive().motionFor(vehicles[i].id);
-            const VehicleAction prediction_action =
-                recovery_motion == RecoveryMotion::HOLD ||
-                        vehicles[i].ttc_stop_hold_remaining > 1e-9
-                    ? VehicleAction::STOP : VehicleAction::NOMINAL;
-            predictions[i] =
-                predictTrajectory(vehicles[i], mp_, cfg_,
-                                  prediction_action, horizon);
+            if (recovery_motion == RecoveryMotion::HOLD) {
+                predictions[i] = predictStationaryTrajectory(
+                    vehicles[i], mp_, cfg_, horizon);
+            } else {
+                const VehicleAction prediction_action =
+                    vehicles[i].ttc_stop_hold_remaining > 1e-9
+                        ? VehicleAction::STOP : VehicleAction::NOMINAL;
+                predictions[i] = predictTrajectory(
+                    vehicles[i], mp_, cfg_, prediction_action, horizon);
+            }
         }
     }
 
@@ -1118,6 +1121,13 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
             if (!b.active() || predictions[j].empty()) continue;
             const std::pair<int, int> key{std::min(a.id, b.id),
                                           std::max(a.id, b.id)};
+            const RecoveryDirective& recovery = deadlock_manager_.directive();
+            const bool a_retreat_hold =
+                recovery.phase == RecoveryPhase::RETREAT_HOLD &&
+                recovery.retreat_vehicle_id == a.id;
+            const bool b_retreat_hold =
+                recovery.phase == RecoveryPhase::RETREAT_HOLD &&
+                recovery.retreat_vehicle_id == b.id;
             // Crossing truth is generated directly from synchronized OBBs.
             // Static path geometry is intentionally absent from this call.
             PairInteractionResult direct_interaction =
@@ -1167,7 +1177,8 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
             int ordinary_priority_id = -1;
             PriorityPhysicalTtcEvaluation priority_physical;
             if (ordinary && !reuse_ordinary_coordination) {
-                ordinary_priority_id = priorityWinner(a, b);
+                ordinary_priority_id = a_retreat_hold
+                    ? b.id : b_retreat_hold ? a.id : priorityWinner(a, b);
             }
 
             const TimedConflictEvent& event = interaction.event;
@@ -1341,12 +1352,11 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
             const bool a_in_bridge = bridge_correction.a.bridge_related && a.path_s + eps >= bridge_correction.a.near_boundary_s ;
             const bool b_in_bridge = bridge_correction.b.bridge_related && b.path_s + eps >= bridge_correction.b.near_boundary_s ;
 
-            if (a_in_bridge != b_in_bridge) 
+            if (!a_retreat_hold && !b_retreat_hold &&
+                a_in_bridge != b_in_bridge)
                 preferred_winner = a_in_bridge ? a.id : b.id;
 
             //========(死锁部分)========================================
-
-            const RecoveryDirective& recovery = deadlock_manager_.directive();
 
             if (ordinary &&(preferred_winner == a.id || preferred_winner == b.id)) 
             {
@@ -1506,7 +1516,11 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                     if (speed_result.yielding_safety_stop) {
                         VehicleAgent& yielding_vehicle =
                             a_is_priority ? b : a;
-                        if (yielding_vehicle.ttc_stop_hold_remaining <= 1e-9) {
+                        const bool yielding_is_retreat_hold =
+                            (a_is_priority && b_retreat_hold) ||
+                            (!a_is_priority && a_retreat_hold);
+                        if (!yielding_is_retreat_hold &&
+                            yielding_vehicle.ttc_stop_hold_remaining <= 1e-9) {
                             yielding_vehicle.ttc_stop_hold_remaining =
                                 cfg_.rolling_refresh_period;
                         }
@@ -1514,7 +1528,7 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                     const std::string suffix =
                         "_V" + std::to_string(preferred_winner);
                     if (speed_result.selected_action_a !=
-                        VehicleAction::NOMINAL) {
+                            VehicleAction::NOMINAL && !a_retreat_hold) {
                         applyActionRequest(
                             a, speed_result.selected_action_a,
                             "dynamic_speed_" + std::string(actionName(
@@ -1522,7 +1536,7 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                             b.id);
                     }
                     if (speed_result.selected_action_b !=
-                        VehicleAction::NOMINAL) {
+                            VehicleAction::NOMINAL && !b_retreat_hold) {
                         applyActionRequest(
                             b, speed_result.selected_action_b,
                             "dynamic_speed_" + std::string(actionName(
@@ -2492,6 +2506,10 @@ void RuleEngine::applyRecoveryDirectiveToOutput(
 
 void RuleEngine::observeDeadlock(std::vector<VehicleAgent>& vehicles,
                                  double dt, bool emit_logs) {
+    if (rollout_recovery_hold_frozen_ &&
+        deadlock_manager_.directive().phase == RecoveryPhase::RETREAT_HOLD) {
+        return;
+    }
     std::vector<DeadlockPairGeometry> geometry_items;
     for (size_t i = 0; i < vehicles.size(); ++i) {
         const VehicleAgent& a = vehicles[i];

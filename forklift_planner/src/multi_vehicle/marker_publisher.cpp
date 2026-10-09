@@ -479,6 +479,57 @@ void MarkerPublisher::addDeadlockRetreatTargetMarkers(
     arr.markers.push_back(label);
 }
 
+void MarkerPublisher::addDeadlockVehicleMarkers(
+    visualization_msgs::MarkerArray& arr,
+    const std::vector<VehicleAgent>& vehicles,
+    const RecoveryDirective& recovery) const {
+    const ros::Time now = ros::Time::now();
+    std::set<int> active_ids;
+    if (recovery.active()) {
+        active_ids.insert(recovery.retreat_vehicle_id);
+        active_ids.insert(recovery.pass_vehicle_id);
+    }
+
+    std::set<int> published_ids;
+    for (const VehicleAgent& vehicle : vehicles) {
+        if (active_ids.count(vehicle.id) == 0 || vehicle.track.empty()) continue;
+        const int expected_path_gen = vehicle.id == recovery.retreat_vehicle_id
+            ? recovery.retreat_path_gen : recovery.pass_path_gen;
+        if (vehicle.path_gen != expected_path_gen) continue;
+
+        const RoughWp pose = bodyCenterPose(displayPose(vehicle), mp_);
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = pp_.frame_id;
+        marker.header.stamp = now;
+        marker.ns = "deadlock_vehicle_badge";
+        marker.id = vehicle.id;
+        marker.type = visualization_msgs::Marker::CUBE;
+        marker.action = visualization_msgs::Marker::ADD;
+        marker.pose.position.x = pose.x;
+        marker.pose.position.y = pose.y;
+        marker.pose.position.z = 0.071;
+        marker.pose.orientation.z = std::sin(0.5 * pose.theta);
+        marker.pose.orientation.w = std::cos(0.5 * pose.theta);
+        marker.scale.x = 0.28 * mp_.vehicle_length;
+        marker.scale.y = 0.45 * mp_.vehicle_width;
+        marker.scale.z = 0.018;
+        marker.color = rgba(0.45f, 0.45f, 0.45f, 1.0f);
+        arr.markers.push_back(marker);
+        published_ids.insert(vehicle.id);
+    }
+    for (int id : last_deadlock_vehicle_marker_ids_) {
+        if (published_ids.count(id) != 0) continue;
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = pp_.frame_id;
+        marker.header.stamp = now;
+        marker.ns = "deadlock_vehicle_badge";
+        marker.id = id;
+        marker.action = visualization_msgs::Marker::DELETE;
+        arr.markers.push_back(marker);
+    }
+    last_deadlock_vehicle_marker_ids_ = std::move(published_ids);
+}
+
 void MarkerPublisher::addVisitedSlotMarkers(
     visualization_msgs::MarkerArray& arr,
     const std::vector<bool>& visited_slots) const {
@@ -973,6 +1024,7 @@ void MarkerPublisher::publish(
         addArrowMarker(arr, v);
         addLabelMarker(arr, v, recovery);
     }
+    addDeadlockVehicleMarkers(arr, vehicles, recovery);
     addConflictMarkers(arr, conflicts, resource_markers);
     pub_.publish(arr);
 }

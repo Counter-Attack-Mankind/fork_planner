@@ -586,6 +586,16 @@ private:
     }
 
     RoughWp poseForCollision(const VehicleAgent& v, double path_s) const {
+        if (v.real_pose_valid &&
+            rule_engine_->motionOverrideFor(v.id).motion ==
+                forklift_planner::multi_vehicle::RecoveryMotion::HOLD) {
+            RoughWp pose;
+            pose.x = v.real_x;
+            pose.y = v.real_y;
+            pose.theta = v.real_yaw;
+            pose.type = WpType::FORWARD;
+            return pose;
+        }
         if (!v.track.empty()) {
             if (v.mode == VehicleMode::DWELL) {
                 return v.track.poseAtS(v.track.length());
@@ -641,6 +651,10 @@ private:
         }
         const std::vector<bool> sv = visited_slots_;
         const auto sr = rule_engine_->snapshot();       //保存规则引擎状态
+        const bool freeze_recovery_hold =
+            sr.deadlock.directive.phase ==
+            forklift_planner::multi_vehicle::RecoveryPhase::RETREAT_HOLD;
+        rule_engine_->setRolloutRecoveryHoldFrozen(freeze_recovery_hold);
         const auto live_a1_intrusion_corrections =
             rule_engine_->captureLiveA1IntrusionCorrections();
         const auto sl = allocator_->snapshot();         //保存任务分配器状态
@@ -657,13 +671,17 @@ private:
                 
                 sandbox_msgs::TrajectoryPoint tp;
                 tp.x = p.x; tp.y = p.y; tp.yaw = p.theta;                          // 车头朝向
-                const bool retreat =
-                    rule_engine_->motionOverrideFor(v.id).motion ==
+                const auto recovery_motion =
+                    rule_engine_->motionOverrideFor(v.id).motion;
+                const bool retreat = recovery_motion ==
                     forklift_planner::multi_vehicle::RecoveryMotion::RETREAT;
                 const double motion_sign =
                     forklift_planner::multi_vehicle::signedPathMotionDirection(
                         v.track, v.path_s, retreat ? -1 : 1);
-                tp.velocity = motion_sign * std::max(0.0, v.current_speed);
+                tp.velocity = recovery_motion ==
+                        forklift_planner::multi_vehicle::RecoveryMotion::HOLD
+                    ? 0.0
+                    : motion_sign * std::max(0.0, v.current_speed);
                 tp.time = s * dt;
                 if (path_gen_cut_indices != nullptr &&
                     (*path_gen_cut_indices)[i] ==
@@ -672,7 +690,7 @@ private:
                     (*path_gen_cut_indices)[i] = out[i].points.size();
                 }
                 out[i].points.push_back(tp);
-                if (v.current_speed > 1e-3) hold[i] = false;   // 整段都不动才算 hold
+                if (std::abs(tp.velocity) > 1e-3) hold[i] = false;   // 整段都不动才算 hold
             }
         };
 
@@ -752,6 +770,7 @@ private:
         visited_slots_ = sv;
         if (diagnostics_) diagnostics_->setSuppressed(true);
         rule_engine_->restore(sr);
+        rule_engine_->setRolloutRecoveryHoldFrozen(false);
         rule_engine_->restoreLiveA1IntrusionCorrections(
             live_a1_intrusion_corrections);
         allocator_->restore(sl);

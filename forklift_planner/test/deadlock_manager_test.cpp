@@ -1,3 +1,4 @@
+#include <cmath>
 #include <iostream>
 #include <vector>
 
@@ -18,7 +19,8 @@ int main() {
     MultiVehicleConfig config;
     config.deadlock_retreat_distance = 0.50;
     config.deadlock_retreat_max_attempts = 3;
-    config.rolling_refresh_period = 0.10;
+    config.rolling_refresh_period = 2.0;
+    config.prediction_horizon = 15.0;
 
     VehicleAgent retreat;
     retreat.id = 0;
@@ -45,6 +47,58 @@ int main() {
         RoughWp{4.0, 5.0, 0.0, WpType::FORWARD}});
 
     std::vector<VehicleAgent> vehicles{retreat, passer};
+
+    DeadlockPairGeometry geometry;
+    geometry.vehicle_a = retreat.id;
+    geometry.vehicle_b = passer.id;
+    geometry.path_gen_a = retreat.path_gen;
+    geometry.path_gen_b = passer.path_gen;
+    geometry.preferred_priority_vehicle_id = passer.id;
+
+    MultiVehicleConfig selection_config = config;
+    selection_config.deadlock_confirm_time = 0.20;
+    VehicleAgent b_retreat = retreat;
+    b_retreat.path_s = 1.40;
+    b_retreat.slot_departure_clear_s = 0.30;
+    std::vector<VehicleAgent> selection_vehicles{b_retreat, passer};
+    DeadlockManager selection_manager(map, selection_config);
+    selection_manager.update(selection_vehicles, {geometry}, 0.10, false);
+    selection_manager.update(selection_vehicles, {geometry}, 0.10, false);
+    if (selection_manager.directive().phase != RecoveryPhase::RETREAT ||
+        selection_manager.directive().retreat_target_s != 0.0 ||
+        selection_manager.directive().retreat_attempt != 1) {
+        return fail("B retreat within 1.5 m did not target path start");
+    }
+    const int original_path_gen = selection_vehicles[0].path_gen;
+    selection_vehicles[0].path_s = 0.0;
+    selection_manager.update(selection_vehicles, {geometry}, 0.10, false);
+    if (selection_manager.directive().phase != RecoveryPhase::RETREAT_HOLD ||
+        selection_vehicles[0].mode != VehicleMode::ACTIVE ||
+        selection_vehicles[0].path_gen != original_path_gen) {
+        return fail("return to B start changed task identity or skipped HOLD");
+    }
+
+    VehicleAgent non_b_retreat = retreat;
+    non_b_retreat.path_s = 1.40;
+    non_b_retreat.slot_departure_clear_s = 0.0;
+    std::vector<VehicleAgent> non_b_vehicles{non_b_retreat, passer};
+    DeadlockManager non_b_manager(map, selection_config);
+    non_b_manager.update(non_b_vehicles, {geometry}, 0.10, false);
+    non_b_manager.update(non_b_vehicles, {geometry}, 0.10, false);
+    if (std::abs(non_b_manager.directive().retreat_target_s - 0.90) > 1e-9) {
+        return fail("non-B path incorrectly used direct return retreat");
+    }
+
+    VehicleAgent far_b_retreat = b_retreat;
+    far_b_retreat.path_s = 1.60;
+    std::vector<VehicleAgent> far_b_vehicles{far_b_retreat, passer};
+    DeadlockManager far_b_manager(map, selection_config);
+    far_b_manager.update(far_b_vehicles, {geometry}, 0.10, false);
+    far_b_manager.update(far_b_vehicles, {geometry}, 0.10, false);
+    if (std::abs(far_b_manager.directive().retreat_target_s - 1.10) > 1e-9) {
+        return fail("B retreat beyond 1.5 m incorrectly targeted path start");
+    }
+
     DeadlockManager manager(map, config);
     DeadlockManager::Snapshot state;
     state.transaction.phase = RecoveryPhase::RETREAT;
@@ -113,6 +167,26 @@ int main() {
         return fail("ordinary STOP incorrectly entered RETREAT_HOLD");
     }
 
+    VehicleAgent measured_hold = retreat;
+    measured_hold.real_pose_valid = true;
+    measured_hold.real_x = 10.0;
+    measured_hold.real_y = -3.0;
+    measured_hold.real_yaw = 0.7;
+    const auto stationary = predictStationaryTrajectory(
+        measured_hold, map, config, config.prediction_horizon);
+    if (stationary.empty() ||
+        std::abs(stationary.back().t - 15.0) > 1e-9) {
+        return fail("stationary HOLD prediction did not cover 15 seconds");
+    }
+    for (const PredictedKinematicSample& sample : stationary) {
+        if (sample.speed != 0.0 || sample.s != measured_hold.path_s ||
+            std::abs(sample.body.x - stationary.front().body.x) > 1e-9 ||
+            std::abs(sample.body.y - stationary.front().body.y) > 1e-9 ||
+            std::abs(sample.body.theta - stationary.front().body.theta) > 1e-9) {
+            return fail("stationary HOLD prediction changed pose or speed");
+        }
+    }
+
     RuleEngine engine(map, config);
     RuleEngine::SimSnapshot engine_state = engine.snapshot();
     engine_state.deadlock.transaction.phase = RecoveryPhase::RETREAT_HOLD;
@@ -149,6 +223,18 @@ int main() {
         engine.motionOverrideFor(vehicles[1].id).motion !=
             RecoveryMotion::NORMAL) {
         return fail("RETREAT_HOLD output did not stop only the retreat vehicle");
+    }
+
+    const double elapsed_before_freeze =
+        engine.snapshot().deadlock.transaction.retreat_hold_elapsed;
+    engine.setRolloutRecoveryHoldFrozen(true);
+    for (int i = 0; i < 150; ++i) engine.decide(vehicles, 0.10);
+    engine.setRolloutRecoveryHoldFrozen(false);
+    const auto frozen_state = engine.snapshot().deadlock;
+    if (frozen_state.directive.phase != RecoveryPhase::RETREAT_HOLD ||
+        std::abs(frozen_state.transaction.retreat_hold_elapsed -
+                 elapsed_before_freeze) > 1e-9) {
+        return fail("15-second rollout advanced live RETREAT_HOLD time");
     }
 
     std::cout << "deadlock_manager_test: PASS\n";

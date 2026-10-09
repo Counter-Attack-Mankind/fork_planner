@@ -72,6 +72,10 @@ private:
         visualization_msgs::MarkerArray& arr,
         const std::vector<VehicleAgent>& vehicles,
         const RecoveryDirective& recovery) const;
+    void addDeadlockVehicleMarkers(
+        visualization_msgs::MarkerArray& arr,
+        const std::vector<VehicleAgent>& vehicles,
+        const RecoveryDirective& recovery) const;
 
     ros::Publisher pub_;
     const MapParam& mp_;
@@ -86,6 +90,7 @@ private:
     mutable std::set<int> last_zone_marker_ids_;
     mutable int last_a1_waiter_stop_marker_count_ = 0;
     mutable int last_a1_frozen_zone_marker_count_ = 0;
+    mutable std::set<int> last_deadlock_vehicle_marker_ids_;
     mutable int publish_seq_ = 0;
     RuleEngine::RollingDynamicDecision rolling_decision_;
 };

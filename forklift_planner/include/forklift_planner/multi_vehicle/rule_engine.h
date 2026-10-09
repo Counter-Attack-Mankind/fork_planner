@@ -178,6 +178,9 @@ public:
                     nullptr);
     void observeDeadlock(std::vector<VehicleAgent>& vehicles, double dt,
                          bool emit_logs);
+    void setRolloutRecoveryHoldFrozen(bool frozen) {
+        rollout_recovery_hold_frozen_ = frozen;
+    }
     void applyRecoveryDirectiveToOutput(
         std::vector<VehicleAgent>& vehicles);
     struct MotionOverride {
@@ -468,6 +471,7 @@ private:
     // unified rolling coordinator (including frozen-period reuse). This is
     // diagnostic input for detecting a downstream authority override.
     std::set<std::pair<int, int>> ordinary_dynamic_pairs_;
+    bool rollout_recovery_hold_frozen_ = false;
 
     // 静态冲突集 C_ij 缓存(协调图第一步)。key={lo.id,hi.id};块以 self=lo 朝向存储。
     // gen_lo/gen_hi 记录算定时两车的 path_gen;任一方 path_gen 变(换了固定路径)即失效

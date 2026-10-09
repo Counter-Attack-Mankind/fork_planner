@@ -16,8 +16,6 @@ namespace multi_vehicle {
 
 namespace {
 
-constexpr double kRetreatHoldDuration = 2.0;
-
 //得到一辆车当前用于几何检测的路径纵向位置s，若休眠则证明在库位，走完路径。
 double vehiclePoseS(const VehicleAgent& vehicle) {
     return vehicle.mode == VehicleMode::DWELL
@@ -236,7 +234,7 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
         {
             transaction_.retreat_hold_elapsed += std::max(0.0, dt);
             if (transaction_.retreat_hold_elapsed + 1e-9 >=
-                kRetreatHoldDuration) {
+                config_.rolling_refresh_period) {
                 transaction_.phase = RecoveryPhase::PASS;
                 transaction_.retreat_clear_elapsed = 0.0;
                 transaction_.pass_clear_elapsed = 0.0;
@@ -248,7 +246,7 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                         << " retreat=V" << retreat->id
                         << " pass=V" << passer->id
                         << " attempt=" << transaction_.retreat_attempt
-                        << " hold=" << kRetreatHoldDuration;
+                        << " hold=" << config_.rolling_refresh_period;
                 emit("RETREAT_HOLD_DONE", details.str(), emit_logs);
                 emit("PASS_START", details.str(), emit_logs);
             } else {
@@ -485,29 +483,47 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
     transaction_.pass_path_gen = passer->path_gen;
 
     const double tolerance = std::max(0.005, config_.path_validation_step);
-    // 若已经在路径起点，不再退
+    // 若已经在路径起点，不再退；B 起点仍执行一个完整滚动周期的静止观察。
     if (retreat->path_s <= tolerance) 
     {
-        transaction_.phase = RecoveryPhase::PASS;
+        const bool starts_at_b_slot = retreat->slot_departure_clear_s > 0.0;
+        transaction_.phase = starts_at_b_slot
+            ? RecoveryPhase::RETREAT_HOLD : RecoveryPhase::PASS;
         transaction_.retreat_attempt = 0;
         transaction_.retreat_target_s = 0.0;
+        transaction_.retreat_hold_elapsed = 0.0;
         transaction_.retreat_clear_elapsed = 0.0;
         transaction_.pass_clear_elapsed = 0.0;
-        transaction_.reason = "retreater_already_at_path_start";
+        transaction_.reason = starts_at_b_slot
+            ? "retreater_at_b_start_hold"
+            : "retreater_already_at_path_start";
         refreshDirective();
-        emit("PASS_START",
+        emit(starts_at_b_slot ? "RETREAT_HOLD_START" : "PASS_START",
              "pair=V" + std::to_string(retreat->id) + "-V" +
                  std::to_string(passer->id) + " retreat=V" +
                  std::to_string(retreat->id) + " pass=V" +
                  std::to_string(passer->id) +
-                 " reason=retreater_already_at_path_start",
+                 " reason=" + transaction_.reason,
              emit_logs);
         return;
     }
 
-    // 否则第一次退 0.5 m，不足则退到 s=0，如果后退会碰到车，证明后退失效，直接无解----后续可以考虑多车联动，目前双车先这样
-    const double target_s = std::max(0.0,   retreat->path_s - config_.deadlock_retreat_distance);
-    if (!retreatSweepClear(*retreat, *passer, vehicles,target_s)) 
+    // B 起点在最大三次退让范围内时，首次直接安全扫掠回 s=0；其余路径仍固定退 0.5 m。
+    const double max_total_retreat = config_.deadlock_retreat_distance *
+        static_cast<double>(config_.deadlock_retreat_max_attempts);
+    bool return_to_b_start = retreat->slot_departure_clear_s > 0.0 &&
+        retreat->path_s <= max_total_retreat + tolerance;
+    double target_s = return_to_b_start
+        ? 0.0
+        : std::max(0.0, retreat->path_s - config_.deadlock_retreat_distance);
+    bool sweep_clear = retreatSweepClear(*retreat, *passer, vehicles, target_s);
+    if (return_to_b_start && !sweep_clear) {
+        return_to_b_start = false;
+        target_s = std::max(
+            0.0, retreat->path_s - config_.deadlock_retreat_distance);
+        sweep_clear = retreatSweepClear(*retreat, *passer, vehicles, target_s);
+    }
+    if (!sweep_clear)
     {
         transaction_.phase = RecoveryPhase::UNRESOLVED;
         transaction_.reason = "first_retreat_sweep_blocked";
@@ -522,7 +538,9 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
     transaction_.retreat_distance =
     retreat->path_s - target_s;
 
-    transaction_.reason ="priority_yielding_fixed_retreat";
+    transaction_.reason = return_to_b_start
+        ? "priority_yielding_return_to_b_start"
+        : "priority_yielding_fixed_retreat";
     refreshDirective();
 
     std::ostringstream selection;
@@ -532,7 +550,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
           << " attempt=1"
           << " start_s=" << retreat->path_s 
           << " target_s=" << target_s
-          << " distance=" << transaction_.retreat_distance;
+          << " distance=" << transaction_.retreat_distance
+          << " return_to_b_start=" << (return_to_b_start ? 1 : 0);
 
     emit("SELECT", selection.str(), emit_logs);
 }

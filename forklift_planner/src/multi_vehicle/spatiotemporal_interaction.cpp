@@ -202,6 +202,34 @@ std::vector<PredictedKinematicSample> predictTrajectory(
     return output;
 }
 
+std::vector<PredictedKinematicSample> predictStationaryTrajectory(
+    const VehicleAgent& vehicle, const MapParam& map_param,
+    const MultiVehicleConfig& config, double prediction_horizon) {
+    const double horizon =
+        std::max(config.prediction_step, prediction_horizon);
+    const double prediction_step = std::max(0.02, config.prediction_step);
+    const int prediction_count = std::max(
+        1, static_cast<int>(std::ceil(horizon / prediction_step)));
+    std::vector<PredictedKinematicSample> output;
+    if (!vehicle.active() || vehicle.track.empty()) return output;
+    output.reserve(static_cast<size_t>(prediction_count + 1));
+
+    const double s = std::max(
+        0.0, std::min(vehicle.path_s, vehicle.track.length()));
+    RoughWp pose = vehicle.track.poseAtS(s);
+    if (vehicle.real_pose_valid) {
+        pose.x = vehicle.real_x;
+        pose.y = vehicle.real_y;
+        pose.theta = vehicle.real_yaw;
+    }
+    const OBB body = makeBody(pose, map_param, 0.0);
+    for (int k = 0; k <= prediction_count; ++k) {
+        output.push_back(PredictedKinematicSample{
+            std::min(horizon, k * prediction_step), s, 0.0, body});
+    }
+    return output;
+}
+
 double predictionTimeAtS(
     const std::vector<PredictedKinematicSample>& prediction,
     double target_s) {
