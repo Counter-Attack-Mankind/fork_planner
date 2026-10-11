@@ -191,46 +191,62 @@ int main() {
         return fail("next-A1 owner did not hand off to the pickup leg");
     }
 
-    // Slot departure admission gives an already ACTIVE road vehicle priority
-    // only when synchronized OBB overlap occurs before the candidate clears
-    // its source-slot prefix. A later conflict remains rolling-coordinator
-    // work and must not hold the parked vehicle.
+    // Slot departure admission is A1-specific. Ordinary road interaction is
+    // intentionally absent here and belongs to the unified rolling predictor.
     RuleEngine admission_engine(map_param, config);
     VehicleAgent launch_candidate = crossingVehicle(20, 0.0, false);
     launch_candidate.current_slot = 20;
     launch_candidate.track.set(RoughPath{
         wp(0.0, 0.0, 0.0), wp(2.0, 0.0, 0.0)});
     launch_candidate.slot_departure_clear_s = 0.5;
-    VehicleAgent immediate_occupant = crossingVehicle(21, 0.0, true);
-    immediate_occupant.track.set(RoughPath{
-        wp(0.0, 0.0, 1.5707963267948966),
-        wp(0.0, 2.0, 1.5707963267948966)});
-    const auto immediate_admission =
+    const auto ordinary_free_admission =
         admission_engine.checkSlotDepartureAdmission(
-            nullptr, launch_candidate, {immediate_occupant}, 15.0);
-    if (immediate_admission.clear ||
-        !immediate_admission.ordinary_road_conflict ||
-        immediate_admission.blocker_id != immediate_occupant.id ||
-        immediate_admission.candidate_conflict_s >
-            launch_candidate.slot_departure_clear_s + 1e-9) {
-        return fail("immediate slot departure conflict was not held");
+            nullptr, launch_candidate, {}, 15.0);
+    if (!ordinary_free_admission.clear) {
+        return fail("ordinary road logic remained in slot admission");
     }
 
-    VehicleAgent later_occupant = crossingVehicle(22, 0.0, true);
-    later_occupant.track.set(RoughPath{
-        wp(1.5, -1.5, 1.5707963267948966),
-        wp(1.5, 2.0, 1.5707963267948966)});
-    const auto later_admission =
-        admission_engine.checkSlotDepartureAdmission(
-            nullptr, launch_candidate, {later_occupant}, 15.0);
-    if (!later_admission.clear ||
-        later_admission.ordinary_road_conflict) {
-        return fail("post-slot future conflict over-held departure");
+    RuleEngine future_road_engine(map_param, config);
+    VehicleAgent road_vehicle = crossingVehicle(0, 2.0, false, 1.0);
+    road_vehicle.mission_phase = MissionPhase::DIRECT_TO_B;
+    VehicleAgent parked_departure;
+    parked_departure.id = 1;
+    parked_departure.current_slot = 12;
+    parked_departure.mode = VehicleMode::DWELL;
+    parked_departure.mission_phase = MissionPhase::UNLOAD_DWELL;
+    parked_departure.dwell_remaining = 1.0;
+    parked_departure.path_gen = 3;
+    parked_departure.track.set(RoughPath{
+        wp(0.0, -3.0, 1.5707963267948966),
+        wp(0.0, -2.0, 1.5707963267948966)});
+    parked_departure.path_s = parked_departure.track.length();
+    std::vector<VehicleAgent> future_road{road_vehicle, parked_departure};
+    RuleEngine::A1ArrivalKinematics road_kinematics;
+    road_kinematics.dt = 0.1;
+    road_kinematics.enabled = [](int) { return false; };
+    road_kinematics.desired_speed = [](const VehicleAgent&) { return 1.0; };
+    road_kinematics.limited_speed =
+        [](double, double desired, double) { return desired; };
+    road_kinematics.pickup_leg_track = [](int slot, PathTrack& out) {
+        if (slot != 12) return false;
+        out.set(RoughPath{
+            wp(0.0, -2.0, 1.5707963267948966),
+            wp(0.0, 2.0, 1.5707963267948966)});
+        return true;
+    };
+    future_road_engine.refreshA1PlanningContext(
+        future_road, 15.0, 0.0, road_kinematics);
+    future_road_engine.decide(future_road, 0.1, 15.0);
+    if (future_road[1].departure_action == VehicleAction::NOMINAL ||
+        future_road[1].departure_reason.rfind("dynamic_speed_", 0) != 0) {
+        return fail("known DWELL departure was absent from unified prediction");
     }
 
     VehicleAgent service_owner = crossingVehicle(23, 1.0, true);
     service_owner.pending_dropoff_valid = true;
-    service_owner.pending_dropoff_track = later_occupant.track;
+    service_owner.pending_dropoff_track.set(RoughPath{
+        wp(1.5, -1.5, 1.5707963267948966),
+        wp(1.5, 2.0, 1.5707963267948966)});
     service_owner.a1_departure_priority_until_s =
         service_owner.pending_dropoff_track.length();
     const auto far_a1 = admission_engine.checkA1LaunchAdmission(
@@ -247,7 +263,9 @@ int main() {
         source_slot_a1.protected_zone_count == 0) {
         return fail("B0-B9 A1 departure resource did not hold at source");
     }
-    service_owner.pending_dropoff_track = immediate_occupant.track;
+    service_owner.pending_dropoff_track.set(RoughPath{
+        wp(0.0, 0.0, 1.5707963267948966),
+        wp(0.0, 2.0, 1.5707963267948966)});
     service_owner.a1_departure_priority_until_s =
         service_owner.pending_dropoff_track.length();
     const auto near_a1 = admission_engine.checkA1LaunchAdmission(

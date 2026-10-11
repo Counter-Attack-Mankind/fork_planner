@@ -208,6 +208,26 @@ int main() {
         return fail("path-end baseline behavior changed");
     }
 
+    // An already-known post-dwell leg is represented without changing the
+    // live inactive agent: static until dwell expiry, then motion on the next
+    // track. A future STOP keeps the complete prediction static.
+    VehicleAgent dwelling = vehicle(10, line(-1.0, 0.0, 0.0, 0.0));
+    dwelling.mode = VehicleMode::DWELL;
+    dwelling.path_s = dwelling.track.length();
+    VehicleAgent future_leg = vehicle(10, line(0.0, 0.0, 2.0, 0.0));
+    const auto delayed = predictTrajectoryAfterDelay(
+        dwelling, future_leg, 0.5, map_param, config,
+        VehicleAction::NOMINAL, 2.0);
+    const auto delayed_stop = predictTrajectoryAfterDelay(
+        dwelling, future_leg, 0.5, map_param, config,
+        VehicleAction::STOP, 2.0);
+    if (delayed.empty() || delayed_stop.empty() ||
+        !near(delayed.front().body.x, delayed[5].body.x) ||
+        !(delayed.back().body.x > delayed.front().body.x + 0.1) ||
+        !near(delayed_stop.back().body.x, delayed_stop.front().body.x)) {
+        return fail("delayed known-leg prediction is inconsistent");
+    }
+
     // 8. Association is based on the first event's arc-length sample, even
     // when two geometric conflict zones exist.
     std::vector<PredictedKinematicSample> near_second_a{

@@ -85,6 +85,13 @@ struct VehicleAgent {
     PathTrack pending_dropoff_track;
     bool pending_dropoff_valid = false;
 
+    // Coordination result for an already-known next leg while this vehicle is
+    // still parked. STOP means that the state machine must not activate that
+    // leg yet; YIELD/CREEP are transferred to the leg on activation.
+    VehicleAction departure_action = VehicleAction::NOMINAL;
+    int departure_blocker_id = -1;
+    std::string departure_reason;
+
     // A narrowly-scoped priority for the first A1 departure maneuver. It is
     // cleared after the complete body has passed the first REVERSE->FORWARD
     // cusp; it must never turn the whole A1->B route into a privileged path.
@@ -95,6 +102,11 @@ struct VehicleAgent {
     // 而非投影到路径上的位置——这样跟踪误差(车偏离路径多少)一眼可见。sim 下不置位,行为不变。
     bool real_pose_valid = false;
     double real_x = 0.0, real_y = 0.0, real_yaw = 0.0;
+
+    // Simulation fallback for an idle agent that has no current track. This
+    // is physical pose only and carries no task or path intent.
+    bool stationary_pose_valid = false;
+    double stationary_x = 0.0, stationary_y = 0.0, stationary_yaw = 0.0;
 
     // 轨迹版本号:每次 track 被重设(分配新任务)即自增(见 task_allocator tryPlan)。
     // 唯一标识"当前这条固定路径实例",供 RuleEngine 的 C_ij 冲突块缓存判失效——比

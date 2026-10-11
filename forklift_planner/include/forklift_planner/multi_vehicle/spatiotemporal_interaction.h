@@ -99,6 +99,15 @@ std::vector<PredictedKinematicSample> predictStationaryTrajectory(
     const VehicleAgent& vehicle, const MapParam& map_param,
     const MultiVehicleConfig& config, double prediction_horizon);
 
+// Prediction for an inactive vehicle whose next track is already known. The
+// body remains at its current pose for start_delay, then follows future_vehicle
+// without mutating task, path generation, allocator or reservation state.
+std::vector<PredictedKinematicSample> predictTrajectoryAfterDelay(
+    const VehicleAgent& current_vehicle,
+    const VehicleAgent& future_vehicle, double start_delay,
+    const MapParam& map_param, const MultiVehicleConfig& config,
+    VehicleAction target_action, double prediction_horizon);
+
 // Inverts one vehicle's existing kinematic prediction at its own path-space
 // danger position. Returns infinity when the prediction cannot reach target_s.
 double predictionTimeAtS(

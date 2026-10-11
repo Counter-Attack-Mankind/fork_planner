@@ -116,6 +116,7 @@ public:
     void refreshA1PlanningContext(
         const std::vector<VehicleAgent>& vehicles, double horizon, double now,
         const A1ArrivalKinematics& kinematics) {
+        pickup_leg_track_ = kinematics.pickup_leg_track;
         a1_coordinator_.refreshPlanningContext(vehicles, horizon, now,
                                                kinematics);
     }
@@ -318,17 +319,12 @@ public:
     struct SlotDepartureAdmission {
         bool clear = true;
         bool a1_departure_conflict = false;
-        bool ordinary_road_conflict = false;
         int blocker_id = -1;
-        double first_conflict_t = -1.0;
-        double candidate_conflict_s = -1.0;
-        PairInteractionType interaction_type = PairInteractionType::NONE;
         A1LaunchAdmission a1;
     };
 
-    // Unified pre-activation gate for a candidate B->A1 leg. It predicts the
-    // complete horizon but holds only when the candidate conflicts before its
-    // complete body clears the source-slot sweep.
+    // A1-specific pre-activation gate. Ordinary road conflicts are handled by
+    // the unified rolling 15 s coordinator, including future departures.
     SlotDepartureAdmission checkSlotDepartureAdmission(
         const VehicleAgent* service_owner,
         const VehicleAgent& launch_candidate,
@@ -509,6 +505,7 @@ private:
     const TrafficResourceMap* resmap_ = nullptr;
     ResourceTokenTable tokens_;
     std::function<void(const std::string&)> coord_log_sink_;
+    std::function<bool(int, PathTrack&)> pickup_leg_track_;
     std::string debug_log_source_ = "REAL";
     uint64_t debug_log_plan_id_ = 0;
     int debug_log_frame_id_ = -1;

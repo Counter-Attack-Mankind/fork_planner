@@ -1390,8 +1390,12 @@ bool TaskAllocator::activatePreparedDropoffLeg(VehicleAgent& vehicle,
         vehicle.pending_dropoff_slot < 0) {
         return false;
     }
+    if (vehicle.departure_action == VehicleAction::STOP) return false;
 
     const int target = vehicle.pending_dropoff_slot;
+    const VehicleAction departure_action = vehicle.departure_action;
+    const int departure_blocker_id = vehicle.departure_blocker_id;
+    const std::string departure_reason = vehicle.departure_reason;
     const MissionPhase old_phase = vehicle.mission_phase;
     const int old_path_gen = vehicle.path_gen;
     vehicle.target_slot = target;
@@ -1406,9 +1410,14 @@ bool TaskAllocator::activatePreparedDropoffLeg(VehicleAgent& vehicle,
     vehicle.leg_target = LegTargetKind::B_SLOT;
     vehicle.mission_phase = MissionPhase::TO_B;
     vehicle.mode = VehicleMode::ACTIVE;
-    vehicle.action = VehicleAction::NOMINAL;
-    vehicle.requested_action = VehicleAction::NOMINAL;
-    vehicle.reason = "new_prepared_dropoff_leg";
+    vehicle.action = departure_action;
+    vehicle.requested_action = departure_action;
+    vehicle.blocker_id = departure_blocker_id;
+    vehicle.reason = departure_reason.empty()
+        ? "new_prepared_dropoff_leg" : departure_reason;
+    vehicle.departure_action = VehicleAction::NOMINAL;
+    vehicle.departure_blocker_id = -1;
+    vehicle.departure_reason.clear();
     vehicle.a1_departure_committed = !cfg_.real_mode;
     vehicle.pending_dropoff_slot = -1;
     vehicle.pending_dropoff_track = PathTrack{};

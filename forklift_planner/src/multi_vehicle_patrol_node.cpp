@@ -210,6 +210,9 @@ private:
         double wait_time = 0.0;
         double action_hold_remaining = 0.0;
         double ttc_stop_hold_remaining = 0.0;
+        VehicleAction departure_action = VehicleAction::NOMINAL;
+        int departure_blocker_id = -1;
+        std::string departure_reason;
         forklift_planner::multi_vehicle::RecoveryMotion planned_motion =
             forklift_planner::multi_vehicle::RecoveryMotion::NORMAL;
         double planned_motion_target_s = 0.0;
@@ -265,7 +268,6 @@ private:
         unsigned long long allows = 0;
         unsigned long long holds = 0;
         unsigned long long a1_prefix_holds = 0;
-        unsigned long long ordinary_road_holds = 0;
         unsigned long long retries = 0;
         unsigned long long released_after_hold = 0;
         double max_hold_duration = 0.0;
@@ -511,6 +513,16 @@ private:
 
             v.current_slot = start_slot;
             v.target_slot = v.current_slot;
+            const Slot& initial_slot = map_->slots().at(
+                static_cast<size_t>(v.current_slot));
+            v.stationary_yaw = std::atan2(
+                initial_slot.pre_dock_y - initial_slot.dock_y(),
+                initial_slot.pre_dock_x - initial_slot.dock_x());
+            v.stationary_x = initial_slot.dock_x() -
+                mp_.rear_axle_to_center * std::cos(v.stationary_yaw);
+            v.stationary_y = initial_slot.dock_y() -
+                mp_.rear_axle_to_center * std::sin(v.stationary_yaw);
+            v.stationary_pose_valid = true;
             if (cfg_.use_a1_cycle) {
                 v.loaded = false;
                 v.mission_phase = MissionPhase::TO_A1;
@@ -746,6 +758,9 @@ private:
                     d.action_hold_remaining = v.action_hold_remaining;
                     d.ttc_stop_hold_remaining =
                         v.ttc_stop_hold_remaining;
+                    d.departure_action = v.departure_action;
+                    d.departure_blocker_id = v.departure_blocker_id;
+                    d.departure_reason = v.departure_reason;
                     const auto motion = rule_engine_->motionOverrideFor(v.id);
                     d.planned_motion = motion.motion;
                     d.planned_motion_target_s = motion.target_s;
@@ -1128,6 +1143,9 @@ private:
             v.wait_time = d.wait_time;
             v.action_hold_remaining = d.action_hold_remaining;
             v.ttc_stop_hold_remaining = d.ttc_stop_hold_remaining;
+            v.departure_action = d.departure_action;
+            v.departure_blocker_id = d.departure_blocker_id;
+            v.departure_reason = d.departure_reason;
             v.reason = d.reason;
         }
         const RecoveryIdentity recovery_before = captureRecoveryIdentity();
@@ -1232,7 +1250,7 @@ private:
                 line << " baseline_first_overlap_t="
                      << *decision.baseline_first_overlap_t;
             }
-            line << " candidate_rollout=NOT_EVALUATED";
+            line << " candidate_rollout=EVALUATED";
             coordLogWithContext(line.str(), "REAL", sim_plan_id_, 0, -1);
         }
         ++sim_plan_cursor_;
@@ -1546,22 +1564,7 @@ private:
         if (admission.blocker_id >= 0) line << "V" << admission.blocker_id;
         else line << "none";
         line << " a1_prefix_conflict="
-             << (admission.a1_departure_conflict ? 1 : 0)
-             << " ordinary_road_conflict="
-             << (admission.ordinary_road_conflict ? 1 : 0);
-        if (admission.ordinary_road_conflict) {
-            line << " first_t=" << admission.first_conflict_t
-                 << " candidate_s=" << admission.candidate_conflict_s
-                 << " interaction="
-                 << (admission.interaction_type ==
-                             forklift_planner::multi_vehicle::
-                                 PairInteractionType::OPPOSING
-                         ? "OPPOSING"
-                         : admission.interaction_type ==
-                                   forklift_planner::multi_vehicle::
-                                       PairInteractionType::SAME_DIRECTION
-                               ? "SAME_DIRECTION" : "CROSSING");
-        }
+             << (admission.a1_departure_conflict ? 1 : 0);
         if (owner != nullptr) {
             line << " owner_phase=" << missionPhaseName(owner->mission_phase)
                  << " owner_path_gen=" << owner->path_gen;
@@ -1626,9 +1629,7 @@ private:
         const auto admission = rule_engine_->checkSlotDepartureAdmission(
             owner, candidate, agents_, rb_horizon_);
         const bool hold = !admission.clear;
-        const std::string hold_reason = admission.ordinary_road_conflict
-            ? "ordinary_immediate_conflict"
-            : admission.a1.source_slot_hold
+        const std::string hold_reason = admission.a1.source_slot_hold
                 ? "a1_source_slot_admission"
             : admission.a1.spatial_stop_launch_infeasible
                 ? "a1_stop_s_before_slot_clear"
@@ -1648,9 +1649,6 @@ private:
                 ++a1_launch_metrics_.holds;
                 if (admission.a1_departure_conflict) {
                     ++a1_launch_metrics_.a1_prefix_holds;
-                }
-                if (admission.ordinary_road_conflict) {
-                    ++a1_launch_metrics_.ordinary_road_holds;
                 }
             } else {
                 ++a1_launch_metrics_.retries;
@@ -1673,6 +1671,18 @@ private:
             return false;
         }
 
+        if (vehicle.departure_action == VehicleAction::STOP) {
+            vehicle.mode = VehicleMode::DWELL;
+            vehicle.dwell_remaining = 0.0;
+            vehicle.action = VehicleAction::STOP;
+            vehicle.requested_action = VehicleAction::STOP;
+            vehicle.current_speed = 0.0;
+            vehicle.reason = vehicle.departure_reason.empty()
+                ? "future_departure_stop" : vehicle.departure_reason;
+            vehicle.blocker_id = vehicle.departure_blocker_id;
+            return false;
+        }
+
         std::string allow_reason = "no_service_owner";
         if (owner != nullptr) {
             allow_reason = admission.a1.actual_occupancy_priority
@@ -1688,8 +1698,20 @@ private:
             a1_launch_holds_.erase(held);
         }
 
+        const VehicleAction departure_action = vehicle.departure_action;
+        const int departure_blocker_id = vehicle.departure_blocker_id;
+        const std::string departure_reason = vehicle.departure_reason;
         const bool assigned = allocator_->assignPickupLeg(vehicle);
         if (assigned) {
+            if (departure_action != VehicleAction::NOMINAL) {
+                vehicle.action = departure_action;
+                vehicle.requested_action = departure_action;
+                vehicle.blocker_id = departure_blocker_id;
+                vehicle.reason = departure_reason;
+            }
+            vehicle.departure_action = VehicleAction::NOMINAL;
+            vehicle.departure_blocker_id = -1;
+            vehicle.departure_reason.clear();
             ++a1_launch_metrics_.allows;
             logSlotDeparture(vehicle, owner, "ALLOW", allow_reason,
                              vehicle, admission);
@@ -1816,6 +1838,13 @@ private:
     //==============================================
 
     void handleLegArrival(VehicleAgent& v) {
+        if (!v.track.empty()) {
+            const RoughWp parked_pose = v.track.poseAtS(v.track.length());
+            v.stationary_pose_valid = true;
+            v.stationary_x = parked_pose.x;
+            v.stationary_y = parked_pose.y;
+            v.stationary_yaw = parked_pose.theta;
+        }
         v.current_speed = 0.0;
         v.wait_time = 0.0;
         v.mode = VehicleMode::DWELL;
@@ -3180,7 +3209,7 @@ private:
     bool rb_estop_ = false;                             // 操作员急停:true=全车瞬时停
     bool rb_estop_prev_ = false;                        // 上一拍急停态(检测按下/解除边沿,one_shot急停用)
     
-    double rb_horizon_ = 10.0;                           // AD 滚动时域:每次推演/发布的未来时长(s)
+    double rb_horizon_ = 15.0;                           // AD 滚动时域:每次推演/发布的未来时长(s)
     double rb_horizon_refresh_period_ = 2.0;
     int rb_horizon_refresh_ = 20;                        // 每多少拍重新推演刷新一次(5拍=0.5s)
     bool rb_one_shot_traj_ = false;                      // 一次性整条轨迹模式(默认):start后推演全程发一次latch
@@ -3720,13 +3749,12 @@ public:
                  a1_service_metrics.faster_candidate_observations,
                  max_service_duration);
         ROS_WARN("[BATCH_A1_LAUNCH] allow=%llu hold=%llu "
-                 "a1_prefix_hold=%llu ordinary_road_hold=%llu "
+                 "a1_prefix_hold=%llu "
                  "retries=%llu released_after_hold=%llu max_hold=%.1f "
                  "active_holds=%zu",
                  a1_launch_metrics_.allows,
                  a1_launch_metrics_.holds,
                  a1_launch_metrics_.a1_prefix_holds,
-                 a1_launch_metrics_.ordinary_road_holds,
                  a1_launch_metrics_.retries,
                  a1_launch_metrics_.released_after_hold,
                  max_launch_hold, a1_launch_holds_.size());

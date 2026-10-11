@@ -875,68 +875,8 @@ RuleEngine::SlotDepartureAdmission RuleEngine::checkSlotDepartureAdmission(
         }
     }
 
-    const double horizon = std::max(cfg_.prediction_step,
-                                    prediction_horizon);
-    const auto candidate_prediction = predictTrajectory(
-        launch_candidate, mp_, cfg_, VehicleAction::NOMINAL, horizon);
-    if (candidate_prediction.empty()) return result;
-
-    auto sampleAt = [](const auto& prediction, double time)
-        -> const PredictedKinematicSample& {
-        auto it = std::lower_bound(
-            prediction.begin(), prediction.end(), time,
-            [](const PredictedKinematicSample& sample, double value) {
-                return sample.t < value;
-            });
-        return it == prediction.end() ? prediction.back() : *it;
-    };
-    constexpr double kPi = 3.14159265358979323846;
-    auto motionHeading = [&](const VehicleAgent& vehicle, double s) {
-        double heading = vehicle.track.poseAtS(s).theta;
-        if (vehicle.track.typeAtS(s) == WpType::REVERSE) heading += kPi;
-        return heading;
-    };
-
-    for (const VehicleAgent& occupant : vehicles) {
-        if (occupant.id == launch_candidate.id || !occupant.active() ||
-            occupant.track.empty()) {
-            continue;
-        }
-        const auto occupant_prediction = predictTrajectory(
-            occupant, mp_, cfg_, VehicleAction::NOMINAL, horizon);
-        const PairInteractionResult physical =
-            detectPairInteractionFromPredictions(
-                launch_candidate, occupant, {}, candidate_prediction,
-                occupant_prediction);
-        if (!physical.event.valid) continue;
-
-        const PredictedKinematicSample& candidate_sample = sampleAt(
-            candidate_prediction, physical.event.first_overlap_t);
-        if (candidate_sample.s >
-            launch_candidate.slot_departure_clear_s + 1e-9) {
-            continue;
-        }
-        if (result.ordinary_road_conflict &&
-            physical.event.first_overlap_t >= result.first_conflict_t - 1e-9) {
-            continue;
-        }
-
-        const PredictedKinematicSample& occupant_sample = sampleAt(
-            occupant_prediction, physical.event.first_overlap_t);
-        const double direction_dot = std::cos(
-            motionHeading(launch_candidate, candidate_sample.s) -
-            motionHeading(occupant, occupant_sample.s));
-        result.interaction_type = direction_dot < -0.5
-            ? PairInteractionType::OPPOSING
-            : direction_dot > 0.7
-                ? PairInteractionType::SAME_DIRECTION
-                : PairInteractionType::CROSSING;
-        result.clear = false;
-        result.ordinary_road_conflict = true;
-        result.blocker_id = occupant.id;
-        result.first_conflict_t = physical.event.first_overlap_t;
-        result.candidate_conflict_s = candidate_sample.s;
-    }
+    (void)vehicles;
+    (void)prediction_horizon;
     return result;
 }
 
@@ -1177,27 +1117,104 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
     // these shared samples without changing coordination state.
     const double horizon =
         std::max(cfg_.prediction_step, prediction_horizon);
-    const double prediction_step = std::max(0.02, cfg_.prediction_step);
     std::vector<std::vector<PredictedKinematicSample>> predictions(
         vehicles.size());
+    std::vector<VehicleAgent> prediction_vehicles = vehicles;
+    std::vector<double> prediction_start_delays(vehicles.size(), 0.0);
+    std::vector<bool> predicts_future_leg(vehicles.size(), false);
+    std::vector<bool> forced_stationary(vehicles.size(), false);
+    auto prepareFutureLeg = [&](size_t index, const PathTrack& track,
+                                MissionPhase phase, LegTargetKind target) {
+        if (track.empty()) return false;
+        VehicleAgent& preview = prediction_vehicles[index];
+        preview.track = track;
+        preview.path_s = 0.0;
+        preview.current_speed = 0.0;
+        preview.path_gen = vehicles[index].path_gen + 1;
+        preview.mode = VehicleMode::ACTIVE;
+        preview.mission_phase = phase;
+        preview.leg_target = target;
+        prediction_start_delays[index] = vehicles[index].mode == VehicleMode::DWELL
+            ? std::max(0.0, vehicles[index].dwell_remaining) : 0.0;
+        predicts_future_leg[index] = true;
+        return true;
+    };
     for (size_t i = 0; i < vehicles.size(); ++i) {
-        if (vehicles[i].active() && !vehicles[i].track.empty()) {
+        VehicleAgent& vehicle = vehicles[i];
+        if (vehicle.active() && !vehicle.track.empty()) {
             const RecoveryMotion recovery_motion =
-                deadlock_manager_.directive().motionFor(vehicles[i].id);
+                deadlock_manager_.directive().motionFor(vehicle.id);
             if (recovery_motion == RecoveryMotion::HOLD) {
+                forced_stationary[i] = true;
                 predictions[i] = predictStationaryTrajectory(
-                    vehicles[i], mp_, cfg_, horizon);
+                    vehicle, mp_, cfg_, horizon);
             } else {
                 const VehicleAction prediction_action =
-                    vehicles[i].ttc_stop_hold_remaining > 1e-9
-                        ? VehicleAction::STOP : VehicleAction::NOMINAL;
+                    vehicle.ttc_stop_hold_remaining > 1e-9
+                        ? VehicleAction::STOP
+                        : minAction(vehicle.action, vehicle.requested_action);
                 predictions[i] = predictTrajectory(
-                    vehicles[i], mp_, cfg_, prediction_action, horizon);
+                    vehicle, mp_, cfg_, prediction_action, horizon);
             }
+            continue;
+        }
+
+        bool known_future = false;
+        if (vehicle.pending_dropoff_valid &&
+            !vehicle.pending_dropoff_track.empty()) {
+            known_future = prepareFutureLeg(
+                i, vehicle.pending_dropoff_track, MissionPhase::TO_B,
+                LegTargetKind::B_SLOT);
+        } else if ((vehicle.mode == VehicleMode::DWELL ||
+                    vehicle.mode == VehicleMode::NEED_TASK) &&
+                   (vehicle.mission_phase == MissionPhase::UNLOAD_DWELL ||
+                    vehicle.mission_phase == MissionPhase::TO_A1) &&
+                   pickup_leg_track_) {
+            PathTrack pickup_track;
+            if (pickup_leg_track_(vehicle.current_slot, pickup_track)) {
+                known_future = prepareFutureLeg(
+                    i, pickup_track, MissionPhase::TO_A1,
+                    LegTargetKind::A1);
+            }
+        }
+        if (known_future) {
+            predictions[i] = predictTrajectoryAfterDelay(
+                vehicle, prediction_vehicles[i], prediction_start_delays[i],
+                mp_, cfg_, vehicle.departure_action, horizon);
+        } else {
+            predictions[i] = predictStationaryTrajectory(
+                vehicle, mp_, cfg_, horizon);
         }
     }
 
-    // Every active pair, including pairs in a 3+ vehicle scene, is handled by
+    auto predictionForAction = [&](size_t index, VehicleAction action) {
+        if (predicts_future_leg[index]) {
+            return predictTrajectoryAfterDelay(
+                vehicles[index], prediction_vehicles[index],
+                prediction_start_delays[index], mp_, cfg_, action, horizon);
+        }
+        if (forced_stationary[index] || !vehicles[index].active()) {
+            return predictStationaryTrajectory(
+                vehicles[index], mp_, cfg_, horizon);
+        }
+        return predictTrajectory(
+            prediction_vehicles[index], mp_, cfg_, action, horizon);
+    };
+    auto requestMotionAction = [&](size_t index, VehicleAction action,
+                                   const std::string& reason, int blocker_id) {
+        VehicleAgent& vehicle = vehicles[index];
+        if (!vehicle.active() && predicts_future_leg[index]) {
+            if (moreRestrictive(action, vehicle.departure_action)) {
+                vehicle.departure_action = action;
+                vehicle.departure_reason = reason;
+                vehicle.departure_blocker_id = blocker_id;
+            }
+            return;
+        }
+        applyActionRequest(vehicle, action, reason, blocker_id);
+    };
+
+    // Every predicted pair, including future departures, is handled by
     // the same rolling motion coordinator. Pair outputs are merged later by
     // applyActionRequest() using the existing restrictive-action ordering.
     const bool dynamic_speed_enabled = vehicles.size() >= 2;
@@ -1279,10 +1296,12 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
 
     for (size_t i = 0; i < vehicles.size(); ++i) {
         VehicleAgent& a = vehicles[i];
-        if (!a.active() || predictions[i].empty()) continue;
+        const VehicleAgent& motion_a = prediction_vehicles[i];
+        if (predictions[i].empty()) continue;
         for (size_t j = i + 1; j < vehicles.size(); ++j) {
             VehicleAgent& b = vehicles[j];
-            if (!b.active() || predictions[j].empty()) continue;
+            const VehicleAgent& motion_b = prediction_vehicles[j];
+            if (predictions[j].empty()) continue;
             const std::pair<int, int> key{std::min(a.id, b.id),
                                           std::max(a.id, b.id)};
             const RecoveryDirective& recovery = deadlock_manager_.directive();
@@ -1296,7 +1315,7 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
             // Static path geometry is intentionally absent from this call.
             PairInteractionResult direct_interaction =
                 detectPairInteractionFromPredictions(
-                    a, b, {}, predictions[i], predictions[j]);
+                    motion_a, motion_b, {}, predictions[i], predictions[j]);
             const bool a_clipped_by_a1_stop = direct_interaction.event.valid &&
                 a1_waiter_constraints[i] &&
                 direct_interaction.event.collision_s_a >
@@ -1360,7 +1379,8 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                         a_is_priority ? predictions[i] : predictions[j];
                     if (priority_vehicle.ttc_stop_hold_remaining <= 1e-9) {
                         priority_physical = evaluatePriorityPhysicalTtc(
-                            priority_vehicle, other_vehicle,
+                            a_is_priority ? motion_a : motion_b,
+                            a_is_priority ? motion_b : motion_a,
                             priority_prediction, mp_, cfg_);
                     }
                 }
@@ -1373,14 +1393,18 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                             ordinary_priority_id == a.id ? a : b;
                         const VehicleAgent& other_vehicle =
                             ordinary_priority_id == a.id ? b : a;
-                        priority_vehicle.ttc_stop_hold_remaining = std::max(
-                            priority_vehicle.ttc_stop_hold_remaining,
-                            cfg_.rolling_refresh_period);
-                        applyActionRequest(
-                            priority_vehicle, VehicleAction::STOP,
+                        const size_t priority_index =
+                            ordinary_priority_id == a.id ? i : j;
+                        if (priority_vehicle.active()) {
+                            priority_vehicle.ttc_stop_hold_remaining = std::max(
+                                priority_vehicle.ttc_stop_hold_remaining,
+                                cfg_.rolling_refresh_period);
+                        }
+                        const std::string stop_reason =
                             "dynamic_speed_STOP_V" +
-                                std::to_string(ordinary_priority_id),
-                            other_vehicle.id);
+                            std::to_string(ordinary_priority_id);
+                        requestMotionAction(priority_index, VehicleAction::STOP,
+                                            stop_reason, other_vehicle.id);
                         priority_physical_stop = true;
                         last_rolling_dynamic_decision_.valid = true;
                         last_rolling_dynamic_decision_.baseline_evaluated = true;
@@ -1398,7 +1422,7 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                                 VehicleAction::STOP,
                                 priority_vehicle.action,
                                 other_vehicle.id,
-                                priority_vehicle.reason});
+                                stop_reason});
                         last_rolling_dynamic_decision_.vehicle_ttc_diagnostics.
                             push_back(
                                 RollingDynamicDecision::VehicleTtcDiagnostic{
@@ -1441,7 +1465,7 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
             //桥式冲突段的检测，与TTC修正，详细的内容见bridge_ttc_correction.cpp文件
             PairBridgeTtcCorrection bridge_correction;      //创建一个桥式冲突修正结果对象
             if (ordinary) {     //若存在15sOBB的时空冲突
-                bridge_correction = evaluateBridgeTtcCorrection(a, b, predictions[i], predictions[j], interaction, mp_, cfg_);  //检测是否存在桥式冲突段
+                bridge_correction = evaluateBridgeTtcCorrection(motion_a, motion_b, predictions[i], predictions[j], interaction, mp_, cfg_);  //检测是否存在桥式冲突段
                 interaction.type = bridge_correction.a.bridge_related || bridge_correction.b.bridge_related
                         ? PairInteractionType::OPPOSING     //做三目运算，若一辆车识别到是桥，则冲突段类别改为oppsoing
                         : PairInteractionType::CROSSING;
@@ -1456,8 +1480,8 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                 }
                 marker.bridge_a_related = bridge_correction.a.bridge_related;
                 marker.bridge_b_related = bridge_correction.b.bridge_related;
-                const RoughWp boundary_a = a.track.poseAtS(bridge_correction.a.near_boundary_s);        //将s转为实际的（x,y,theta）
-                const RoughWp boundary_b = b.track.poseAtS(bridge_correction.b.near_boundary_s);
+                const RoughWp boundary_a = motion_a.track.poseAtS(bridge_correction.a.near_boundary_s);        //将s转为实际的（x,y,theta）
+                const RoughWp boundary_b = motion_b.track.poseAtS(bridge_correction.b.near_boundary_s);
                 marker.bridge_boundary_a_x = boundary_a.x;
                 marker.bridge_boundary_a_y = boundary_a.y;
                 marker.bridge_boundary_b_x = boundary_b.x;
@@ -1475,8 +1499,8 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                         ConflictMarkerKind::CROSSING_OR_OPPOSING) {
                     return;
                 }
-                const RoughWp collision_a = a.track.poseAtS(event.collision_s_a);
-                const RoughWp collision_b = b.track.poseAtS(event.collision_s_b);
+                const RoughWp collision_a = motion_a.track.poseAtS(event.collision_s_a);
+                const RoughWp collision_b = motion_b.track.poseAtS(event.collision_s_b);
                 marker.timed_collision_start_valid = true;
                 marker.collision_s_a = event.collision_s_a;
                 marker.collision_s_b = event.collision_s_b;
@@ -1530,7 +1554,10 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                 const auto& priority_prediction = a_is_priority ? predictions[i] : predictions[j];
 
                 if (priority_vehicle.ttc_stop_hold_remaining <= 1e-9) 
-                    priority_physical = evaluatePriorityPhysicalTtc(priority_vehicle, other_vehicle, priority_prediction,mp_, cfg_);
+                    priority_physical = evaluatePriorityPhysicalTtc(
+                        a_is_priority ? motion_a : motion_b,
+                        a_is_priority ? motion_b : motion_a,
+                        priority_prediction, mp_, cfg_);
                 
             }
 
@@ -1585,8 +1612,72 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                     effective_interaction.event.ttc_b =
                         effective_ttc_b;
                     speed_result = evaluatePairSpeedCoordination(
-                        a, b, effective_interaction, priority_physical,
+                        motion_a, motion_b, effective_interaction, priority_physical,
                         cfg_, preferred_winner);
+                    auto residualDanger = [&](VehicleAction action_a,
+                                              VehicleAction action_b) {
+                        const auto adjusted_a = predictionForAction(i, action_a);
+                        const auto adjusted_b = predictionForAction(j, action_b);
+                        const PairInteractionResult adjusted =
+                            detectPairInteractionFromPredictions(
+                                motion_a, motion_b, {}, adjusted_a, adjusted_b);
+                        if (!adjusted.event.valid) return false;
+                        const PairBridgeTtcCorrection adjusted_bridge =
+                            evaluateBridgeTtcCorrection(
+                                motion_a, motion_b, adjusted_a, adjusted_b,
+                                adjusted, mp_, cfg_);
+                        const double adjusted_ttc_a = std::min(
+                            adjusted.event.ttc_a,
+                            adjusted_bridge.a.corrected_ttc);
+                        const double adjusted_ttc_b = std::min(
+                            adjusted.event.ttc_b,
+                            adjusted_bridge.b.corrected_ttc);
+                        return evaluateTtcStopBoundary(
+                                   adjusted_ttc_a, action_a, cfg_).stop_required ||
+                               evaluateTtcStopBoundary(
+                                   adjusted_ttc_b, action_b, cfg_).stop_required;
+                    };
+                    auto tighten = [](VehicleAction action) {
+                        switch (action) {
+                            case VehicleAction::BOOST:
+                            case VehicleAction::NOMINAL:
+                                return VehicleAction::YIELD;
+                            case VehicleAction::YIELD:
+                                return VehicleAction::CREEP;
+                            case VehicleAction::CREEP:
+                            case VehicleAction::STOP:
+                                return VehicleAction::STOP;
+                        }
+                        return VehicleAction::STOP;
+                    };
+                    bool residual = residualDanger(
+                        speed_result.selected_action_a,
+                        speed_result.selected_action_b);
+                    VehicleAction& yielding_action = a_is_priority
+                        ? speed_result.selected_action_b
+                        : speed_result.selected_action_a;
+                    while (residual && yielding_action != VehicleAction::STOP) {
+                        yielding_action = tighten(yielding_action);
+                        residual = residualDanger(
+                            speed_result.selected_action_a,
+                            speed_result.selected_action_b);
+                    }
+                    if (residual) {
+                        VehicleAction& priority_action = a_is_priority
+                            ? speed_result.selected_action_a
+                            : speed_result.selected_action_b;
+                        priority_action = VehicleAction::STOP;
+                        residual = residualDanger(
+                            speed_result.selected_action_a,
+                            speed_result.selected_action_b);
+                    }
+                    if (speed_result.selected_action_a == VehicleAction::STOP ||
+                        speed_result.selected_action_b == VehicleAction::STOP) {
+                        speed_result.emergency_stop = true;
+                    }
+                    speed_result.reason = residual
+                        ? "adjusted_prediction_stop_both"
+                        : "adjusted_prediction_clear";
                     preferred_winner = speed_result.selected_winner_id;
                     const DynamicInterventionBand intervention_band =
                         speed_result.yielding_band;
@@ -1669,9 +1760,9 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
 
                     const VehicleAction previous_a = a.action;
                     const VehicleAction previous_b = b.action;
-                    if (speed_result.priority_safety_stop) {
-                        VehicleAgent& priority_vehicle =
-                            a_is_priority ? a : b;
+                    VehicleAgent& priority_vehicle = a_is_priority ? a : b;
+                    if (speed_result.priority_safety_stop &&
+                        priority_vehicle.active()) {
                         if (priority_vehicle.ttc_stop_hold_remaining <= 1e-9) {
                             priority_vehicle.ttc_stop_hold_remaining =
                                 cfg_.rolling_refresh_period;
@@ -1683,7 +1774,8 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                         const bool yielding_is_retreat_hold =
                             (a_is_priority && b_retreat_hold) ||
                             (!a_is_priority && a_retreat_hold);
-                        if (!yielding_is_retreat_hold &&
+                        if (yielding_vehicle.active() &&
+                            !yielding_is_retreat_hold &&
                             yielding_vehicle.ttc_stop_hold_remaining <= 1e-9) {
                             yielding_vehicle.ttc_stop_hold_remaining =
                                 cfg_.rolling_refresh_period;
@@ -1693,16 +1785,16 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                         "_V" + std::to_string(preferred_winner);
                     if (speed_result.selected_action_a !=
                             VehicleAction::NOMINAL && !a_retreat_hold) {
-                        applyActionRequest(
-                            a, speed_result.selected_action_a,
+                        requestMotionAction(
+                            i, speed_result.selected_action_a,
                             "dynamic_speed_" + std::string(actionName(
                                 speed_result.selected_action_a)) + suffix,
                             b.id);
                     }
                     if (speed_result.selected_action_b !=
                             VehicleAction::NOMINAL && !b_retreat_hold) {
-                        applyActionRequest(
-                            b, speed_result.selected_action_b,
+                        requestMotionAction(
+                            j, speed_result.selected_action_b,
                             "dynamic_speed_" + std::string(actionName(
                                 speed_result.selected_action_b)) + suffix,
                             a.id);
@@ -1711,15 +1803,23 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                          {std::make_pair(&a, previous_a),
                           std::make_pair(&b, previous_b)}) {
                         const VehicleAgent* vehicle = item.first;
-                        if (vehicle->requested_action ==
-                                VehicleAction::NOMINAL ||
-                            vehicle->reason.rfind("dynamic_speed_", 0) != 0) {
+                        const bool future_departure = !vehicle->active() &&
+                            vehicle->departure_action != VehicleAction::NOMINAL;
+                        const VehicleAction coordinated_action = future_departure
+                            ? vehicle->departure_action
+                            : vehicle->requested_action;
+                        const std::string& coordinated_reason = future_departure
+                            ? vehicle->departure_reason : vehicle->reason;
+                        const int coordinated_blocker = future_departure
+                            ? vehicle->departure_blocker_id : vehicle->blocker_id;
+                        if (coordinated_action == VehicleAction::NOMINAL ||
+                            coordinated_reason.rfind("dynamic_speed_", 0) != 0) {
                             continue;
                         }
                         const RollingDynamicDecision::Target aggregate{
                             vehicle->id, vehicle->path_gen,
-                            vehicle->requested_action, item.second,
-                            vehicle->blocker_id, vehicle->reason};
+                            coordinated_action, item.second,
+                            coordinated_blocker, coordinated_reason};
                         auto existing_target = std::find_if(
                             last_rolling_dynamic_decision_.targets.begin(),
                             last_rolling_dynamic_decision_.targets.end(),
@@ -1834,7 +1934,8 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                              << actionName(speed_result.selected_action_b)
                              << " braking_stop="
                              << (speed_result.emergency_stop ? "true" : "false")
-                             << " residual_evaluation=DISABLED"
+                             << " residual_evaluation="
+                             << (residual ? "CONFLICT" : "CLEAR")
                              << " reason=" << speed_result.reason
                              << " reservation=not_created";
                         coord_log_sink_(line.str());
@@ -2739,11 +2840,30 @@ void RuleEngine::decide(std::vector<VehicleAgent>& vehicles, double dt,
     }
 
     for (VehicleAgent& v : vehicles) {
+        if (!reuse_ordinary_coordination) {
+            v.departure_action = VehicleAction::NOMINAL;
+            v.departure_blocker_id = -1;
+            v.departure_reason.clear();
+        }
         if (v.mode != VehicleMode::ACTIVE) {
             v.blocker_id = -1;
             v.requested_action = VehicleAction::STOP;
             v.reason = "not_active";
             v.ttc_stop_hold_remaining = 0.0;
+            if (reuse_ordinary_coordination &&
+                period_ordinary_decision != nullptr) {
+                for (const RollingDynamicDecision::Target& target :
+                     period_ordinary_decision->targets) {
+                    if (target.vehicle_id != v.id ||
+                        target.path_gen != v.path_gen) {
+                        continue;
+                    }
+                    v.departure_action = target.action;
+                    v.departure_blocker_id = target.blocker_id;
+                    v.departure_reason = target.reason;
+                    break;
+                }
+            }
             continue;
         }
         if (v.ttc_stop_hold_remaining > 1e-9) {

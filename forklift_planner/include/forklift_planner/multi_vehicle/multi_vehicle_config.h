@@ -45,10 +45,10 @@ struct MultiVehicleConfig {
     // Future A1 owner reservation window. Independent of rolling/prediction
     // horizons and used only when refreshing the FutureA1Commitment. Unit: s.
     double a1_owner_horizon = 45.0;
-    double rolling_horizon = 10.0;          // future planner time 
+    double rolling_horizon = 15.0;          // future planner time
     double rolling_refresh_period = 2.0;        //  refresh period
 
-    double prediction_horizon = 10.0;
+    double prediction_horizon = 15.0;
     double prediction_step = 0.05;
     // NOMINAL-baseline timed-conflict bands. A first conflict at or beyond
     // far stays NOMINAL; [near, far) requests YIELD; below near requests

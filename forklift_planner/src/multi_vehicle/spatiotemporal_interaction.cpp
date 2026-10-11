@@ -211,21 +211,80 @@ std::vector<PredictedKinematicSample> predictStationaryTrajectory(
     const int prediction_count = std::max(
         1, static_cast<int>(std::ceil(horizon / prediction_step)));
     std::vector<PredictedKinematicSample> output;
-    if (!vehicle.active() || vehicle.track.empty()) return output;
+    if (vehicle.track.empty() && !vehicle.real_pose_valid &&
+        !vehicle.stationary_pose_valid) return output;
     output.reserve(static_cast<size_t>(prediction_count + 1));
 
-    const double s = std::max(
+    const double s = vehicle.track.empty() ? 0.0 : std::max(
         0.0, std::min(vehicle.path_s, vehicle.track.length()));
-    RoughWp pose = vehicle.track.poseAtS(s);
+    RoughWp pose{};
+    if (!vehicle.track.empty()) pose = vehicle.track.poseAtS(s);
     if (vehicle.real_pose_valid) {
         pose.x = vehicle.real_x;
         pose.y = vehicle.real_y;
         pose.theta = vehicle.real_yaw;
+    } else if (vehicle.track.empty() && vehicle.stationary_pose_valid) {
+        pose.x = vehicle.stationary_x;
+        pose.y = vehicle.stationary_y;
+        pose.theta = vehicle.stationary_yaw;
     }
     const OBB body = makeBody(pose, map_param, 0.0);
     for (int k = 0; k <= prediction_count; ++k) {
         output.push_back(PredictedKinematicSample{
             std::min(horizon, k * prediction_step), s, 0.0, body});
+    }
+    return output;
+}
+
+std::vector<PredictedKinematicSample> predictTrajectoryAfterDelay(
+    const VehicleAgent& current_vehicle,
+    const VehicleAgent& future_vehicle, double start_delay,
+    const MapParam& map_param, const MultiVehicleConfig& config,
+    VehicleAction target_action, double prediction_horizon) {
+    const double horizon = std::max(config.prediction_step, prediction_horizon);
+    const double step = std::max(0.02, config.prediction_step);
+    const double delay = std::max(0.0, std::min(start_delay, horizon));
+    VehicleAgent moving = future_vehicle;
+    moving.mode = VehicleMode::ACTIVE;
+    moving.path_s = 0.0;
+    moving.current_speed = 0.0;
+    const auto moving_prediction = predictTrajectory(
+        moving, map_param, config, target_action,
+        std::max(step, horizon - delay));
+    const auto stationary = predictStationaryTrajectory(
+        current_vehicle, map_param, config, horizon);
+    if (stationary.empty() || moving_prediction.empty()) return stationary;
+
+    auto movingAt = [&](double time) {
+        auto upper = std::lower_bound(
+            moving_prediction.begin(), moving_prediction.end(), time,
+            [](const PredictedKinematicSample& sample, double value) {
+                return sample.t < value;
+            });
+        if (upper == moving_prediction.begin()) return *upper;
+        if (upper == moving_prediction.end()) return moving_prediction.back();
+        const auto& begin = *(upper - 1);
+        const double interval = upper->t - begin.t;
+        const double ratio = interval <= 1e-9 ? 0.0
+            : (time - begin.t) / interval;
+        return interpolatePrediction(moving, begin, *upper, ratio);
+    };
+
+    const int count = std::max(1, static_cast<int>(std::ceil(horizon / step)));
+    std::vector<PredictedKinematicSample> output;
+    output.reserve(static_cast<size_t>(count + 1));
+    for (int k = 0; k <= count; ++k) {
+        const double t = std::min(horizon, k * step);
+        if (t <= delay + 1e-9) {
+            PredictedKinematicSample sample = stationary.front();
+            sample.t = t;
+            sample.s = 0.0;
+            output.push_back(sample);
+        } else {
+            PredictedKinematicSample sample = movingAt(t - delay);
+            sample.t = t;
+            output.push_back(sample);
+        }
     }
     return output;
 }
