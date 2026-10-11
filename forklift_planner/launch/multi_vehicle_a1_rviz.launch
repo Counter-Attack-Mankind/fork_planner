@@ -4,7 +4,7 @@
   <arg name="one_shot" default="false"/>
   <arg name="start_rviz" default="true"/>
   <arg name="a1_cycle_catalog_file" default="$(find forklift_planner)/config/a1_cycle_path_catalog.yaml"/>
-  <arg name="coord_log_file" default="$(find forklift_planner)/../log/simulation_diagnosis.log"/>
+  <arg name="debug_log_dir" default="$(find forklift_planner)/../log"/>
   <arg name="snapshot_debug_enabled" default="false"/>
   <arg name="snapshot_output_dir" default="$(env HOME)/forklift_debug_bags"/>
   <arg name="snapshot_segment_duration" default="10.0"/>
@@ -26,7 +26,7 @@
         output="screen">
     <!-- false means: after reaching one target and dwelling, assign the next reachable target. -->
     <param name="one_shot" value="$(arg one_shot)"/>
-    <param name="coord_log_file" value="$(arg coord_log_file)"/>
+    <param name="debug_log_dir" value="$(arg debug_log_dir)"/>
     <param name="snapshot_debug_enabled" value="$(arg snapshot_debug_enabled)"/>
   </node>
 

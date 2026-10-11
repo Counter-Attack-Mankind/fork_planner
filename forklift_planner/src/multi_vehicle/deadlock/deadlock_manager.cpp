@@ -166,10 +166,7 @@ void DeadlockManager::emit(const char* event, const std::string& details,
         std::string("[DEADLOCK] event=") + event + " " + details;
     if (log_sink_) log_sink_(line);
     const std::string name(event);
-    if (name == "CONFIRMED" || name == "SELECT" ||
-        name == "RETREAT_DONE" || name == "RETREAT_HOLD_START" ||
-        name == "RETREAT_HOLD_DONE" || name == "PASS_START" ||
-        name == "CLEAR" || name == "UNRESOLVED" || name == "ABORT") {
+    if (name == "CONFIRMED" || name == "UNRESOLVED" || name == "ABORT") {
         ROS_WARN_STREAM(line);
     }
 }
@@ -442,7 +439,15 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
         details << "pair=V" << candidate_a->id << "-V" << candidate_b->id
                 << " path_gen=" << candidate_a->path_gen << "/"
                 << candidate_b->path_gen << " s=" << candidate_a->path_s
-                << "/" << candidate_b->path_s;
+                << "/" << candidate_b->path_s
+                << " V" << candidate_a->id << "_action="
+                << actionName(candidate_a->action)
+                << " V" << candidate_a->id << "_reason=" << candidate_a->reason
+                << " V" << candidate_a->id << "_blocker=V" << candidate_a->blocker_id
+                << " V" << candidate_b->id << "_action="
+                << actionName(candidate_b->action)
+                << " V" << candidate_b->id << "_reason=" << candidate_b->reason
+                << " V" << candidate_b->id << "_blocker=V" << candidate_b->blocker_id;
         emit("CANDIDATE", details.str(), emit_logs);
         return;
     }
@@ -528,7 +533,12 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
         transaction_.phase = RecoveryPhase::UNRESOLVED;
         transaction_.reason = "first_retreat_sweep_blocked";
         refreshDirective();
-        emit("UNRESOLVED","pair=V" + std::to_string(retreat->id) + "-V" + std::to_string(passer->id) + " reason=first_retreat_sweep_blocked",emit_logs);
+        std::ostringstream details;
+        details << "pair=V" << retreat->id << "-V" << passer->id
+                << " retreat=V" << retreat->id << " pass=V" << passer->id
+                << " start_s=" << retreat->path_s << " target_s=" << target_s
+                << " attempt=1 sweep_clear=0 reason=first_retreat_sweep_blocked";
+        emit("UNRESOLVED", details.str(), emit_logs);
         return;
     }
 
@@ -551,7 +561,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
           << " start_s=" << retreat->path_s 
           << " target_s=" << target_s
           << " distance=" << transaction_.retreat_distance
-          << " return_to_b_start=" << (return_to_b_start ? 1 : 0);
+          << " return_to_b_start=" << (return_to_b_start ? 1 : 0)
+          << " sweep_clear=1 reason=" << transaction_.reason;
 
     emit("SELECT", selection.str(), emit_logs);
 }

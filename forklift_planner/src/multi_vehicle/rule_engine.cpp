@@ -787,38 +787,6 @@ void RuleEngine::recordConflictZones(
     }
 }
 
-void RuleEngine::debugDumpConflict(const VehicleAgent& a,
-                                   const VehicleAgent& b) const {
-    const std::vector<ConflictZone> zones = findConflictZones(a, b);
-    const std::pair<int, int> pkey{std::min(a.id, b.id), std::max(a.id, b.id)};
-    int owner = -1;
-    auto it = conflict_reservations_.find(pkey);
-    if (it != conflict_reservations_.end()) owner = it->second.owner_id;
-    const bool following = following_pairs_.count(pkey) > 0;
-    const double f = mp_.body_front_ext();
-    bool all_same = true;
-    for (const ConflictZone& z : zones)
-        if (!z.same_dir) { all_same = false; break; }
-    ROS_WARN("%s [CONFLICT] V%d(s=%.3f rem=%.3f act=%d blk=%d) vs "
-             "V%d(s=%.3f rem=%.3f act=%d blk=%d) | owner=V%d following=%d "
-             "nzones=%zu all_same_dir=%d",
-             debugLogPrefix().c_str(),
-             a.id, a.path_s, a.remainingS(), (int)a.action, a.blocker_id,
-             b.id, b.path_s, b.remainingS(), (int)b.action, b.blocker_id,
-             owner, (int)following, zones.size(), (int)all_same);
-    for (size_t i = 0; i < zones.size(); ++i) {
-        const ConflictZone& z = zones[i];
-        ROS_WARN("%s [CONFLICT]   zone%zu same_dir=%d | A[%.3f,%.3f] stopA=%.3f "
-                 "committedA=%d | B[%.3f,%.3f] stopB=%.3f committedB=%d | @(%.2f,%.2f)",
-                 debugLogPrefix().c_str(), i, (int)z.same_dir,
-                 z.s_self_enter, z.s_self_exit,
-                 z.s_self_enter - f, (int)(a.path_s > z.s_self_enter),
-                 z.s_other_enter, z.s_other_exit, z.s_other_enter - f,
-                 (int)(b.path_s > z.s_other_enter), z.x, z.y);
-    }
-}
-
-
 double RuleEngine::timeToReachS(const VehicleAgent& v, VehicleAction action,
                                  double target_s) const {
     if (target_s <= v.path_s + 1e-9) return 0.0;

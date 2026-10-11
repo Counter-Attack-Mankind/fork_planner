@@ -1,0 +1,145 @@
+一、日志文件结构
+log/
+├── summary.log
+├── A1.log
+├── coordination.log
+├── deadlock.log
+├── safety.log
+├── V0.log
+├── V1.log
+├── V2.log
+└── V3.log
+
+每个文件统一采用：
+[sim_t] [EVENT] 关键字段...
+所有事件统一带 tick、plan_id、event_id（适用时）、vehicle_id 和 path_gen，用于跨文件关联。
+
+二、各文件的格式与要求
+1. Vi.log：单车运动日志
+职责：记录车辆实际在干什么、为什么减速或停车、被谁阻挡。
+[120.0] TASK_START B52->A1 task=8 gen=15
+[125.0] STATE mode=ACTIVE phase=TO_A1 s=1.20/5.80
+        speed=0.20 action=NOMINAL wait=0 dwell=0
+[128.4] ACTION NOMINAL->CREEP
+        reason=dynamic_speed_MID blocker=V0
+[130.2] ACTION CREEP->STOP
+        reason=dynamic_speed_STOP_V0 blocker=V0
+[135.0] ACTION STOP->NOMINAL reason=clear blocker=none
+[152.0] TASK_END arrived=A1
+
+注意事项：
+- 只记录 EXECUTED，不能混入 rollout 预测状态。
+- 正常运动每秒输出一次简洁状态；同时以 0.1 s 保存实际运动轨迹 CSV，以支持精确回放。
+- action/reason/blocker/mode/phase 变化必须立即记录，不能等到下一秒。
+- STOP 应记录开始、解除和连续停车时长；wait 与 stop_duration 分开，因为当前 wait_time 也累计 CREEP/YIELD。
+- 硬护栏覆盖原始停车原因时，应保留 previous_reason 和 previous_blocker。
+
+2. A1.log：A1 服务与预约事务
+职责：记录 A1 服务申请、owner 竞争、预约、进出库和离场闭包。
+[120.0] REQUEST V1 eta=8.2 task=6
+[120.0] OWNER_CREATE owner=V1 reason=eta
+[122.0] CLUSTER_CREATE owner=V1 waiter=V3
+        stop_s=4.850 release_s=1.775
+[128.0] WAIT vehicle=V3 blocker=V1 reason=departure_cluster
+[135.0] CLUSTER_RELEASE owner=V1 waiter=V3
+[136.0] A1_ENTER V3
+
+注意事项：
+- 区分 future_owner、实际服务预约及离场保护 owner，不混用身份。
+- 记录 owner 建立、变更、锁定和释放，以及闭包建立、等待、释放。
+- 保留 owner_path_gen、waiter_path_gen、stop_s 和 release_s 等关键参数。
+- 相同 owner、相同闭包在每次滚动刷新时不重复打印。
+- 记录谁在等待谁，尤其要保留 A1 事务造成的等待依赖。
+
+3. coordination.log：普通多车协同日志
+职责：解释 TTC 冲突、优先关系、调速与普通停车决策。
+[130.0] CONFLICT_ENTER id=C42 pair=V0/V1
+        ttc=2.45 priority=V0 waiter=V1
+[130.0] DECISION id=C42
+        V0=NOMINAL V1=STOP stop_s=3.250
+        reason=dynamic_speed_STOP
+[136.0] DECISION_CHANGE id=C42 V1=STOP->CREEP
+[140.0] CONFLICT_CLEAR id=C42
+
+注意事项：
+- 记录普通 TTC、桥式优先、冲突区几何边界和速度协调结果。
+- 必须记录 priorityWinner 的最终结果及其必要判定依据。
+- 区分普通 TTC 决策、实际执行动作及被其他规则覆盖后的结果。
+- 只记录冲突出现、决策变化、解除及异常，不逐帧输出重复 TTC。
+- 默认只保存影响决策的预测结论，不保存全部 15 秒 rollout。
+
+4. deadlock.log：死锁检测与恢复
+职责：完整记录死锁候选、确认、退让、PASS 和失败原因。
+[160.0] CANDIDATE pair=V0/V3
+        V0=STOP blocker=V3 reason=hard_collision_guard
+        V3=STOP blocker=V0 reason=hard_collision_guard
+[164.0] CONFIRMED pair=V0/V3 duration=4.0
+[164.0] SELECT priority=V0 retreat=V3 target_s=2.477
+[168.0] RETREAT_DONE vehicle=V3
+[170.0] PASS_START pair=V0/V3
+[175.0] CLEAR reason=one_vehicle_active_for_two_periods
+
+注意事项：
+- 候选与确认时记录双方 action/reason/blocker/path_gen/path_s。
+- 特别保留双方 blocker 的来源，区分物理阻挡与协调层等待依赖。
+- 记录优先车辆选择依据、每次退让目标、安全扫掠结果。
+- 完整记录 RETREAT → RETREAT_HOLD → PASS → CLEAR/UNRESOLVED 状态转换。
+- UNRESOLVED 必须保留具体原因和完整事故关联证据。
+- 不重复输出每拍 deadlock_hold，只记录状态进入、变化及结束。
+
+5. safety.log：硬护栏与物理安全保护
+职责：解释实际执行为什么被安全约束强制修改。
+[26.7] HARD_GUARD pair=V0/V3
+       reason=planned_body_overlap
+       V0_forward_safe=0 V3_forward_safe=1
+       blocked=V0
+
+       V0_before=STOP blocker=V1
+       V0_after=STOP blocker=V3
+       V3_after=STOP blocker=V0
+
+注意事项：
+- 以上仅为字段格式示例，不能把示例数值当成实际判定。
+- 必须明确到底阻止了哪辆车，而非只记录碰撞车辆对。
+- 记录 i_only_safe、j_only_safe、both_next_safe、both_stop_safe 和最终命中的处理分支。
+- 记录硬护栏作用前后的 action/reason/blocker。
+- 物理阻挡对象不能未经区分就被解释成协调等待原因。
+- 只记录安全事件开始、影响对象变化、解除，不连续刷同一事件。
+
+6. summary.log：仿真运行摘要
+职责：记录配置、进度、最终结果及异常索引。
+START seed=2022 vehicles=4
+update_rate=10
+simulation_speed=5
+rolling_refresh=2
+prediction_horizon=15
+
+[120.0] PROGRESS tasks=8 stops=1 max_wait=12.5
+[240.0] PROGRESS tasks=15 stops=0 max_wait=18.2
+END result=FAIL duration=3600
+hard_guard=2 deadlock=1 unresolved=1
+
+
+注意事项：
+- 保存 seed、车辆集合、运行模式、关键配置及代码提交版本。
+- 定期只记录简洁汇总，不复制单车详细状态。
+- 记录异常事件 ID 与对应时间，方便定位其他文件。
+- 保留最终任务数、硬护栏次数、死锁次数、最大等待时长和失败原因。
+- summary.log 不参与每 300 秒(5min)的历史清除。
+
+三、关于预测 rollout
+不单独建立长期 rollout.log。
+正常情况下，仅将影响决策的预测结论写入 coordination.log 或 A1.log。
+当出现硬护栏、死锁、路径生成失败或其他异常时，再从最近 300 秒的内存缓存中提取相关预测证据，关联写入对应异常记录或独立事故附件。
+预测数据一律标记 PREDICTED，实际状态一律标记 EXECUTED，二者不能混淆。
+
+四、日志轮转与终端输出
+日志轮转： 每 300 秒仿真时间切换一个分段，自动保留最近 3 段普通日志。旧文件轮转删除前，必须保留事故关联分段；历史事故及 summary.log 不随普通轮转删除。
+终端输出： 每 10 秒显示一行总体进度，每 60 秒显示一次简短车辆状态表。正常 TTC、A1、路径细节、重复规则请求全部取消终端打印；仅在异常首次触发、变化、恢复时打印 WARN/ERROR。实车急停、动捕失联等安全事件必须继续实时提醒。
+
+五、代码修改范围与原则
+核心修改集中在 diagnostic_logger.h/.cpp、diagnostic_snapshot.cpp 和 multi_vehicle_patrol_node.cpp，同时清理 rule_engine.cpp、a1_coordinator.cpp、deadlock_manager.cpp 中重复的日志生成和 ROS 输出。
+只重构日志系统，不改动路径生成、普通 TTC、A1 调度、硬护栏判据、Deadlock 状态机或车辆运动行为。
+最终实现一个明确的分工：
+Vi.log 看车辆行为，A1.log 看 A1 事务，coordination.log 看普通协调，deadlock.log 看死锁恢复，safety.log 看物理安全，summary.log 看整体运行结果。
+(尽可能不要耦合在multi_vehicle_patrol_node.cpp，rule_engine.cpp中，为它们减轻负担，详细的日志可以写在独立的日志.cpp文件中，然后对应调用，实现功能的分离与模块化)

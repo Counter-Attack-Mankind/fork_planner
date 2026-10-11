@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.5)
 project(forklift_planner)
 
+execute_process(
+  COMMAND git rev-parse --short=12 HEAD
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  OUTPUT_VARIABLE FORKLIFT_PLANNER_GIT_COMMIT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+if(NOT FORKLIFT_PLANNER_GIT_COMMIT)
+  set(FORKLIFT_PLANNER_GIT_COMMIT unknown)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 add_compile_options(-O2)
 
@@ -69,6 +80,9 @@ add_executable(multi_vehicle_patrol_node
   src/multi_vehicle/task_allocator.cpp
   src/multi_vehicle/traffic_resource_map.cpp
   src/multi_vehicle_patrol_node.cpp
+)
+target_compile_definitions(multi_vehicle_patrol_node PRIVATE
+  FORKLIFT_PLANNER_GIT_COMMIT="${FORKLIFT_PLANNER_GIT_COMMIT}"
 )
 add_dependencies(multi_vehicle_patrol_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(multi_vehicle_patrol_node

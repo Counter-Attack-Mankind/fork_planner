@@ -42,8 +42,6 @@
   <node pkg="forklift_planner" type="multi_vehicle_patrol_node"
         name="multi_vehicle_patrol_node" output="screen">
     <param name="debug_log_dir" value="$(arg log_dir)"/>
-    <param name="coord_log_file"
-           value="$(arg log_dir)/multi_vehicle_coordination.log"/>
   </node>
 
   <node pkg="forklift_planner" type="realbridge_controller_launcher.py"

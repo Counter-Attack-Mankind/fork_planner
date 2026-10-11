@@ -75,9 +75,6 @@ public:
                   .string();
         nh_.param<std::string>("debug_log_dir", debug_log_dir_,
                                default_log_dir);
-        nh_.param<std::string>("coord_log_file", coord_log_file_,
-                               debug_log_dir_ +
-                                   "/simulation_diagnosis.log");
         nh_.param("coord_log_enabled", coord_log_enabled_, true);
         nh_.param("stress_watchdog_enabled", stress_watchdog_enabled_, false);
         nh_.param("stress_quiet", stress_quiet_, false);
@@ -141,6 +138,7 @@ public:
         marker_pub_ = std::make_unique<forklift_planner::multi_vehicle::MarkerPublisher>(
             nh_, mp_, pp_, map_->slots(), cfg_, a1_pickup);
         initAgents();
+        if (diagnostics_) diagnostics_->registerVehicles(agents_);
         visited_slots_.assign(map_->slots().size(), false);
         one_shot_done_.assign(agents_.size(), false);
         if (stress_quiet_) {
@@ -282,7 +280,7 @@ private:
 
     void initCoordLog() {
         diagnostics_ = std::make_unique<forklift_planner::diagnostics::DiagnosticLogger>(
-            debug_log_dir_, coord_log_file_, coord_log_enabled_);
+            debug_log_dir_, coord_log_enabled_);
         diagnostics_->setRolloutCommitFrames(rb_horizon_refresh_);
         if (!diagnostics_->initialize(cfg_.vehicle_count, cfg_.random_seed, one_shot_,
                                       cfg_.use_a1_cycle)) {
@@ -1585,7 +1583,6 @@ private:
                      << admission.a1.waiter_stop_s;
             }
         }
-        ROS_WARN("%s", line.str().c_str());
         coordLogWithContext(line.str(), "REAL", sim_plan_id_, -1, -1);
     }
 
@@ -2008,6 +2005,7 @@ private:
             return changed;
         };
 
+        std::set<std::pair<int, int>> current_hard_guard_pairs;
         auto resolvePlannedOverlaps = [&]() {
         const size_t max_guard_iterations =
             std::max<size_t>(4, agents_.size() * agents_.size() * 2);
@@ -2031,6 +2029,10 @@ private:
                     }
 
                     any_overlap = true;
+                    int i_only_safe_value = -1;
+                    int j_only_safe_value = -1;
+                    int both_next_safe_value = -1;
+                    int both_stop_safe_value = -1;
                     const bool i_active = agents_[i].active();
                     const bool j_active = agents_[j].active();
                     if (i_active && !j_active) {
@@ -2055,6 +2057,10 @@ private:
                             canPlaceIgnoringPair(j, next_s[j], i);
                         const bool both_stop_safe =
                             !overlapsAt(i, agents_[i].path_s, j, agents_[j].path_s);
+                        i_only_safe_value = i_only_safe ? 1 : 0;
+                        j_only_safe_value = j_only_safe ? 1 : 0;
+                        both_next_safe_value = both_next_safe ? 1 : 0;
+                        both_stop_safe_value = both_stop_safe ? 1 : 0;
 
                         if (both_next_safe) {
                             const bool changed_i =
@@ -2112,17 +2118,37 @@ private:
                         }
                     }
                     if (!sim_mode_) {  // 前瞻仿真中只要其物理挡停效果,不计数/不打日志
-                        const bool first_guard = first_guard_tick_ == 0;
                         ++hard_guard_events_;
-                        const bool new_guard_pair = hard_guard_pairs_.insert(
-                            {std::min(agents_[i].id, agents_[j].id),
-                             std::max(agents_[i].id, agents_[j].id)}).second;
+                        const std::pair<int, int> pair{
+                            std::min(agents_[i].id, agents_[j].id),
+                            std::max(agents_[i].id, agents_[j].id)};
+                        const bool first_pair_this_tick =
+                            current_hard_guard_pairs.insert(pair).second;
+                        hard_guard_pairs_.insert(pair);
+                        const bool guard_started = first_pair_this_tick &&
+                            active_hard_guard_pairs_.count(pair) == 0;
                         if (first_guard_tick_ == 0) first_guard_tick_ = tick_count_;
-                        if ((first_guard || new_guard_pair) && diagnostics_) {
+                        if (guard_started && diagnostics_) {
                             std::ostringstream evidence;
                             evidence << "[HARD_GUARD] pair=V" << agents_[i].id
                                      << "/V" << agents_[j].id
                                      << " reason=planned_body_overlap minimal_stop=1"
+                                     << " i_only_safe=" << i_only_safe_value
+                                     << " j_only_safe=" << j_only_safe_value
+                                     << " both_next_safe=" << both_next_safe_value
+                                     << " both_stop_safe=" << both_stop_safe_value
+                                     << " decision="
+                                     << (blocked[i] && blocked[j] ? "BLOCK_BOTH"
+                                         : blocked[i] ? "BLOCK_V" + std::to_string(agents_[i].id)
+                                         : blocked[j] ? "BLOCK_V" + std::to_string(agents_[j].id)
+                                         : "ALLOW_BOTH")
+                                     << " blocked="
+                                     << (blocked[i] && blocked[j]
+                                             ? "V" + std::to_string(agents_[i].id) + "/V" +
+                                                   std::to_string(agents_[j].id)
+                                         : blocked[i] ? "V" + std::to_string(agents_[i].id)
+                                         : blocked[j] ? "V" + std::to_string(agents_[j].id)
+                                         : "none")
                                      << " pre_V" << agents_[i].id << "_action="
                                      << actionName(agents_[i].action)
                                      << " pre_V" << agents_[i].id << "_reason="
@@ -2137,11 +2163,11 @@ private:
                                      << agents_[j].blocker_id;
                             diagnostics_->event(evidence.str());
                         }
-                        ROS_ERROR_THROTTLE(
-                            1.0,
-                            "[multi_patrol] hard collision guard: V%d vs V%d; "
-                            "minimal stop applied",
-                            agents_[i].id, agents_[j].id);
+                        if (guard_started) {
+                            ROS_ERROR("[multi_patrol] hard collision guard: V%d vs V%d; "
+                                      "minimal stop applied", agents_[i].id,
+                                      agents_[j].id);
+                        }
                     }
                 }
             }
@@ -2153,6 +2179,15 @@ private:
         };
 
         resolvePlannedOverlaps();
+        if (!sim_mode_) {
+            for (const auto& pair : active_hard_guard_pairs_) {
+                if (current_hard_guard_pairs.count(pair) != 0 || !diagnostics_) continue;
+                diagnostics_->event("[HARD_GUARD_CLEAR] pair=V" +
+                                    std::to_string(pair.first) + "/V" +
+                                    std::to_string(pair.second));
+            }
+            active_hard_guard_pairs_.swap(current_hard_guard_pairs);
+        }
 
         for (size_t i = 0; i < agents_.size(); ++i) {
             VehicleAgent& v = agents_[i];
@@ -2190,10 +2225,11 @@ private:
                 v.path_s >= v.a1_departure_priority_until_s - 1e-9) {
                 v.a1_departure_committed = false;
                 if (!sim_mode_) {
-                    ROS_INFO("[multi_patrol][A1 EXIT PRIORITY RELEASE] V%d "
-                             "s=%.3f threshold=%.3f",
-                             v.id, v.path_s,
-                             v.a1_departure_priority_until_s);
+                    std::ostringstream line;
+                    line << "[A1_EXIT_PRIORITY_RELEASE] vehicle=V" << v.id
+                         << " s=" << v.path_s
+                         << " threshold=" << v.a1_departure_priority_until_s;
+                    coordLog(line.str());
                 }
             }
 
@@ -3112,7 +3148,6 @@ private:
     std::vector<VehicleAgent> agents_;
     std::vector<bool> visited_slots_;
     std::string debug_log_dir_;
-    std::string coord_log_file_;
     bool coord_log_enabled_ = true;
     std::unique_ptr<forklift_planner::diagnostics::DiagnosticLogger> diagnostics_;
     bool stress_watchdog_enabled_ = false;
@@ -3211,6 +3246,7 @@ private:
     unsigned long long hard_guard_events_ = 0;        // 硬护栏触发(碰撞)累计次数
     unsigned long long first_guard_tick_ = 0;         // 首次碰撞所在 tick(0=从未)
     std::set<std::pair<int, int>> hard_guard_pairs_;  // 涉及碰撞的车对
+    std::set<std::pair<int, int>> active_hard_guard_pairs_;
     bool sim_mode_ = false;                           // 前瞻仿真中:屏蔽计数/日志副作用
 
 public:
@@ -3319,23 +3355,10 @@ public:
         }
     }
 
-    // 一辆车的紧凑状态行(诊断用,信息尽量全)。
-    std::string vehLine(const VehicleAgent& v) const {
-        return forklift_planner::diagnostics::formatVehicleCompact(v);
-    }
-    std::string fleetSnapshot() const {
-        return forklift_planner::diagnostics::formatFleetSnapshot(agents_, tick_count_);
-    }
     VehicleAgent* agentById(int id) {
         for (VehicleAgent& v : agents_)
             if (v.id == id) return &v;
         return nullptr;
-    }
-    // 打印某对车的冲突几何(委托 RuleEngine,拿到 se/sx/same_dir/committed/owner/following)。
-    void dumpPair(int ia, int ib) {
-        VehicleAgent* a = agentById(ia);
-        VehicleAgent* b = agentById(ib);
-        if (a && b) rule_engine_->debugDumpConflict(*a, *b);
     }
 
     // 死锁看门狗(C-第1步):跟 blocker_id 等待图找一个「持续死锁环」——环内每辆都
@@ -3345,22 +3368,6 @@ public:
     const VehicleAgent* agentById_c(int id) const {
         for (const VehicleAgent& v : agents_) if (v.id == id) return &v;
         return nullptr;
-    }
-
-    // 一次性全面 dump 首个持续死锁簇:每个成员的路径要点 + 簇内两两冲突几何(same_dir 决定
-    // 对向/同向 → 判定单向环流能否治)。只打一次,只读。用于源头修复的精确诊断。
-    // 关键异常统一交给 diagnostics 写入 simulation_diagnosis.log。
-    // 长测排错专用——只在出问题那一刻写,故文件小、不刷屏。
-    void onsetLog(const std::string& s) {
-        const std::string console_line = contextualLog(
-            s, "REAL", coord_log_plan_id_, coord_log_frame_id_, -1);
-        ROS_ERROR("%s", console_line.c_str());
-        if (diagnostics_) diagnostics_->event(s);
-    }
-    // 把碰撞/楔死前的全队历史(含 gen=path_gen:刚被 recovery 重规划过则 gen 跳变=churn 撞)
-    // 写进持久文件,供事后根因。
-    void onsetDumpHist(const std::string& header, const std::deque<std::string>& hist) {
-        if (diagnostics_) diagnostics_->eventHistory(header, hist);
     }
 
     std::string stressSnapshot(bool include_geometry) const {
@@ -3396,20 +3403,12 @@ public:
     }
 
     // 找「所有」持续死锁环的成员并集:对每辆车跟 blocker 链,若绕回自身则其环成员全部入集。
-    // 批处理模式:紧凑循环跑 ticks 拍(跳过 marker)。维护近 N 拍环形历史;首次碰撞那拍
-    // dump 全队历史+碰撞对几何,并对其后 kPost 拍逐拍详打;结尾 dump 永久楔死现场。
+    // 批处理模式:紧凑循环跑 ticks 拍(跳过 marker)。详细证据由 diagnostics 环形历史归档。
     bool runBatch(unsigned long long ticks) {
         const double dt = 1.0 / pp_.update_rate;
         if (!stress_watchdog_enabled_ && diagnostics_) diagnostics_->truncateEventLog();
-        const unsigned long long progress = ticks / 10 ? ticks / 10 : 1;
-        constexpr size_t kHist = 80;    // 碰撞前回看的拍数
-        constexpr unsigned long long kPost = 150;  // 碰撞后逐拍详打的拍数
-        std::deque<std::string> hist;
-        bool first_dumped = false;
-        bool wedge_dumped = false;
-        unsigned long long verbose_until = 0;
         const size_t stress_ring_limit = std::max<size_t>(
-            1, static_cast<size_t>(std::ceil(120.0 * pp_.update_rate)));
+            1, static_cast<size_t>(std::ceil(300.0 * pp_.update_rate)));
         std::deque<std::string> stress_ring;
         std::vector<double> max_wait_by_vehicle(agents_.size(), 0.0);
         std::vector<double> last_progress_time(agents_.size(), sim_time_);
@@ -3485,7 +3484,8 @@ public:
             const unsigned long long guards_before = hard_guard_events_;
             advanceVehicles(dt);
             if (diagnostics_) {
-                for (const VehicleAgent& vehicle : agents_) diagnostics_->vehicleState(vehicle);
+                diagnostics_->observeSimulationTick(agents_, *rule_engine_, tick_count_,
+                                                    sim_time_);
             }
             diagnoseA1ExitIntrusions();
             recordDebugTimelineTick();
@@ -3537,57 +3537,7 @@ public:
                 }
             }
 
-            if (!stress_quiet_) {
-                hist.push_back(fleetSnapshot());
-                if (hist.size() > kHist) hist.pop_front();
-            }
-
-            if (!stress_quiet_ && new_collision && !first_dumped) {
-                first_dumped = true;
-                verbose_until = tick_count_ + kPost;
-                std::string cp;
-                for (const auto& q : hard_guard_pairs_)
-                    cp += "V" + std::to_string(q.first) + "-V" +
-                          std::to_string(q.second) + " ";
-                onsetLog("[FIRST-COLLISION] @tick=" + std::to_string(tick_count_) +
-                         " sim_t=" + std::to_string((long long)sim_time_) +
-                         "s 涉及对=[" + cp + "]");
-                onsetDumpHist("FIRST-COLLISION 前 " + std::to_string(hist.size()) +
-                              " 拍历史(看 gen 是否刚跳变=刚被脱困重置)", hist);
-                ROS_WARN("[HIST] ====== 碰撞前 %zu 拍全队历史 ======", hist.size());
-                for (const std::string& snap : hist) ROS_WARN("[HIST]\n%s", snap.c_str());
-                ROS_WARN("[HIST] ====== 碰撞对冲突几何 ======");
-                for (const auto& q : hard_guard_pairs_) dumpPair(q.first, q.second);
-            }
-
-            // 楔死现场一次性诊断:任一车 wait 首次超阈值 → 回放历史 + 全队 + 卡死车几何。
-            if (!stress_quiet_ && !wedge_dumped) {
-                int sid = -1; double mw = 0.0;
-                for (const VehicleAgent& v : agents_)
-                    if (v.wait_time > mw) { mw = v.wait_time; sid = v.id; }
-                if (mw > 25.0 && sid >= 0) {
-                    wedge_dumped = true;
-                    ROS_ERROR("[FIRST-WEDGE] @tick=%llu sim_t=%.1fs 最久=V%d wait=%.1fs"
-                              " —— 回放前 %zu 拍历史 + 卡死车几何 ===",
-                              tick_count_, sim_time_, sid, mw, hist.size());
-                    for (const std::string& snap : hist)
-                        ROS_WARN("[WHIST]\n%s", snap.c_str());
-                    for (const VehicleAgent& v : agents_)
-                        if (v.id != sid) dumpPair(sid, v.id);
-                }
-            }
-
-            if (!stress_quiet_ && tick_count_ <= verbose_until) {
-                ROS_WARN("[POST]\n%s", fleetSnapshot().c_str());
-                for (const auto& q : hard_guard_pairs_) dumpPair(q.first, q.second);
-            }
-
             updateSnapshotWedgeTrigger();
-
-            if (!stress_quiet_ && (k + 1) % progress == 0) {
-                ROS_INFO("[batch] %llu/%llu ticks (sim_t=%.0fs) hard_guard=%llu",
-                         k + 1, ticks, sim_time_, hard_guard_events_);
-            }
         }
 
         if (stress_watchdog_enabled_ && completed_ticks != ticks) {
@@ -3602,18 +3552,10 @@ public:
             return false;
         }
 
-        // 结尾:找等待最久(永久楔死)的车,dump 它与所有其它车的冲突几何 + 全队快照。
         double max_wait = 0.0;
         int stuck_id = -1;
         for (const VehicleAgent& v : agents_)
             if (v.wait_time > max_wait) { max_wait = v.wait_time; stuck_id = v.id; }
-        ROS_WARN("[END] ====== 结尾全队快照 ======\n%s", fleetSnapshot().c_str());
-        if (stuck_id >= 0 && max_wait > 20.0) {
-            ROS_WARN("[END] 永久楔死嫌疑=V%d (wait=%.1fs),其与各车冲突几何:",
-                     stuck_id, max_wait);
-            for (const VehicleAgent& v : agents_)
-                if (v.id != stuck_id) dumpPair(stuck_id, v.id);
-        }
         std::string pairs;
         for (const auto& p : hard_guard_pairs_)
             pairs += "V" + std::to_string(p.first) + "-V" +

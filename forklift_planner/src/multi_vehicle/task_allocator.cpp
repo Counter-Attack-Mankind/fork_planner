@@ -1254,11 +1254,7 @@ bool TaskAllocator::assignPickupLeg(VehicleAgent& vehicle, bool emit_log) {
     vehicle.action = VehicleAction::NOMINAL;
     vehicle.requested_action = VehicleAction::NOMINAL;
     vehicle.reason = "new_pickup_leg";
-    if (emit_log) {
-        ROS_INFO("[multi_patrol][A1] V%d pickup leg: B%d -> A1  wpts=%zu len=%.3f",
-                 vehicle.id, vehicle.current_slot, vehicle.track.path().size(),
-                 vehicle.track.length());
-    }
+    (void)emit_log;
     return true;
 }
 
@@ -1294,12 +1290,6 @@ bool TaskAllocator::tryPrepareFromA1(VehicleAgent& vehicle, int target,
     vehicle.a1_departure_priority_until_s = std::min(
         vehicle.pending_dropoff_track.length(), cusp_s + mp_.body_rear_ext());
 
-    ROS_WARN("[multi_patrol][A1 EXIT PREPARED] V%d target=B%d "
-             "pickup_dwell=%.2fs exit_len=%.3f priority_until_s=%.3f "
-             "horizon_refresh=IMMEDIATE",
-             vehicle.id, target, cfg_.pickup_dwell_time,
-             vehicle.pending_dropoff_track.length(),
-             vehicle.a1_departure_priority_until_s);
     return true;
 }
 
@@ -1436,12 +1426,7 @@ bool TaskAllocator::activatePreparedDropoffLeg(VehicleAgent& vehicle,
         coord_log_sink_(line.str());
     }
 
-    if (emit_log) {
-        ROS_INFO("[multi_patrol][A1] V%d activate prepared dropoff: A1 -> B%d "
-                 "len=%.3f priority_until_s=%.3f",
-                 vehicle.id, target, vehicle.track.length(),
-                 vehicle.a1_departure_priority_until_s);
-    }
+    (void)emit_log;
     return true;
 }
 
