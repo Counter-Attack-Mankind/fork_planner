@@ -6,7 +6,6 @@
 #include <map>
 #include <set>
 #include <string>
-#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -32,9 +31,9 @@ public:
     DiagnosticLogger(std::string log_dir, bool enabled);
     ~DiagnosticLogger();
 
-    bool initialize(int vehicle_count, int seed, bool one_shot, bool use_a1_cycle);
+    bool initialize(int vehicle_count, int seed, bool one_shot, bool use_a1_cycle,
+                    bool real_mode = false);
     void registerVehicles(const std::vector<multi_vehicle::VehicleAgent>& vehicles);
-    void setRolloutCommitFrames(int frames) { rollout_commit_frames_ = frames; }
     void setContext(const LogContext& context) { context_ = context; }
     const LogContext& context() const { return context_; }
     void setSuppressed(bool suppressed) { suppressed_ = suppressed; }
@@ -77,6 +76,7 @@ public:
                             const std::deque<std::string>& ring,
                             const std::string& failure_snapshot) const;
     void truncateEventLog();
+    void finalize(double final_sim_time);
 
     const std::string& runDirectory() const { return run_dir_; }
     const std::string& runId() const { return run_id_; }
@@ -103,17 +103,32 @@ private:
         double constraint_since = 0.0;
         double last_snapshot_time = -1.0;
         unsigned long long last_trajectory_tick = static_cast<unsigned long long>(-1);
+        uint64_t last_decision_plan_id = static_cast<uint64_t>(-1);
         std::string reason;
         std::string constraint_id;
         bool no_progress_reported = false;
     };
 
+    struct TimedRecord {
+        double sim_time = 0.0;
+        std::string text;
+    };
+
     struct RotatingStream {
         std::string logical_name;
-        std::ofstream file;
-        long long segment = -1;
-        std::deque<std::string> paths;
+        std::string path;
+        std::deque<TimedRecord> records;
         std::string last_record;
+        std::string baseline_state;
+        double baseline_state_time = 0.0;
+        bool csv = false;
+        bool vehicle = false;
+        bool dirty = false;
+    };
+
+    struct RolloutEvidence {
+        std::string line;
+        LogContext context;
     };
 
     static bool ensureParentDirectory(const std::string& path);
@@ -137,6 +152,10 @@ private:
     void writeModule(StreamKind kind, const std::string& event,
                      const std::string& details, const LogContext& context);
     void appendHistory(const std::string& record, double sim_time);
+    void promoteRolloutEvidence(uint64_t plan_id, const LogContext& context);
+    void advanceWindow(double endpoint);
+    void flushWindow(double endpoint, bool force);
+    void rewriteStream(RotatingStream& stream, double endpoint);
     void startIncident(const std::string& type, const std::string& details,
                        const std::string& snapshot);
     void closeIncident(const std::string& result);
@@ -155,10 +174,10 @@ private:
     std::string safety_file_;
     std::string summary_file_;
     bool coordination_enabled_ = true;
+    bool real_mode_ = false;
     bool suppressed_ = false;
     bool initialized_ = false;
     bool run_summary_written_ = false;
-    int rollout_commit_frames_ = 1;
     LogContext context_;
     std::ofstream summary_log_;
     std::ofstream incident_log_;
@@ -167,7 +186,9 @@ private:
     std::unordered_map<int, RotatingStream> vehicle_streams_;
     std::unordered_map<int, RotatingStream> trajectory_streams_;
     std::deque<std::pair<double, std::string>> history_;
-    std::set<std::tuple<uint64_t, int, int>> rollout_evidence_vehicles_;
+    std::map<uint64_t, std::vector<RolloutEvidence>> rollout_evidence_;
+    std::set<std::string> current_tick_module_records_;
+    unsigned long long module_dedup_tick_ = static_cast<unsigned long long>(-1);
     std::unordered_map<int, VehicleHistoryState> vehicle_history_;
     bool incident_active_ = false;
     unsigned long long event_id_ = 0;
@@ -178,6 +199,9 @@ private:
     double last_progress_log_time_ = -60.0;
     double last_console_progress_time_ = -10.0;
     double last_console_table_time_ = -60.0;
+    double last_flush_time_ = -1.0;
+    double final_sim_time_ = 0.0;
+    bool finalized_ = false;
     std::string wait_cycle_signature_;
     double wait_cycle_since_ = 0.0;
 };

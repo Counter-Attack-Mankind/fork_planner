@@ -283,9 +283,8 @@ private:
     void initCoordLog() {
         diagnostics_ = std::make_unique<forklift_planner::diagnostics::DiagnosticLogger>(
             debug_log_dir_, coord_log_enabled_);
-        diagnostics_->setRolloutCommitFrames(rb_horizon_refresh_);
         if (!diagnostics_->initialize(cfg_.vehicle_count, cfg_.random_seed, one_shot_,
-                                      cfg_.use_a1_cycle)) {
+                                      cfg_.use_a1_cycle, cfg_.real_mode)) {
             ROS_ERROR("[diagnostics] unified diagnosis log is unavailable");
         } else {
             std::ostringstream config;
@@ -2062,6 +2061,8 @@ private:
                     int j_only_safe_value = -1;
                     int both_next_safe_value = -1;
                     int both_stop_safe_value = -1;
+                    const bool current_body_overlap = overlapsAt(
+                        i, agents_[i].path_s, j, agents_[j].path_s);
                     const bool i_active = agents_[i].active();
                     const bool j_active = agents_[j].active();
                     if (i_active && !j_active) {
@@ -2161,7 +2162,14 @@ private:
                             std::ostringstream evidence;
                             evidence << "[HARD_GUARD] pair=V" << agents_[i].id
                                      << "/V" << agents_[j].id
-                                     << " reason=planned_body_overlap minimal_stop=1"
+                                     << " reason=planned_body_overlap"
+                                     << " risk_type="
+                                     << (current_body_overlap
+                                             ? "CURRENT_BODY_OVERLAP"
+                                             : "PREDICTED_NEXT_STEP_BODY_OVERLAP")
+                                     << " actual_collision="
+                                     << (current_body_overlap ? 1 : 0)
+                                     << " minimal_stop=1"
                                      << " i_only_safe=" << i_only_safe_value
                                      << " j_only_safe=" << j_only_safe_value
                                      << " both_next_safe=" << both_next_safe_value

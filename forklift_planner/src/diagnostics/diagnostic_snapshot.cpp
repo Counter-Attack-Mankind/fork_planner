@@ -43,10 +43,11 @@ std::string readableSimTime(double seconds) {
     const double nonnegative = std::max(0.0, seconds);
     const long long tenths = static_cast<long long>(std::llround(nonnegative * 10.0));
     const long long minutes = tenths / 600;
-    const double remainder = static_cast<double>(tenths % 600) / 10.0;
-    char text[80];
-    std::snprintf(text, sizeof(text), "%lldmin%.1fs", minutes, remainder);
-    return text;
+    const long long seconds_tenths = tenths % 600;
+    std::ostringstream out;
+    out << minutes << "min" << std::setfill('0') << std::setw(2)
+        << (seconds_tenths / 10) << "." << (seconds_tenths % 10) << "s";
+    return out.str();
 }
 
 std::string formatVehicleCompact(const multi_vehicle::VehicleAgent& vehicle) {

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -30,17 +29,6 @@ const char* missionPhaseName(MissionPhase phase) {
 
 bool isB0ToB9Source(const VehicleAgent& vehicle) {
     return vehicle.current_slot >= 0 && vehicle.current_slot <= 9;
-}
-
-std::string readableSimTime(double seconds) {
-    const double nonnegative = std::max(0.0, seconds);
-    const long long tenths =
-        static_cast<long long>(std::llround(nonnegative * 10.0));
-    const long long minutes = tenths / 600;
-    const double remainder = static_cast<double>(tenths % 600) / 10.0;
-    char text[80];
-    std::snprintf(text, sizeof(text), "%lldmin%.1fs", minutes, remainder);
-    return text;
 }
 
 const VehicleAgent* agentById(const std::vector<VehicleAgent>& vehicles,
@@ -794,8 +782,7 @@ void A1Coordinator::logFutureA1Transition(
 
     std::ostringstream line;
     line << std::fixed << std::setprecision(2)
-         << "[FUTURE_A1] time=" << readableSimTime(now)
-         << " event=" << event;
+         << "[FUTURE_A1] event=" << event;
     if (current.valid()) {
         line << " old="
              << (previous.valid() ? "V" + std::to_string(previous.owner_id)

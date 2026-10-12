@@ -1139,6 +1139,9 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
         predicts_future_leg[index] = true;
         return true;
     };
+
+    //为每辆叉车生成未来 15 s 的预测轨迹，并将预测轨迹转换成随时间变化的 OBB 车身序列，
+    //供后续普通 TTC 碰撞检测和调速使用。
     for (size_t i = 0; i < vehicles.size(); ++i) {
         VehicleAgent& vehicle = vehicles[i];
         if (vehicle.active() && !vehicle.track.empty()) {
@@ -1158,23 +1161,23 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
             }
             continue;
         }
-
+            //对于非active车辆，即不在道路上的
         bool known_future = false;
-        if (vehicle.pending_dropoff_valid &&
-            !vehicle.pending_dropoff_track.empty()) {
-            known_future = prepareFutureLeg(
-                i, vehicle.pending_dropoff_track, MissionPhase::TO_B,
-                LegTargetKind::B_SLOT);
-        } else if ((vehicle.mode == VehicleMode::DWELL ||
-                    vehicle.mode == VehicleMode::NEED_TASK) &&
-                   (vehicle.mission_phase == MissionPhase::UNLOAD_DWELL ||
-                    vehicle.mission_phase == MissionPhase::TO_A1) &&
-                   pickup_leg_track_) {
-            PathTrack pickup_track;
-            if (pickup_leg_track_(vehicle.current_slot, pickup_track)) {
-                known_future = prepareFutureLeg(
-                    i, pickup_track, MissionPhase::TO_A1,
-                    LegTargetKind::A1);
+        if (vehicle.pending_dropoff_valid && !vehicle.pending_dropoff_track.empty())
+        {
+            known_future = prepareFutureLeg(i, vehicle.pending_dropoff_track, MissionPhase::TO_B,LegTargetKind::B_SLOT);
+        } else if ((vehicle.mode == VehicleMode::DWELL || vehicle.mode == VehicleMode::NEED_TASK) &&
+                    (vehicle.mission_phase == MissionPhase::UNLOAD_DWELL || vehicle.mission_phase == MissionPhase::TO_A1) && pickup_leg_track_) 
+        {
+            // B0-B9：只有本轮合法 A1 owner 才允许预测未来出库运动
+            const bool is_b0_b9 = vehicle.current_slot >= 0 && vehicle.current_slot <= 9;
+            const auto& commitment =    a1_coordinator_.futureA1Commitment();
+            const bool owns_a1 = commitment.valid() &&  commitment.owner_id == vehicle.id && commitment.owner_path_gen == vehicle.path_gen + 1;
+
+            if (!is_b0_b9 || owns_a1)  //如果在库位的不是B0-B9,或者是B0-B9的车但是属于A1 onwer，那么可以开始普通TTC预测
+            {       PathTrack pickup_track;
+                if (pickup_leg_track_(vehicle.current_slot, pickup_track)) 
+                    known_future = prepareFutureLeg(i, pickup_track, MissionPhase::TO_A1, LegTargetKind::A1);
             }
         }
         if (known_future) {
