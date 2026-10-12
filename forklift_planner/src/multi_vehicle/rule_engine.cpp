@@ -1151,14 +1151,8 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                 forced_stationary[i] = true;
                 predictions[i] = predictStationaryTrajectory(
                     vehicle, mp_, cfg_, horizon);
-            } else {
-                const VehicleAction prediction_action =
-                    vehicle.ttc_stop_hold_remaining > 1e-9
-                        ? VehicleAction::STOP
-                        : minAction(vehicle.action, vehicle.requested_action);
-                predictions[i] = predictTrajectory(
-                    vehicle, mp_, cfg_, prediction_action, horizon);
-            }
+            } else 
+                predictions[i] = predictTrajectory(vehicle, mp_, cfg_, VehicleAction::NOMINAL, horizon);
             continue;
         }
             //对于非active车辆，即不在道路上的
@@ -1190,19 +1184,7 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
         }
     }
 
-    auto predictionForAction = [&](size_t index, VehicleAction action) {
-        if (predicts_future_leg[index]) {
-            return predictTrajectoryAfterDelay(
-                vehicles[index], prediction_vehicles[index],
-                prediction_start_delays[index], mp_, cfg_, action, horizon);
-        }
-        if (forced_stationary[index] || !vehicles[index].active()) {
-            return predictStationaryTrajectory(
-                vehicles[index], mp_, cfg_, horizon);
-        }
-        return predictTrajectory(
-            prediction_vehicles[index], mp_, cfg_, action, horizon);
-    };
+
     auto requestMotionAction = [&](size_t index, VehicleAction action,
                                    const std::string& reason, int blocker_id) {
         VehicleAgent& vehicle = vehicles[index];
@@ -1614,73 +1596,9 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                         effective_ttc_a;
                     effective_interaction.event.ttc_b =
                         effective_ttc_b;
-                    speed_result = evaluatePairSpeedCoordination(
-                        motion_a, motion_b, effective_interaction, priority_physical,
-                        cfg_, preferred_winner);
-                    auto residualDanger = [&](VehicleAction action_a,
-                                              VehicleAction action_b) {
-                        const auto adjusted_a = predictionForAction(i, action_a);
-                        const auto adjusted_b = predictionForAction(j, action_b);
-                        const PairInteractionResult adjusted =
-                            detectPairInteractionFromPredictions(
-                                motion_a, motion_b, {}, adjusted_a, adjusted_b);
-                        if (!adjusted.event.valid) return false;
-                        const PairBridgeTtcCorrection adjusted_bridge =
-                            evaluateBridgeTtcCorrection(
-                                motion_a, motion_b, adjusted_a, adjusted_b,
-                                adjusted, mp_, cfg_);
-                        const double adjusted_ttc_a = std::min(
-                            adjusted.event.ttc_a,
-                            adjusted_bridge.a.corrected_ttc);
-                        const double adjusted_ttc_b = std::min(
-                            adjusted.event.ttc_b,
-                            adjusted_bridge.b.corrected_ttc);
-                        return evaluateTtcStopBoundary(
-                                   adjusted_ttc_a, action_a, cfg_).stop_required ||
-                               evaluateTtcStopBoundary(
-                                   adjusted_ttc_b, action_b, cfg_).stop_required;
-                    };
-                    auto tighten = [](VehicleAction action) {
-                        switch (action) {
-                            case VehicleAction::BOOST:
-                            case VehicleAction::NOMINAL:
-                                return VehicleAction::YIELD;
-                            case VehicleAction::YIELD:
-                                return VehicleAction::CREEP;
-                            case VehicleAction::CREEP:
-                            case VehicleAction::STOP:
-                                return VehicleAction::STOP;
-                        }
-                        return VehicleAction::STOP;
-                    };
-                    bool residual = residualDanger(
-                        speed_result.selected_action_a,
-                        speed_result.selected_action_b);
-                    VehicleAction& yielding_action = a_is_priority
-                        ? speed_result.selected_action_b
-                        : speed_result.selected_action_a;
-                    while (residual && yielding_action != VehicleAction::STOP) {
-                        yielding_action = tighten(yielding_action);
-                        residual = residualDanger(
-                            speed_result.selected_action_a,
-                            speed_result.selected_action_b);
-                    }
-                    if (residual) {
-                        VehicleAction& priority_action = a_is_priority
-                            ? speed_result.selected_action_a
-                            : speed_result.selected_action_b;
-                        priority_action = VehicleAction::STOP;
-                        residual = residualDanger(
-                            speed_result.selected_action_a,
-                            speed_result.selected_action_b);
-                    }
-                    if (speed_result.selected_action_a == VehicleAction::STOP ||
-                        speed_result.selected_action_b == VehicleAction::STOP) {
-                        speed_result.emergency_stop = true;
-                    }
-                    speed_result.reason = residual
-                        ? "adjusted_prediction_stop_both"
-                        : "adjusted_prediction_clear";
+                    //进行TTC动态调速，得到速度结果
+                    speed_result = evaluatePairSpeedCoordination(motion_a, motion_b, effective_interaction, priority_physical,cfg_, preferred_winner);
+                    //直接采用第一次 TTC 调速结果。不再重新预测候选轨迹，也不再逐级收紧让行车或优先车动作。
                     preferred_winner = speed_result.selected_winner_id;
                     const DynamicInterventionBand intervention_band =
                         speed_result.yielding_band;
@@ -1937,8 +1855,6 @@ void RuleEngine::resolvePairwiseConflicts(std::vector<VehicleAgent>& vehicles,
                              << actionName(speed_result.selected_action_b)
                              << " braking_stop="
                              << (speed_result.emergency_stop ? "true" : "false")
-                             << " residual_evaluation="
-                             << (residual ? "CONFLICT" : "CLEAR")
                              << " reason=" << speed_result.reason
                              << " reservation=not_created";
                         coord_log_sink_(line.str());
