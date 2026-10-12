@@ -1467,7 +1467,9 @@ bool A1Coordinator::waiterRetreatSweepClear(
         return false;
     }
     constexpr double kStep = 0.01;
-    const double distance = std::max(0.0, waiter.path_s - target_s);
+    constexpr double kRetreatLookback = 0.10;
+    //往后退只检查后面0.1m，如果没有碰撞就直接退
+    const double distance = std::min(std::max(0.0, waiter.path_s - target_s),kRetreatLookback);
     const int count = std::max(
         1, static_cast<int>(std::ceil(distance / kStep)));
     for (int sample = 0; sample <= count; ++sample) {

@@ -1132,7 +1132,10 @@ private:
                                     static_cast<int>(sim_plan_cursor_), -1);
             }
         }
+        const auto live_intrusions = rule_engine_->captureLiveA1IntrusionCorrections();
         rule_engine_->restore(frame.rule_state, false, true);
+        rule_engine_->restoreLiveA1IntrusionCorrections(live_intrusions);
+
         for (size_t i = 0; i < agents_.size(); ++i) {
             VehicleAgent& v = agents_[i];
             const SimPlannedAgentDecision& d = frame.agents[i];
