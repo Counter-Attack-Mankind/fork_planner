@@ -1,4 +1,5 @@
 #include <ros/ros.h>
+#include <XmlRpcValue.h>
 
 #include <algorithm>
 #include <cctype>
@@ -54,6 +55,18 @@ std::string poseText(const std::string& name, const Pose2d& pose) {
     return out.str();
 }
 
+std_msgs::ColorRGBA analysisColor(size_t index) {
+    static const std::vector<std_msgs::ColorRGBA> palette{
+        color(0.05f, 0.45f, 1.0f, 0.95f),
+        color(0.75f, 0.20f, 0.95f, 0.95f),
+        color(0.10f, 0.80f, 0.30f, 0.95f),
+        color(0.95f, 0.65f, 0.05f, 0.95f),
+        color(0.10f, 0.80f, 0.85f, 0.95f),
+        color(0.95f, 0.25f, 0.45f, 0.95f),
+    };
+    return palette[index % palette.size()];
+}
+
 }  // namespace
 
 class RecoveryVisualizerNode {
@@ -72,8 +85,21 @@ public:
                       mode_name_.c_str());
             mode_name_ = "debug";
         }
-        private_nh_.param("vehicle_a_id", vehicle_a_id_, 0);
-        private_nh_.param("vehicle_b_id", vehicle_b_id_, 1);
+        XmlRpc::XmlRpcValue configured_ids;
+        if (private_nh_.getParam("vehicle_ids", configured_ids) &&
+            configured_ids.getType() == XmlRpc::XmlRpcValue::TypeArray) {
+            for (int i = 0; i < configured_ids.size(); ++i) {
+                if (configured_ids[i].getType() != XmlRpc::XmlRpcValue::TypeInt) {
+                    ROS_WARN("[nlp_recovery] ignoring non-integer vehicle_ids[%d]", i);
+                    continue;
+                }
+                const int id = static_cast<int>(configured_ids[i]);
+                if (std::find(debug_vehicle_ids_.begin(), debug_vehicle_ids_.end(), id) ==
+                    debug_vehicle_ids_.end()) {
+                    debug_vehicle_ids_.push_back(id);
+                }
+            }
+        }
         private_nh_.param<std::string>("snapshot_topic", snapshot_topic_,
                                        "/forklift_planner/recovery_snapshot");
         private_nh_.param("vehicle_radius", config_.vehicle_radius,
@@ -101,10 +127,15 @@ public:
             "/forklift_nlp_recovery/markers", 1, true);
         snapshot_sub_ = private_nh_.subscribe(
             snapshot_topic_, 1, &RecoveryVisualizerNode::snapshotCallback, this);
-        ROS_INFO("[nlp_recovery] read-only phase-1 visualizer: mode=%s A=%d B=%d "
+        std::ostringstream selected_ids;
+        for (size_t i = 0; i < debug_vehicle_ids_.size(); ++i) {
+            if (i != 0) selected_ids << ",";
+            selected_ids << debug_vehicle_ids_[i];
+        }
+        ROS_INFO("[nlp_recovery] read-only phase-1 visualizer: mode=%s debug_ids=[%s] "
                  "disc_radius=%.4f boundary_clearance=%.4f "
                  "shelf_inflation=%.4f topic=%s",
-                 mode_name_.c_str(), vehicle_a_id_, vehicle_b_id_,
+                 mode_name_.c_str(), selected_ids.str().c_str(),
                  builder_->vehicleRadius(),
                  builder_->boundaryClearance(), builder_->shelfInflation(),
                  snapshot_topic_.c_str());
@@ -218,6 +249,20 @@ private:
         markers.markers.push_back(marker);
     }
 
+    void addDiscCenter(visualization_msgs::MarkerArray& markers,
+                       const std::string& ns, int id,
+                       const Pose2d& rear_axle_pose,
+                       const std_msgs::ColorRGBA& rgba) const {
+        const Pose2d center = builder_->bodyCenter(rear_axle_pose);
+        auto marker = baseMarker(ns, id, visualization_msgs::Marker::SPHERE);
+        marker.pose.position = point(center.x, center.y, 0.09);
+        marker.scale.x = 0.04;
+        marker.scale.y = 0.04;
+        marker.scale.z = 0.04;
+        marker.color = rgba;
+        markers.markers.push_back(marker);
+    }
+
     void addBody(visualization_msgs::MarkerArray& markers, const std::string& ns,
                  int id, const Pose2d& rear_axle_pose,
                  const std_msgs::ColorRGBA& rgba) const {
@@ -284,6 +329,8 @@ private:
         const Pose2d start{vehicle.pose.x, vehicle.pose.y, vehicle.pose.theta};
         addDisc(markers, name + "_disc", id_offset, start,
                 color(rgba.r, rgba.g, rgba.b, 0.20f));
+        addDiscCenter(markers, name + "_disc_center", id_offset, start,
+                      color(rgba.r, rgba.g, rgba.b, 1.0f));
         addBody(markers, name + "_body", id_offset, start,
                 color(rgba.r, rgba.g, rgba.b, 0.48f));
         addSolidPoint(markers, name + "_start_point", id_offset, start,
@@ -346,6 +393,8 @@ private:
         const Pose2d pose{vehicle.pose.x, vehicle.pose.y, vehicle.pose.theta};
         addDisc(markers, "normal_vehicle_discs", vehicle.id, pose,
                 color(1.0f, 0.55f, 0.05f, 0.20f));
+        addDiscCenter(markers, "normal_vehicle_centers", vehicle.id, pose,
+                      color(1.0f, 0.45f, 0.0f, 1.0f));
         addBody(markers, "normal_vehicle_bodies", vehicle.id, pose,
                 color(1.0f, 0.55f, 0.05f, 0.48f));
         addText(markers, "normal_vehicle_ids", vehicle.id, pose.x, pose.y, 0.16,
@@ -368,27 +417,29 @@ private:
 
     void clearLockedTransaction() {
         if (locked_.active) {
-            ROS_INFO("[nlp_recovery][auto] clear locked UNRESOLVED transaction "
-                     "retreat=V%d pass=V%d",
-                     locked_.retreat_id, locked_.pass_id);
+            ROS_INFO("[nlp_recovery][auto] clear locked NLP_PREP transaction");
         }
         locked_ = LockedTransaction{};
     }
 
-    bool directiveMatchesLocked(
+    bool snapshotMatchesLocked(
         const sandbox_msgs::RecoverySnapshot& snapshot) const {
-        return locked_.active &&
-               locked_.retreat_id == snapshot.retreat_vehicle_id &&
-               locked_.pass_id == snapshot.pass_vehicle_id &&
-               locked_.directive_retreat_path_gen == snapshot.retreat_path_gen &&
-               locked_.directive_pass_path_gen == snapshot.pass_path_gen &&
-               locked_.retreat_attempt == snapshot.retreat_attempt;
+        if (!locked_.active || locked_.vehicle_ids != snapshot.nlp_vehicle_ids) {
+            return false;
+        }
+        for (size_t i = 0; i < locked_.vehicle_ids.size(); ++i) {
+            const auto* vehicle = findVehicle(snapshot, locked_.vehicle_ids[i]);
+            if (vehicle == nullptr || vehicle->path_gen != locked_.path_gens[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     void addAutoMarkers(visualization_msgs::MarkerArray& markers,
                         const sandbox_msgs::RecoverySnapshot& snapshot) {
         if (snapshot.recovery_phase !=
-            sandbox_msgs::RecoverySnapshot::PHASE_UNRESOLVED) {
+            sandbox_msgs::RecoverySnapshot::PHASE_NLP_PREP) {
             clearLockedTransaction();
             for (const auto& vehicle : snapshot.vehicles) {
                 addOrangeVehicle(markers, vehicle);
@@ -396,103 +447,100 @@ private:
             return;
         }
 
-        const auto* retreat = findVehicle(snapshot, snapshot.retreat_vehicle_id);
-        const auto* passer = findVehicle(snapshot, snapshot.pass_vehicle_id);
-        if (locked_.active) {
-            const bool live_path_changed =
-                (retreat && retreat->path_gen != locked_.retreat_path_gen) ||
-                (passer && passer->path_gen != locked_.pass_path_gen);
-            if (!directiveMatchesLocked(snapshot) || live_path_changed) {
-                clearLockedTransaction();
-            }
+        if (locked_.active && !snapshotMatchesLocked(snapshot)) {
+            clearLockedTransaction();
         }
-        if (!locked_.active &&
-            (!validForAnalysis(retreat) || !validForAnalysis(passer))) {
+
+        std::vector<const sandbox_msgs::RecoveryVehicleState*> participants;
+        participants.reserve(snapshot.nlp_vehicle_ids.size());
+        bool valid = !snapshot.nlp_vehicle_ids.empty();
+        for (int id : snapshot.nlp_vehicle_ids) {
+            const auto* vehicle = findVehicle(snapshot, id);
+            participants.push_back(vehicle);
+            valid = valid && validForAnalysis(vehicle);
+        }
+        if (!locked_.active && !valid) {
             for (const auto& vehicle : snapshot.vehicles) {
                 addOrangeVehicle(markers, vehicle);
             }
             addText(markers, "auto_status", 0, map_param_.field_width * 0.5,
                     map_param_.field_height - 0.12, 0.3,
-                    "UNRESOLVED waiting for valid retreat/pass snapshots",
+                    "NLP_PREP waiting for valid participant snapshots",
                     color(1.0f, 0.1f, 0.1f, 1.0f), 0.065);
-            ROS_WARN_THROTTLE(
-                2.0, "[nlp_recovery][auto] UNRESOLVED pair V%d/V%d is not "
-                     "available with valid pose and path",
-                snapshot.retreat_vehicle_id, snapshot.pass_vehicle_id);
+            ROS_WARN_THROTTLE(2.0, "[nlp_recovery][auto] NLP_PREP participant "
+                                   "list is empty or has invalid pose/path");
             return;
         }
 
         if (!locked_.active) {
             locked_.active = true;
-            locked_.retreat_id = retreat->id;
-            locked_.pass_id = passer->id;
-            locked_.retreat_path_gen = retreat->path_gen;
-            locked_.pass_path_gen = passer->path_gen;
-            locked_.directive_retreat_path_gen = snapshot.retreat_path_gen;
-            locked_.directive_pass_path_gen = snapshot.pass_path_gen;
-            locked_.retreat_attempt = snapshot.retreat_attempt;
+            locked_.vehicle_ids.assign(snapshot.nlp_vehicle_ids.begin(),
+                                       snapshot.nlp_vehicle_ids.end());
             locked_.reason = snapshot.reason;
-            locked_.retreat = *retreat;
-            locked_.passer = *passer;
-            locked_.retreat_result = analyze(*retreat);
-            locked_.pass_result = analyze(*passer);
-            ROS_WARN("[nlp_recovery][auto] locked UNRESOLVED transaction "
-                     "retreat=V%d(gen=%d) pass=V%d(gen=%d) attempt=%d reason=%s",
-                     locked_.retreat_id, locked_.retreat_path_gen,
-                     locked_.pass_id, locked_.pass_path_gen,
-                     locked_.retreat_attempt, locked_.reason.c_str());
+            for (const auto* vehicle : participants) {
+                locked_.path_gens.push_back(vehicle->path_gen);
+                locked_.vehicles.push_back(*vehicle);
+                locked_.results.push_back(analyze(*vehicle));
+            }
+            ROS_WARN("[nlp_recovery][auto] locked NLP_PREP transaction "
+                     "participants=%zu reason=%s", locked_.vehicles.size(),
+                     locked_.reason.c_str());
         }
 
         for (const auto& vehicle : snapshot.vehicles) {
-            if (vehicle.id != locked_.retreat_id && vehicle.id != locked_.pass_id) {
+            if (std::find(locked_.vehicle_ids.begin(), locked_.vehicle_ids.end(),
+                          vehicle.id) == locked_.vehicle_ids.end()) {
                 addOrangeVehicle(markers, vehicle);
             }
         }
-        addVehicleAnalysis(markers, locked_.retreat, locked_.retreat_result,
-                           "retreat", 1000, color(0.05f, 0.45f, 1.0f, 0.95f));
-        addVehicleAnalysis(markers, locked_.passer, locked_.pass_result,
-                           "pass", 2000, color(0.75f, 0.2f, 0.95f, 0.95f));
+        std::ostringstream ids;
+        for (size_t i = 0; i < locked_.vehicles.size(); ++i) {
+            if (i != 0) ids << ",";
+            ids << "V" << locked_.vehicles[i].id;
+            addVehicleAnalysis(markers, locked_.vehicles[i], locked_.results[i],
+                               "nlp_V" + std::to_string(locked_.vehicles[i].id),
+                               1000 + static_cast<int>(i) * 1000,
+                               analysisColor(i));
+        }
         addText(markers, "auto_status", 0, map_param_.field_width * 0.5,
                 map_param_.field_height - 0.12, 0.3,
-                "UNRESOLVED locked: retreat V" + std::to_string(locked_.retreat_id) +
-                    " / pass V" + std::to_string(locked_.pass_id) +
-                    " attempt=" + std::to_string(locked_.retreat_attempt) +
-                    " " + locked_.reason,
+                "NLP_PREP locked: " + ids.str() + " " + locked_.reason,
                 color(1.0f, 0.2f, 0.2f, 1.0f), 0.06);
     }
 
     void addDebugMarkers(visualization_msgs::MarkerArray& markers,
                          const sandbox_msgs::RecoverySnapshot& snapshot) {
-        const auto* vehicle_a = findVehicle(snapshot, vehicle_a_id_);
-        const auto* vehicle_b = findVehicle(snapshot, vehicle_b_id_);
         for (const auto& vehicle : snapshot.vehicles) {
-            if (vehicle.id != vehicle_a_id_ && vehicle.id != vehicle_b_id_) {
+            if (std::find(debug_vehicle_ids_.begin(), debug_vehicle_ids_.end(),
+                          vehicle.id) == debug_vehicle_ids_.end()) {
                 addOrangeVehicle(markers, vehicle);
             }
         }
-        if (!vehicle_a || !vehicle_b) {
-            std::ostringstream out;
-            out << "waiting for selected IDs A=" << vehicle_a_id_
-                << " B=" << vehicle_b_id_;
+        std::vector<int> unavailable;
+        for (size_t i = 0; i < debug_vehicle_ids_.size(); ++i) {
+            const int id = debug_vehicle_ids_[i];
+            const auto* vehicle = findVehicle(snapshot, id);
+            if (!validForAnalysis(vehicle)) {
+                unavailable.push_back(id);
+                continue;
+            }
+            addVehicleAnalysis(markers, *vehicle, analyze(*vehicle),
+                               "debug_V" + std::to_string(id),
+                               1000 + static_cast<int>(i) * 1000,
+                               analysisColor(i));
+        }
+        if (debug_vehicle_ids_.empty() || !unavailable.empty()) {
+            std::ostringstream status;
+            status << (debug_vehicle_ids_.empty() ? "vehicle_ids is empty"
+                                                  : "waiting for V");
+            for (size_t i = 0; i < unavailable.size(); ++i) {
+                if (i != 0) status << ",V";
+                status << unavailable[i];
+            }
             addText(markers, "status", 0, map_param_.field_width * 0.5,
-                    map_param_.field_height - 0.12, 0.3, out.str(),
-                    color(1.0f, 0.1f, 0.1f, 1.0f), 0.08);
-            ROS_WARN_THROTTLE(2.0, "[nlp_recovery] %s", out.str().c_str());
-            return;
-        }
-        if (!validForAnalysis(vehicle_a)) {
-            addText(markers, "status", 1, 1.25, 4.25, 0.3,
-                    "A pose/path unavailable", color(1.0f, 0.1f, 0.1f, 1.0f));
-        } else {
-            addVehicleAnalysis(markers, *vehicle_a, analyze(*vehicle_a),
-                               "A", 1000, color(0.05f, 0.45f, 1.0f, 0.95f));
-        }
-        if (!validForAnalysis(vehicle_b)) {
-            addText(markers, "status", 2, 1.25, 4.12, 0.3,
-                    "B pose/path unavailable", color(1.0f, 0.1f, 0.1f, 1.0f));
-        } else {
-            addVehicleAnalysis(markers, *vehicle_b, analyze(*vehicle_b),
-                               "B", 2000, color(0.1f, 0.85f, 0.25f, 0.95f));
+                    map_param_.field_height - 0.12, 0.3, status.str(),
+                    color(1.0f, 0.1f, 0.1f, 1.0f), 0.07);
+            ROS_WARN_THROTTLE(2.0, "[nlp_recovery] %s", status.str().c_str());
         }
     }
 
@@ -510,18 +558,11 @@ private:
 
     struct LockedTransaction {
         bool active = false;
-        int retreat_id = -1;
-        int pass_id = -1;
-        int retreat_path_gen = -1;
-        int pass_path_gen = -1;
-        int directive_retreat_path_gen = -1;
-        int directive_pass_path_gen = -1;
-        int retreat_attempt = 0;
+        std::vector<int> vehicle_ids;
+        std::vector<int> path_gens;
         std::string reason;
-        sandbox_msgs::RecoveryVehicleState retreat;
-        sandbox_msgs::RecoveryVehicleState passer;
-        CorridorResult retreat_result;
-        CorridorResult pass_result;
+        std::vector<sandbox_msgs::RecoveryVehicleState> vehicles;
+        std::vector<CorridorResult> results;
     };
 
     ros::NodeHandle private_nh_;
@@ -534,8 +575,7 @@ private:
     OperatingMode mode_ = OperatingMode::DEBUG;
     std::string mode_name_ = "debug";
     LockedTransaction locked_;
-    int vehicle_a_id_ = 0;
-    int vehicle_b_id_ = 1;
+    std::vector<int> debug_vehicle_ids_;
     std::string snapshot_topic_;
 };
 

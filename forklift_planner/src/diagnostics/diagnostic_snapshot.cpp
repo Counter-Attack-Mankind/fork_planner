@@ -152,11 +152,13 @@ std::string formatStressSnapshot(
     const auto& transaction = state.deadlock.transaction;
     out << "\n  deadlock_candidate=";
     if (candidate.valid) {
-        out << "V" << candidate.vehicle_a << "/V" << candidate.vehicle_b
-            << " gen=" << candidate.path_gen_a << "/" << candidate.path_gen_b
-            << " duration=" << candidate.duration
-            << " anchor_s=" << candidate.anchor_s_a << "/"
-            << candidate.anchor_s_b;
+        for (size_t i = 0; i < candidate.vehicle_ids.size(); ++i) {
+            if (i != 0) out << "->";
+            out << "V" << candidate.vehicle_ids[i]
+                << ":gen" << candidate.path_gens[i]
+                << ":s" << candidate.anchor_s[i];
+        }
+        out << " duration=" << candidate.duration;
     } else {
         out << "none";
     }
@@ -170,6 +172,13 @@ std::string formatStressSnapshot(
         << " retreat_clear_elapsed=" << transaction.retreat_clear_elapsed
         << " pass_clear_elapsed=" << transaction.pass_clear_elapsed
         << " reason=" << transaction.reason;
+    if (!transaction.nlp_vehicle_ids.empty()) {
+        out << " nlp_ids=";
+        for (size_t i = 0; i < transaction.nlp_vehicle_ids.size(); ++i) {
+            if (i != 0) out << "/";
+            out << "V" << transaction.nlp_vehicle_ids[i];
+        }
+    }
 
     if (include_geometry) {
         const auto markers = rule_engine.conflictResourceMarkers(vehicles);

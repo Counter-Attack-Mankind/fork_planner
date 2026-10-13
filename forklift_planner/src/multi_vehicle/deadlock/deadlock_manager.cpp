@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <sstream>
 
 #include <ros/ros.h>
@@ -38,6 +39,51 @@ bool sampleInterval(double begin, double end, double step,
     return true;
 }
 
+std::vector<const VehicleAgent*> findWaitingCycle(
+    const std::vector<VehicleAgent>& vehicles) {
+    std::map<int, const VehicleAgent*> eligible;
+    for (const VehicleAgent& vehicle : vehicles) {
+        if (vehicle.mode == VehicleMode::ACTIVE &&
+            vehicle.action == VehicleAction::STOP &&
+            vehicle.blocker_id >= 0) {
+            eligible[vehicle.id] = &vehicle;
+        }
+    }
+
+    for (const auto& start : eligible) {
+        std::vector<const VehicleAgent*> chain;
+        std::map<int, size_t> seen;
+        const VehicleAgent* current = start.second;
+        while (current != nullptr) {
+            const auto repeated = seen.find(current->id);
+            if (repeated != seen.end()) {
+                std::vector<const VehicleAgent*> cycle(
+                    chain.begin() + repeated->second, chain.end());
+                if (cycle.size() < 2) break;
+                const auto first = std::min_element(
+                    cycle.begin(), cycle.end(),
+                    [](const auto* a, const auto* b) { return a->id < b->id; });
+                std::rotate(cycle.begin(), first, cycle.end());
+                return cycle;
+            }
+            seen[current->id] = chain.size();
+            chain.push_back(current);
+            const auto next = eligible.find(current->blocker_id);
+            current = next == eligible.end() ? nullptr : next->second;
+        }
+    }
+    return {};
+}
+
+std::string vehicleListText(const std::vector<int>& vehicle_ids) {
+    std::ostringstream out;
+    for (size_t i = 0; i < vehicle_ids.size(); ++i) {
+        if (i != 0) out << "->";
+        out << "V" << vehicle_ids[i];
+    }
+    return out.str();
+}
+
 }  // namespace
 
 //Recovery 状态与动作解释，用于日志调试
@@ -50,6 +96,7 @@ const char* recoveryPhaseName(RecoveryPhase phase) {
         case RecoveryPhase::CLEAR: return "CLEAR";
         case RecoveryPhase::UNRESOLVED: return "UNRESOLVED";
         case RecoveryPhase::ABORT: return "ABORT";
+        case RecoveryPhase::NLP_PREP: return "NLP_PREP";
     }
     return "UNKNOWN";
 }
@@ -156,6 +203,7 @@ void DeadlockManager::refreshDirective() {
 
    
     directive_.retreat_distance = transaction_.retreat_distance;
+    directive_.nlp_vehicle_ids = transaction_.nlp_vehicle_ids;
     directive_.reason = transaction_.reason;
 }
 
@@ -166,7 +214,7 @@ void DeadlockManager::emit(const char* event, const std::string& details,
         std::string("[DEADLOCK] event=") + event + " " + details;
     if (log_sink_) log_sink_(line);
     const std::string name(event);
-    if (name == "CONFIRMED" || name == "UNRESOLVED" || name == "ABORT") {
+    if (name == "CONFIRMED" || name == "NLP_PREP" || name == "ABORT") {
         ROS_WARN_STREAM(line);
     }
 }
@@ -199,6 +247,18 @@ void DeadlockManager::clearSuccessfulRecovery(
     refreshDirective();
 }
 
+void DeadlockManager::enterNlpRecovery(const std::vector<int>& vehicle_ids,
+                                       const std::string& reason,
+                                       bool emit_logs) {
+    candidate_ = {};
+    transaction_.phase = RecoveryPhase::NLP_PREP;
+    transaction_.nlp_vehicle_ids = vehicle_ids;
+    transaction_.reason = reason;
+    refreshDirective();
+    emit("NLP_PREP", "cycle=" + vehicleListText(vehicle_ids) +
+                         " reason=" + reason, emit_logs);
+}
+
 void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const std::vector<DeadlockPairGeometry>& pair_geometry,double dt, bool emit_logs) 
 {
     if (!config_.deadlock_enabled) {
@@ -212,6 +272,10 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
 
     if (transaction_.phase != RecoveryPhase::NONE)
     {
+        if (transaction_.phase == RecoveryPhase::NLP_PREP) {
+            refreshDirective();
+            return;
+        }
         const VehicleAgent* retreat = vehicleById(vehicles, transaction_.retreat_vehicle_id);
         const VehicleAgent* passer = vehicleById(vehicles, transaction_.pass_vehicle_id);
 
@@ -285,20 +349,18 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                 // 已经无 s- 退让空间。
                 if (retreat->path_s <= tolerance)
                 {
-                    transaction_.phase = RecoveryPhase::UNRESOLVED;
-                    transaction_.reason ="no_retreat_space_and_both_stopped";
-                    refreshDirective();
-                    emit("UNRESOLVED","pair=V" + std::to_string(retreat->id) +"-V" + std::to_string(passer->id) +" reason=no_retreat_space_and_both_stopped",emit_logs);
+                    enterNlpRecovery({retreat->id, passer->id},
+                                     "no_retreat_space_and_both_stopped",
+                                     emit_logs);
                     return;
                 }
 
                 // 已经完成最大退让次数。
                 if (transaction_.retreat_attempt >=config_.deadlock_retreat_max_attempts)
                 {
-                    transaction_.phase = RecoveryPhase::UNRESOLVED;
-                    transaction_.reason ="max_fixed_retreat_attempts_reached";
-                    refreshDirective();
-                    emit("UNRESOLVED","pair=V" + std::to_string(retreat->id) +"-V" + std::to_string(passer->id) +" reason=max_fixed_retreat_attempts_reached",emit_logs);
+                    enterNlpRecovery({retreat->id, passer->id},
+                                     "max_fixed_retreat_attempts_reached",
+                                     emit_logs);
                     return;
                 }
                 // 计算下一次后退到的s
@@ -306,10 +368,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
 
                 if (!retreatSweepClear(*retreat,*passer,vehicles,next_target_s))
                 {
-                    transaction_.phase = RecoveryPhase::UNRESOLVED;
-                    transaction_.reason ="next_retreat_sweep_blocked";
-                    refreshDirective();
-                    emit("UNRESOLVED","pair=V" + std::to_string(retreat->id) +"-V" + std::to_string(passer->id) +" reason=next_retreat_sweep_blocked",emit_logs);
+                    enterNlpRecovery({retreat->id, passer->id},
+                                     "next_retreat_sweep_blocked", emit_logs);
                     return;
                 }
 
@@ -348,7 +408,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
             // 每一拍都重新检查：从当前实际位置继续退到本次 target 是否仍然安全，不安全则直接退出
             if (!retreatSweepClear(*retreat, *passer, vehicles,transaction_.retreat_target_s)) 
             {   
-                abort("retreat_sweep_invalidated", emit_logs);
+                enterNlpRecovery({retreat->id, passer->id},
+                                 "retreat_sweep_invalidated", emit_logs);
                 return;
             }
             const double tolerance = std::max(0.005, config_.path_validation_step);
@@ -380,74 +441,63 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
     }
 
 
-    const VehicleAgent* candidate_a = nullptr;
-    const VehicleAgent* candidate_b = nullptr;
-    for (const VehicleAgent& a : vehicles) {
-        if (a.mode != VehicleMode::ACTIVE ||
-            a.action != VehicleAction::STOP || a.blocker_id < 0) {
-            continue;
-        }
-
-        const VehicleAgent* b = vehicleById(vehicles, a.blocker_id);
-        if (b == nullptr || b->mode != VehicleMode::ACTIVE ||
-            b->action != VehicleAction::STOP || b->blocker_id != a.id) {
-            continue;
-        }
-
-        if (a.id < b->id) {
-            candidate_a = &a;
-            candidate_b = b;
-            break;
-        }
-    }
-
-    if (candidate_a == nullptr) {
+    const std::vector<const VehicleAgent*> cycle = findWaitingCycle(vehicles);
+    if (cycle.empty()) {
         candidate_ = {};
         refreshDirective();
         return;
     }
 
-    const DeadlockPairGeometry* observed_geometry = geometryFor(
-        pair_geometry, candidate_a->id, candidate_b->id);
-    if (observed_geometry == nullptr) {
+    const DeadlockPairGeometry* geometry = cycle.size() == 2
+        ? geometryFor(pair_geometry, cycle[0]->id, cycle[1]->id) : nullptr;
+    if (cycle.size() == 2 && geometry == nullptr) {
         candidate_ = {};
-        directive_ = {};
+        refreshDirective();
         return;
+    }
+
+    std::vector<int> cycle_ids;
+    std::vector<int> cycle_path_gens;
+    std::vector<double> cycle_s;
+    cycle_ids.reserve(cycle.size());
+    cycle_path_gens.reserve(cycle.size());
+    cycle_s.reserve(cycle.size());
+    for (const VehicleAgent* vehicle : cycle) {
+        cycle_ids.push_back(vehicle->id);
+        cycle_path_gens.push_back(vehicle->path_gen);
+        cycle_s.push_back(vehicle->path_s);
     }
 
     const double progress_epsilon = std::max(0.005, config_.path_validation_step);
     const bool same_candidate = candidate_.valid &&
-        candidate_.vehicle_a == candidate_a->id &&
-        candidate_.vehicle_b == candidate_b->id &&
-        candidate_.path_gen_a == candidate_a->path_gen &&
-        candidate_.path_gen_b == candidate_b->path_gen;
-    if (!same_candidate ||
-        std::abs(candidate_a->path_s - candidate_.anchor_s_a) >
-            progress_epsilon ||
-        std::abs(candidate_b->path_s - candidate_.anchor_s_b) >
-            progress_epsilon) {
+        candidate_.vehicle_ids == cycle_ids &&
+        candidate_.path_gens == cycle_path_gens;
+    bool progressed = !same_candidate ||
+        candidate_.anchor_s.size() != cycle_s.size();
+    if (!progressed) {
+        for (size_t i = 0; i < cycle_s.size(); ++i) {
+            if (std::abs(cycle_s[i] - candidate_.anchor_s[i]) >
+                progress_epsilon) {
+                progressed = true;
+                break;
+            }
+        }
+    }
+    if (progressed) {
         candidate_ = {};
         candidate_.valid = true;
-        candidate_.vehicle_a = candidate_a->id;
-        candidate_.vehicle_b = candidate_b->id;
-        candidate_.path_gen_a = candidate_a->path_gen;
-        candidate_.path_gen_b = candidate_b->path_gen;
-        candidate_.anchor_s_a = candidate_a->path_s;
-        candidate_.anchor_s_b = candidate_b->path_s;
+        candidate_.vehicle_ids = cycle_ids;
+        candidate_.path_gens = cycle_path_gens;
+        candidate_.anchor_s = cycle_s;
         candidate_.duration = dt;
         std::ostringstream details;
-        details << "pair=V" << candidate_a->id << "-V" << candidate_b->id
-                << " path_gen=" << candidate_a->path_gen << "/"
-                << candidate_b->path_gen << " s=" << candidate_a->path_s
-                << "/" << candidate_b->path_s
-                << " V" << candidate_a->id << "_action="
-                << actionName(candidate_a->action)
-                << " V" << candidate_a->id << "_reason=" << candidate_a->reason
-                << " V" << candidate_a->id << "_blocker=V" << candidate_a->blocker_id
-                << " V" << candidate_b->id << "_action="
-                << actionName(candidate_b->action)
-                << " V" << candidate_b->id << "_reason=" << candidate_b->reason
-                << " V" << candidate_b->id << "_blocker=V" << candidate_b->blocker_id;
+        details << "cycle=" << vehicleListText(cycle_ids);
+        for (const VehicleAgent* vehicle : cycle) {
+            details << " V" << vehicle->id << "_gen=" << vehicle->path_gen
+                    << "_s=" << vehicle->path_s
+                    << "_reason=" << vehicle->reason
+                    << "_blocker=V" << vehicle->blocker_id;
+        }
         emit("CANDIDATE", details.str(), emit_logs);
         return;
     }
@@ -455,13 +505,18 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
     candidate_.duration += dt;
     if (candidate_.duration + 1e-9 < config_.deadlock_confirm_time) return;
 
-    const DeadlockPairGeometry* geometry = observed_geometry;
     std::ostringstream confirmed;
-    confirmed << "pair=V" << candidate_a->id << "-V" << candidate_b->id
-              << " duration=" << candidate_.duration
-              << " path_gen=" << candidate_a->path_gen << "/"
-              << candidate_b->path_gen;
+    confirmed << "cycle=" << vehicleListText(cycle_ids)
+              << " duration=" << candidate_.duration;
     emit("CONFIRMED", confirmed.str(), emit_logs);
+
+    if (cycle.size() >= 3) {
+        enterNlpRecovery(cycle_ids, "multi_vehicle_wait_cycle", emit_logs);
+        return;
+    }
+
+    const VehicleAgent* candidate_a = cycle[0];
+    const VehicleAgent* candidate_b = cycle[1];
 
     //==============新的死锁更新恢复逻辑==============
     const int preferred_priority_id = geometry->preferred_priority_vehicle_id;
@@ -530,15 +585,14 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
     }
     if (!sweep_clear)
     {
-        transaction_.phase = RecoveryPhase::UNRESOLVED;
-        transaction_.reason = "first_retreat_sweep_blocked";
-        refreshDirective();
         std::ostringstream details;
         details << "pair=V" << retreat->id << "-V" << passer->id
                 << " retreat=V" << retreat->id << " pass=V" << passer->id
                 << " start_s=" << retreat->path_s << " target_s=" << target_s
                 << " attempt=1 sweep_clear=0 reason=first_retreat_sweep_blocked";
-        emit("UNRESOLVED", details.str(), emit_logs);
+        emit("FIXED_RETREAT_FAILED", details.str(), emit_logs);
+        enterNlpRecovery({retreat->id, passer->id},
+                         "first_retreat_sweep_blocked", emit_logs);
         return;
     }
 

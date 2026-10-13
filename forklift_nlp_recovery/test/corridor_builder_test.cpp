@@ -36,9 +36,14 @@ TEST_F(CorridorBuilderTest, AppliesRadiusOverrideAndShelfInflationReduction) {
     EXPECT_NEAR(configured_builder.vehicleRadius(), 0.12, 1e-12);
     EXPECT_NEAR(configured_builder.boundaryClearance(), 0.13, 1e-12);
     EXPECT_NEAR(configured_builder.shelfInflation(), 0.10, 1e-12);
-    ASSERT_FALSE(configured_builder.inflatedShelves().empty());
-    EXPECT_NEAR(configured_builder.inflatedShelves().front().min_x,
-                map.shelf_blocks().front().x - 0.10, 1e-12);
+    ASSERT_FALSE(configured_builder.originalShelves().empty());
+    ASSERT_GT(configured_builder.originalShelves().size(), 2U);
+    const auto& shelf = configured_builder.originalShelves()[2];
+    const double shelf_mid_y = (shelf.min_y + shelf.max_y) * 0.5;
+    EXPECT_FALSE(configured_builder.pointLegal(
+        {shelf.min_x - 0.099, shelf_mid_y, 0.0}));
+    EXPECT_TRUE(configured_builder.pointLegal(
+        {shelf.min_x - 0.101, shelf_mid_y, 0.0}));
 
     configured.shelf_inflation_reduction = 1.0;
     const fnr::CorridorBuilder zero_inflation_builder(

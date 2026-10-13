@@ -1,11 +1,12 @@
 header:
   frame_id: map
-recovery_phase: 5
+recovery_phase: 7
 retreat_vehicle_id: 7
 pass_vehicle_id: 9
 retreat_path_gen: 11
 pass_path_gen: 12
 retreat_attempt: 2
+nlp_vehicle_ids: [7, 9]
 reason: max_fixed_retreat_attempts_reached
 vehicles:
   - id: 7

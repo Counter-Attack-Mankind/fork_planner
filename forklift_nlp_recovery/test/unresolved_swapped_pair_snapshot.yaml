@@ -1,11 +1,12 @@
 header:
   frame_id: map
-recovery_phase: 5
+recovery_phase: 7
 retreat_vehicle_id: 9
 pass_vehicle_id: 7
 retreat_path_gen: 12
 pass_path_gen: 11
 retreat_attempt: 2
+nlp_vehicle_ids: [9, 7]
 reason: pair_changed_for_test
 vehicles:
   - id: 7

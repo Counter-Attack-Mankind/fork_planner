@@ -6,6 +6,7 @@ pass_vehicle_id: -1
 retreat_path_gen: -1
 pass_path_gen: -1
 retreat_attempt: 0
+nlp_vehicle_ids: []
 reason: ''
 vehicles:
   - id: 7

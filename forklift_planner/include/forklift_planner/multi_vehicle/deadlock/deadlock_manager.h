@@ -21,6 +21,7 @@ enum class RecoveryPhase {
     CLEAR,
     UNRESOLVED,
     ABORT,
+    NLP_PREP,
 };
 
 //车辆在死锁阶段所要采取的动作
@@ -40,11 +41,14 @@ struct RecoveryDirective {
     int pass_path_gen = -1;
     double retreat_target_s = 0.0;
     double retreat_distance = 0.0;
+    std::vector<int> nlp_vehicle_ids;
     std::string reason;
 
     bool active() const {
         return phase != RecoveryPhase::NONE && phase != RecoveryPhase::CLEAR;
     }
+
+    bool nlpTakeover() const { return phase == RecoveryPhase::NLP_PREP; }
 
     RecoveryMotion motionFor(int vehicle_id) const;
 };
@@ -62,13 +66,10 @@ class DeadlockManager {
 public:
     struct CandidateState {
         bool valid = false;
-        int vehicle_a = -1;
-        int vehicle_b = -1;
-        int path_gen_a = -1;
-        int path_gen_b = -1;
+        std::vector<int> vehicle_ids;
+        std::vector<int> path_gens;
+        std::vector<double> anchor_s;
         double duration = 0.0;
-        double anchor_s_a = 0.0;
-        double anchor_s_b = 0.0;
     };
 
     //DeadlockManager 内部真正执行中的恢复事务状态。
@@ -84,6 +85,7 @@ public:
         double retreat_hold_elapsed = 0.0;
         double retreat_clear_elapsed = 0.0; //两车独立计时器，判断2周期内是否有车没有失活，则判断死锁解除
         double pass_clear_elapsed = 0.0;
+        std::vector<int> nlp_vehicle_ids;
         std::string reason;
     };
 
@@ -130,6 +132,8 @@ private:
                                  const VehicleAgent* passer,
                                  const std::string& reason,
                                  bool emit_logs);
+    void enterNlpRecovery(const std::vector<int>& vehicle_ids,
+                          const std::string& reason, bool emit_logs);
 
     const MapParam& map_param_;
     const MultiVehicleConfig& config_;

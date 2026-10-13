@@ -1,0 +1,71 @@
+header:
+  frame_id: map
+recovery_phase: 7
+retreat_vehicle_id: -1
+pass_vehicle_id: -1
+retreat_path_gen: -1
+pass_path_gen: -1
+retreat_attempt: 0
+nlp_vehicle_ids: [2, 5, 9]
+reason: multi_vehicle_wait_cycle
+vehicles:
+  - id: 9
+    path_gen: 19
+    path_s: 0.0
+    current_speed: 0.0
+    pose_valid: true
+    pose: {x: 0.46, y: 2.81, theta: 0.0}
+    mode: 1
+    action: 0
+    blocker_id: 2
+    loaded: false
+    path:
+      - {x: 0.45, y: 2.81, theta: 0.0}
+      - {x: 0.85, y: 2.81, theta: 0.0}
+      - {x: 1.25, y: 2.81, theta: 0.0}
+      - {x: 1.65, y: 2.81, theta: 0.0}
+    path_types: [0, 0, 0, 0]
+  - id: 2
+    path_gen: 12
+    path_s: 0.0
+    current_speed: 0.0
+    pose_valid: true
+    pose: {x: 0.46, y: 0.58, theta: 0.0}
+    mode: 1
+    action: 0
+    blocker_id: 5
+    loaded: false
+    path:
+      - {x: 0.45, y: 0.57, theta: 0.0}
+      - {x: 0.85, y: 0.57, theta: 0.0}
+      - {x: 1.25, y: 0.57, theta: 0.0}
+      - {x: 1.65, y: 0.57, theta: 0.0}
+    path_types: [0, 0, 0, 0]
+  - id: 42
+    path_gen: 3
+    path_s: 0.0
+    current_speed: 0.0
+    pose_valid: true
+    pose: {x: 2.10, y: 4.00, theta: 3.14}
+    mode: 1
+    action: 0
+    blocker_id: -1
+    loaded: false
+    path: []
+    path_types: []
+  - id: 5
+    path_gen: 15
+    path_s: 0.0
+    current_speed: 0.0
+    pose_valid: true
+    pose: {x: 0.46, y: 1.69, theta: 0.0}
+    mode: 1
+    action: 0
+    blocker_id: 9
+    loaded: false
+    path:
+      - {x: 0.45, y: 1.69, theta: 0.0}
+      - {x: 0.85, y: 1.69, theta: 0.0}
+      - {x: 1.25, y: 1.69, theta: 0.0}
+      - {x: 1.65, y: 1.69, theta: 0.0}
+    path_types: [0, 0, 0, 0]

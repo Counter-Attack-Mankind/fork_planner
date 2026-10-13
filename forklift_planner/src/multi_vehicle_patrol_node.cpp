@@ -2470,7 +2470,31 @@ private:
         active_a1_exit_intrusions_.swap(current);
     }
 
+    bool latchNlpRecoveryFreeze() {
+        if (nlp_recovery_frozen_) return true;
+        const auto& recovery = rule_engine_->recoveryDirective();
+        if (cfg_.real_mode || !recovery.nlpTakeover()) return false;
+
+        nlp_recovery_frozen_ = true;
+        for (VehicleAgent& vehicle : agents_) vehicle.current_speed = 0.0;
+        sim_plan_frames_.clear();
+        sim_plan_cursor_ = 0;
+        sim_plan_valid_ = false;
+        force_horizon_refresh_ = false;
+        std::ostringstream ids;
+        for (size_t i = 0; i < recovery.nlp_vehicle_ids.size(); ++i) {
+            if (i != 0) ids << ",";
+            ids << "V" << recovery.nlp_vehicle_ids[i];
+        }
+        const std::string message = "[NLP_RECOVERY_FREEZE] participants=" +
+            ids.str() + " reason=" + recovery.reason;
+        ROS_ERROR("%s", message.c_str());
+        if (diagnostics_) diagnostics_->event(message);
+        return true;
+    }
+
     void stepSimulation(double dt) {
+        if (nlp_recovery_frozen_) return;
         ++tick_count_;
         sim_time_ += dt;
         setCoordLogContext("REAL", sim_plan_id_, coord_log_frame_id_, -1);
@@ -2506,6 +2530,7 @@ private:
                 }
             }
         }
+        if (latchNlpRecoveryFreeze()) return;
         advanceVehicles(dt);
         diagnoseA1ExitIntrusions();
         recordDebugTimelineTick();
@@ -2557,6 +2582,7 @@ private:
         snapshot.retreat_path_gen = recovery.retreat_path_gen;
         snapshot.pass_path_gen = recovery.pass_path_gen;
         snapshot.retreat_attempt = recovery.retreat_attempt;
+        snapshot.nlp_vehicle_ids = recovery.nlp_vehicle_ids;
         snapshot.reason = recovery.reason;
         snapshot.vehicles.reserve(agents_.size());
         for (const auto& vehicle : agents_) {
@@ -2689,11 +2715,15 @@ private:
             speed_stats_start_sim_time_ = sim_time_;
         }
 
-        simulation_step_credit_ += pp_.simulation_speed;
-        const int simulation_steps = static_cast<int>(std::floor(simulation_step_credit_ + 1e-12));
-        simulation_step_credit_ -= simulation_steps;
-        for (int step = 0; step < simulation_steps; ++step) {
-            stepSimulation(dt);
+        latchNlpRecoveryFreeze();
+        if (!nlp_recovery_frozen_) {
+            simulation_step_credit_ += pp_.simulation_speed;
+            const int simulation_steps = static_cast<int>(
+                std::floor(simulation_step_credit_ + 1e-12));
+            simulation_step_credit_ -= simulation_steps;
+            for (int step = 0; step < simulation_steps; ++step) {
+                stepSimulation(dt);
+            }
         }
 
         // 当前状态 Marker 每个现实 Timer 回调最多发布一次；预测轨迹仍在
@@ -3304,6 +3334,7 @@ private:
     std::vector<SimPlanFrame> sim_plan_frames_;
     size_t sim_plan_cursor_ = 0;
     bool sim_plan_valid_ = false;
+    bool nlp_recovery_frozen_ = false;
     uint64_t sim_plan_id_ = 0;
     double sim_plan_start_time_ = 0.0;
     std::string last_executed_a1_state_;

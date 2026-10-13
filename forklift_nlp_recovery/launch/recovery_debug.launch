@@ -1,6 +1,4 @@
 <launch>
-  <arg name="vehicle_a_id" default="0"/>
-  <arg name="vehicle_b_id" default="1"/>
   <arg name="start_planner" default="true"/>
   <arg name="real_mode" default="false"/>
   <arg name="start_rviz" default="true"/>
@@ -17,8 +15,6 @@
   <node pkg="forklift_nlp_recovery" type="recovery_visualizer_node"
         name="forklift_nlp_recovery" output="screen">
     <rosparam command="load" file="$(find forklift_nlp_recovery)/config/recovery.yaml"/>
-    <param name="vehicle_a_id" value="$(arg vehicle_a_id)"/>
-    <param name="vehicle_b_id" value="$(arg vehicle_b_id)"/>
   </node>
 
   <node if="$(arg start_rviz)" pkg="rviz" type="rviz" name="recovery_debug_rviz"

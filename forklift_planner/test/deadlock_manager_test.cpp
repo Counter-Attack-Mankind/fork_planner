@@ -66,7 +66,8 @@ int main() {
     selection_manager.update(selection_vehicles, {geometry}, 0.10, false);
     if (selection_manager.directive().phase != RecoveryPhase::RETREAT ||
         selection_manager.directive().retreat_target_s != 0.0 ||
-        selection_manager.directive().retreat_attempt != 1) {
+        selection_manager.directive().retreat_attempt != 1 ||
+        selection_manager.directive().nlpTakeover()) {
         return fail("B retreat within 1.5 m did not target path start");
     }
     const int original_path_gen = selection_vehicles[0].path_gen;
@@ -76,6 +77,17 @@ int main() {
         selection_vehicles[0].mode != VehicleMode::ACTIVE ||
         selection_vehicles[0].path_gen != original_path_gen) {
         return fail("return to B start changed task identity or skipped HOLD");
+    }
+    for (int i = 0; i < 20; ++i) {
+        selection_manager.update(selection_vehicles, {geometry}, 0.10, false);
+    }
+    selection_vehicles[1].action = VehicleAction::NOMINAL;
+    for (int i = 0; i < 40; ++i) {
+        selection_manager.update(selection_vehicles, {geometry}, 0.10, false);
+    }
+    if (selection_manager.directive().phase != RecoveryPhase::NONE ||
+        selection_manager.directive().nlpTakeover()) {
+        return fail("successful fixed retreat incorrectly triggered NLP preparation");
     }
 
     VehicleAgent non_b_retreat = retreat;
@@ -153,8 +165,9 @@ int main() {
     }
     for (int i = 0; i < 20; ++i) manager.update(vehicles, {}, 0.10, false);
     manager.update(vehicles, {}, 0.10, false);
-    if (manager.directive().phase != RecoveryPhase::UNRESOLVED) {
-        return fail("third failed PASS did not stop at the retry limit");
+    if (manager.directive().phase != RecoveryPhase::NLP_PREP ||
+        manager.directive().nlp_vehicle_ids != std::vector<int>({0, 1})) {
+        return fail("third failed PASS did not enter two-vehicle NLP preparation");
     }
 
     DeadlockManager ordinary_stop_manager(map, config);
@@ -165,6 +178,70 @@ int main() {
     }
     if (ordinary_stop_manager.directive().phase != RecoveryPhase::NONE) {
         return fail("ordinary STOP incorrectly entered RETREAT_HOLD");
+    }
+
+    MultiVehicleConfig cycle_config = config;
+    cycle_config.deadlock_confirm_time = 0.20;
+    VehicleAgent cycle_a = retreat;
+    VehicleAgent cycle_b = passer;
+    VehicleAgent cycle_c = retreat;
+    cycle_a.id = 2;
+    cycle_a.blocker_id = 5;
+    cycle_a.path_gen = 12;
+    cycle_b.id = 5;
+    cycle_b.blocker_id = 9;
+    cycle_b.path_gen = 15;
+    cycle_c.id = 9;
+    cycle_c.blocker_id = 2;
+    cycle_c.path_gen = 19;
+    cycle_c.track.set(RoughPath{
+        RoughWp{0.0, 10.0, 0.0, WpType::FORWARD},
+        RoughWp{4.0, 10.0, 0.0, WpType::FORWARD}});
+    std::vector<VehicleAgent> three_cycle{cycle_c, cycle_a, cycle_b};
+    DeadlockManager three_cycle_manager(map, cycle_config);
+    three_cycle_manager.update(three_cycle, {}, 0.10, false);
+    if (three_cycle_manager.directive().nlpTakeover()) {
+        return fail("three-vehicle cycle skipped confirmation time");
+    }
+    three_cycle_manager.update(three_cycle, {}, 0.10, false);
+    if (!three_cycle_manager.directive().nlpTakeover() ||
+        three_cycle_manager.directive().nlp_vehicle_ids !=
+            std::vector<int>({2, 5, 9})) {
+        return fail("non-contiguous three-vehicle cycle did not enter NLP preparation");
+    }
+    RuleEngine three_cycle_engine(map, cycle_config);
+    three_cycle_engine.observeDeadlock(three_cycle, 0.10, false);
+    three_cycle_engine.observeDeadlock(three_cycle, 0.10, false);
+    if (!three_cycle_engine.recoveryDirective().nlpTakeover() ||
+        three_cycle_engine.recoveryDirective().nlp_vehicle_ids !=
+            std::vector<int>({2, 5, 9})) {
+        return fail("RuleEngine did not forward the three-vehicle wait graph");
+    }
+    three_cycle[0].action = VehicleAction::NOMINAL;
+    three_cycle_manager.update(three_cycle, {}, 10.0, false);
+    if (!three_cycle_manager.directive().nlpTakeover() ||
+        three_cycle_manager.directive().nlp_vehicle_ids !=
+            std::vector<int>({2, 5, 9})) {
+        return fail("NLP preparation did not remain latched");
+    }
+
+    DeadlockManager moving_candidate_manager(map, cycle_config);
+    std::vector<VehicleAgent> moving_cycle{cycle_a, cycle_b, cycle_c};
+    moving_candidate_manager.update(moving_cycle, {}, 0.10, false);
+    moving_cycle[0].path_s += 0.10;
+    moving_candidate_manager.update(moving_cycle, {}, 0.10, false);
+    if (moving_candidate_manager.directive().nlpTakeover()) {
+        return fail("progressing three-vehicle cycle bypassed candidate continuity");
+    }
+
+    DeadlockManager open_chain_manager(map, cycle_config);
+    std::vector<VehicleAgent> open_chain{cycle_a, cycle_b, cycle_c};
+    open_chain[2].blocker_id = -1;
+    for (int i = 0; i < 30; ++i) {
+        open_chain_manager.update(open_chain, {}, 0.10, false);
+    }
+    if (open_chain_manager.directive().phase != RecoveryPhase::NONE) {
+        return fail("open blocker chain was misclassified as a deadlock cycle");
     }
 
     VehicleAgent measured_hold = retreat;
