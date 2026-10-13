@@ -20,6 +20,7 @@
 #include "forklift_map/forklift_map.h"
 #include "forklift_map/map_param.h"
 #include "forklift_nlp_recovery/corridor_builder.h"
+#include "forklift_nlp_recovery/optimization_input.h"
 
 namespace forklift_nlp_recovery {
 namespace {
@@ -102,6 +103,8 @@ public:
         }
         private_nh_.param<std::string>("snapshot_topic", snapshot_topic_,
                                        "/forklift_planner/recovery_snapshot");
+        private_nh_.param<std::string>("debug_output_file", debug_output_file_,
+                                       "/tmp/forklift_nlp_recovery_input.yaml");
         private_nh_.param("vehicle_radius", config_.vehicle_radius,
                           config_.vehicle_radius);
         private_nh_.param("shelf_inflation_reduction",
@@ -123,6 +126,27 @@ public:
                           config_.boundary_inset_reduction);
         builder_ = std::make_unique<CorridorBuilder>(
             map_param_, map_->shelf_blocks(), config_);
+        VehicleParameters vehicle_parameters;
+        vehicle_parameters.length = map_param_.vehicle_length;
+        vehicle_parameters.width = map_param_.vehicle_width;
+        vehicle_parameters.rear_axle_to_center = map_param_.rear_axle_to_center;
+        vehicle_parameters.disc_radius = builder_->vehicleRadius();
+        vehicle_parameters.wheel_base = map_param_.wheel_base;
+        vehicle_parameters.max_steer_angle = map_param_.max_steer_angle;
+        vehicle_parameters.max_steer_rate = map_param_.max_steer_rate;
+        const std::string planner_ns = "forklift_planner/multi_vehicle/";
+        global_nh.param(planner_ns + "nominal_speed",
+                        vehicle_parameters.nominal_speed, 0.20);
+        global_nh.param(planner_ns + "max_speed",
+                        vehicle_parameters.max_speed, 0.26);
+        global_nh.param(planner_ns + "max_accel",
+                        vehicle_parameters.max_accel, 0.20);
+        global_nh.param(planner_ns + "max_decel",
+                        vehicle_parameters.max_decel, 0.30);
+        global_nh.param(planner_ns + "deadlock_retreat_speed",
+                        vehicle_parameters.fixed_retreat_speed, 0.10);
+        input_builder_ = std::make_unique<OptimizationInputBuilder>(
+            *builder_, vehicle_parameters);
         marker_pub_ = private_nh_.advertise<visualization_msgs::MarkerArray>(
             "/forklift_nlp_recovery/markers", 1, true);
         snapshot_sub_ = private_nh_.subscribe(
@@ -134,11 +158,11 @@ public:
         }
         ROS_INFO("[nlp_recovery] read-only phase-1 visualizer: mode=%s debug_ids=[%s] "
                  "disc_radius=%.4f boundary_clearance=%.4f "
-                 "shelf_inflation=%.4f topic=%s",
+                 "shelf_inflation=%.4f topic=%s output=%s",
                  mode_name_.c_str(), selected_ids.str().c_str(),
                  builder_->vehicleRadius(),
                  builder_->boundaryClearance(), builder_->shelfInflation(),
-                 snapshot_topic_.c_str());
+                 snapshot_topic_.c_str(), debug_output_file_.c_str());
     }
 
 private:
@@ -306,27 +330,11 @@ private:
                      color(0.95f, 0.45f, 0.05f, 0.9f));
     }
 
-    std::vector<PathPoint> pathFromMessage(
-        const sandbox_msgs::RecoveryVehicleState& vehicle) const {
-        std::vector<Pose2d> poses;
-        poses.reserve(vehicle.path.size());
-        for (const auto& pose : vehicle.path) poses.push_back({pose.x, pose.y, pose.theta});
-        return CorridorBuilder::parameterizePath(poses, vehicle.path_types);
-    }
-
-    CorridorResult analyze(
-        const sandbox_msgs::RecoveryVehicleState& vehicle) const {
-        const Pose2d start{vehicle.pose.x, vehicle.pose.y, vehicle.pose.theta};
-        return builder_->build(
-            start, pathFromMessage(vehicle), vehicle.path_s, vehicle.path_gen);
-    }
-
     void addVehicleAnalysis(visualization_msgs::MarkerArray& markers,
-                            const sandbox_msgs::RecoveryVehicleState& vehicle,
-                            const CorridorResult& result,
+                            const NlpVehicleInput& vehicle,
                             const std::string& name, int id_offset,
                             const std_msgs::ColorRGBA& rgba) {
-        const Pose2d start{vehicle.pose.x, vehicle.pose.y, vehicle.pose.theta};
+        const Pose2d& start = vehicle.initial_state.rear_axle_pose;
         addDisc(markers, name + "_disc", id_offset, start,
                 color(rgba.r, rgba.g, rgba.b, 0.20f));
         addDiscCenter(markers, name + "_disc_center", id_offset, start,
@@ -345,46 +353,47 @@ private:
                                       visualization_msgs::Marker::LINE_STRIP);
         path_marker.scale.x = 0.018;
         path_marker.color = rgba;
-        for (const auto& pose : vehicle.path) {
-            path_marker.points.push_back(point(pose.x, pose.y, 0.11));
+        for (const PathPoint& path_point : vehicle.original_path) {
+            path_marker.points.push_back(
+                point(path_point.pose.x, path_point.pose.y, 0.11));
         }
         markers.markers.push_back(path_marker);
 
-        if (!result.success) {
+        if (!vehicle.corridor_valid) {
             addText(markers, name + "_failure", id_offset, start.x, start.y + 0.15, 0.3,
-                    name + " FAILED: " + result.reason,
+                    name + " FAILED: " + vehicle.corridor_reason,
                     color(1.0f, 0.05f, 0.05f, 1.0f), 0.06);
             ROS_WARN_THROTTLE(2.0, "[nlp_recovery] %s corridor failed: %s",
-                              name.c_str(), result.reason.c_str());
+                              name.c_str(), vehicle.corridor_reason.c_str());
             return;
         }
-        for (size_t i = 0; i < result.boxes.size(); ++i) {
+        for (size_t i = 0; i < vehicle.corridor.size(); ++i) {
             addRectangle(markers, name + "_aabb", id_offset + static_cast<int>(i),
-                         result.boxes[i], 0.15, 0.018, rgba);
-            const auto& box = result.boxes[i];
+                         vehicle.corridor[i], 0.15, 0.018, rgba);
+            const auto& box = vehicle.corridor[i];
             addText(markers, name + "_aabb_id", id_offset + static_cast<int>(i),
                     (box.min_x + box.max_x) * 0.5,
                     (box.min_y + box.max_y) * 0.5, 0.18,
                     name + "[" + std::to_string(i) + "]", rgba, 0.055);
         }
         addSolidPoint(markers, name + "_terminal_point", id_offset,
-                      result.terminal.pose, color(0.0f, 1.0f, 0.0f, 1.0f));
+                      vehicle.terminal.pose, color(0.0f, 1.0f, 0.0f, 1.0f));
         addArrow(markers, name + "_terminal_arrow", id_offset,
-                 result.terminal.pose, color(0.0f, 1.0f, 0.0f, 1.0f));
+                 vehicle.terminal.pose, color(0.0f, 1.0f, 0.0f, 1.0f));
         std::ostringstream terminal_text;
         terminal_text << poseText("V" + std::to_string(vehicle.id) +
-                                      " NLP end rear", result.terminal.pose)
+                                      " NLP end rear", vehicle.terminal.pose)
                       << " s=" << std::fixed << std::setprecision(2)
-                      << result.terminal.path_s << " gen=" << result.terminal.path_gen
-                      << " type=" << static_cast<int>(result.terminal.type);
+                      << vehicle.terminal.path_s << " gen=" << vehicle.terminal.path_gen
+                      << " type=" << static_cast<int>(vehicle.terminal.type);
         addText(markers, name + "_terminal_text", id_offset,
-                result.terminal.pose.x, result.terminal.pose.y, 0.28,
+                vehicle.terminal.pose.x, vehicle.terminal.pose.y, 0.28,
                 terminal_text.str(), color(0.0f, 1.0f, 0.0f, 1.0f));
         ROS_INFO_THROTTLE(2.0, "[nlp_recovery] %s corridor valid: boxes=%zu "
                           "start=(%.3f,%.3f) end=(%.3f,%.3f) s=%.3f gen=%d",
-                          name.c_str(), result.boxes.size(), start.x, start.y,
-                          result.terminal.pose.x, result.terminal.pose.y,
-                          result.terminal.path_s, result.terminal.path_gen);
+                          name.c_str(), vehicle.corridor.size(), start.x, start.y,
+                          vehicle.terminal.pose.x, vehicle.terminal.pose.y,
+                          vehicle.terminal.path_s, vehicle.terminal.path_gen);
     }
 
     void addOrangeVehicle(visualization_msgs::MarkerArray& markers,
@@ -410,11 +419,6 @@ private:
         return found == snapshot.vehicles.end() ? nullptr : &*found;
     }
 
-    bool validForAnalysis(
-        const sandbox_msgs::RecoveryVehicleState* vehicle) const {
-        return vehicle && vehicle->pose_valid && vehicle->path.size() >= 2;
-    }
-
     void clearLockedTransaction() {
         if (locked_.active) {
             ROS_INFO("[nlp_recovery][auto] clear locked NLP_PREP transaction");
@@ -424,16 +428,25 @@ private:
 
     bool snapshotMatchesLocked(
         const sandbox_msgs::RecoverySnapshot& snapshot) const {
-        if (!locked_.active || locked_.vehicle_ids != snapshot.nlp_vehicle_ids) {
+        const auto& input = locked_.build.input;
+        if (!locked_.active || input.participant_ids != snapshot.nlp_vehicle_ids) {
             return false;
         }
-        for (size_t i = 0; i < locked_.vehicle_ids.size(); ++i) {
-            const auto* vehicle = findVehicle(snapshot, locked_.vehicle_ids[i]);
-            if (vehicle == nullptr || vehicle->path_gen != locked_.path_gens[i]) {
+        for (const NlpVehicleInput& locked_vehicle : input.vehicles) {
+            const auto* vehicle = findVehicle(snapshot, locked_vehicle.id);
+            if (vehicle == nullptr || vehicle->path_gen != locked_vehicle.path_gen) {
                 return false;
             }
         }
         return true;
+    }
+
+    void writeDebugInput(const OptimizationInputBuildResult& build) {
+        std::string error;
+        if (!writeOptimizationInputDebugFile(build, debug_output_file_, error)) {
+            ROS_ERROR_THROTTLE(2.0, "[nlp_recovery] input dump failed: %s",
+                               error.c_str());
+        }
     }
 
     void addAutoMarkers(visualization_msgs::MarkerArray& markers,
@@ -451,15 +464,23 @@ private:
             clearLockedTransaction();
         }
 
-        std::vector<const sandbox_msgs::RecoveryVehicleState*> participants;
-        participants.reserve(snapshot.nlp_vehicle_ids.size());
-        bool valid = !snapshot.nlp_vehicle_ids.empty();
-        for (int id : snapshot.nlp_vehicle_ids) {
-            const auto* vehicle = findVehicle(snapshot, id);
-            participants.push_back(vehicle);
-            valid = valid && validForAnalysis(vehicle);
+        if (!locked_.active) {
+            OptimizationInputBuildResult build = input_builder_->build(
+                snapshot, snapshot.nlp_vehicle_ids, "auto");
+            writeDebugInput(build);
+            if (build.complete) {
+                locked_.active = true;
+                locked_.build = std::move(build);
+                ROS_WARN("[nlp_recovery][auto] locked NLP_PREP input "
+                         "participants=%zu valid=%d trigger=%s input=%s",
+                         locked_.build.input.vehicles.size(),
+                         locked_.build.input.valid,
+                         locked_.build.input.trigger_reason.c_str(),
+                         locked_.build.reason.c_str());
+            }
         }
-        if (!locked_.active && !valid) {
+
+        if (!locked_.active) {
             for (const auto& vehicle : snapshot.vehicles) {
                 addOrangeVehicle(markers, vehicle);
             }
@@ -472,39 +493,26 @@ private:
             return;
         }
 
-        if (!locked_.active) {
-            locked_.active = true;
-            locked_.vehicle_ids.assign(snapshot.nlp_vehicle_ids.begin(),
-                                       snapshot.nlp_vehicle_ids.end());
-            locked_.reason = snapshot.reason;
-            for (const auto* vehicle : participants) {
-                locked_.path_gens.push_back(vehicle->path_gen);
-                locked_.vehicles.push_back(*vehicle);
-                locked_.results.push_back(analyze(*vehicle));
-            }
-            ROS_WARN("[nlp_recovery][auto] locked NLP_PREP transaction "
-                     "participants=%zu reason=%s", locked_.vehicles.size(),
-                     locked_.reason.c_str());
-        }
-
         for (const auto& vehicle : snapshot.vehicles) {
-            if (std::find(locked_.vehicle_ids.begin(), locked_.vehicle_ids.end(),
-                          vehicle.id) == locked_.vehicle_ids.end()) {
+            const auto& ids = locked_.build.input.participant_ids;
+            if (std::find(ids.begin(), ids.end(), vehicle.id) == ids.end()) {
                 addOrangeVehicle(markers, vehicle);
             }
         }
         std::ostringstream ids;
-        for (size_t i = 0; i < locked_.vehicles.size(); ++i) {
+        const auto& input = locked_.build.input;
+        for (size_t i = 0; i < input.vehicles.size(); ++i) {
             if (i != 0) ids << ",";
-            ids << "V" << locked_.vehicles[i].id;
-            addVehicleAnalysis(markers, locked_.vehicles[i], locked_.results[i],
-                               "nlp_V" + std::to_string(locked_.vehicles[i].id),
+            ids << "V" << input.vehicles[i].id;
+            addVehicleAnalysis(markers, input.vehicles[i],
+                               "nlp_V" + std::to_string(input.vehicles[i].id),
                                1000 + static_cast<int>(i) * 1000,
                                analysisColor(i));
         }
         addText(markers, "auto_status", 0, map_param_.field_width * 0.5,
                 map_param_.field_height - 0.12, 0.3,
-                "NLP_PREP locked: " + ids.str() + " " + locked_.reason,
+                "NLP_PREP locked: " + ids.str() + " " + input.trigger_reason +
+                    " input=" + locked_.build.reason,
                 color(1.0f, 0.2f, 0.2f, 1.0f), 0.06);
     }
 
@@ -516,31 +524,21 @@ private:
                 addOrangeVehicle(markers, vehicle);
             }
         }
-        std::vector<int> unavailable;
-        for (size_t i = 0; i < debug_vehicle_ids_.size(); ++i) {
-            const int id = debug_vehicle_ids_[i];
-            const auto* vehicle = findVehicle(snapshot, id);
-            if (!validForAnalysis(vehicle)) {
-                unavailable.push_back(id);
-                continue;
-            }
-            addVehicleAnalysis(markers, *vehicle, analyze(*vehicle),
-                               "debug_V" + std::to_string(id),
+        const OptimizationInputBuildResult build = input_builder_->build(
+            snapshot, debug_vehicle_ids_, "debug");
+        writeDebugInput(build);
+        for (size_t i = 0; i < build.input.vehicles.size(); ++i) {
+            const NlpVehicleInput& vehicle = build.input.vehicles[i];
+            addVehicleAnalysis(markers, vehicle,
+                               "debug_V" + std::to_string(vehicle.id),
                                1000 + static_cast<int>(i) * 1000,
                                analysisColor(i));
         }
-        if (debug_vehicle_ids_.empty() || !unavailable.empty()) {
-            std::ostringstream status;
-            status << (debug_vehicle_ids_.empty() ? "vehicle_ids is empty"
-                                                  : "waiting for V");
-            for (size_t i = 0; i < unavailable.size(); ++i) {
-                if (i != 0) status << ",V";
-                status << unavailable[i];
-            }
+        if (!build.complete) {
             addText(markers, "status", 0, map_param_.field_width * 0.5,
-                    map_param_.field_height - 0.12, 0.3, status.str(),
+                    map_param_.field_height - 0.12, 0.3, build.reason,
                     color(1.0f, 0.1f, 0.1f, 1.0f), 0.07);
-            ROS_WARN_THROTTLE(2.0, "[nlp_recovery] %s", status.str().c_str());
+            ROS_WARN_THROTTLE(2.0, "[nlp_recovery] %s", build.reason.c_str());
         }
     }
 
@@ -558,11 +556,7 @@ private:
 
     struct LockedTransaction {
         bool active = false;
-        std::vector<int> vehicle_ids;
-        std::vector<int> path_gens;
-        std::string reason;
-        std::vector<sandbox_msgs::RecoveryVehicleState> vehicles;
-        std::vector<CorridorResult> results;
+        OptimizationInputBuildResult build;
     };
 
     ros::NodeHandle private_nh_;
@@ -572,11 +566,13 @@ private:
     std::unique_ptr<ForkliftMap> map_;
     CorridorConfig config_;
     std::unique_ptr<CorridorBuilder> builder_;
+    std::unique_ptr<OptimizationInputBuilder> input_builder_;
     OperatingMode mode_ = OperatingMode::DEBUG;
     std::string mode_name_ = "debug";
     LockedTransaction locked_;
     std::vector<int> debug_vehicle_ids_;
     std::string snapshot_topic_;
+    std::string debug_output_file_;
 };
 
 }  // namespace forklift_nlp_recovery

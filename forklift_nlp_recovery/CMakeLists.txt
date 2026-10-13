@@ -15,7 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES forklift_nlp_recovery_geometry
+  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input
   CATKIN_DEPENDS roscpp geometry_msgs std_msgs visualization_msgs forklift_map sandbox_msgs
 )
 
@@ -25,9 +25,17 @@ add_library(forklift_nlp_recovery_geometry src/corridor_builder.cpp)
 add_dependencies(forklift_nlp_recovery_geometry ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_geometry ${catkin_LIBRARIES})
 
+add_library(forklift_nlp_recovery_input src/optimization_input.cpp)
+add_dependencies(forklift_nlp_recovery_input ${catkin_EXPORTED_TARGETS})
+target_link_libraries(forklift_nlp_recovery_input
+  forklift_nlp_recovery_geometry
+  ${catkin_LIBRARIES}
+)
+
 add_executable(recovery_visualizer_node src/recovery_visualizer_node.cpp)
 add_dependencies(recovery_visualizer_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(recovery_visualizer_node
+  forklift_nlp_recovery_input
   forklift_nlp_recovery_geometry
   forklift_map_lib
   ${catkin_LIBRARIES}
@@ -43,9 +51,21 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES}
     )
   endif()
+
+  catkin_add_gtest(optimization_input_test test/optimization_input_test.cpp)
+  if(TARGET optimization_input_test)
+    add_dependencies(optimization_input_test ${catkin_EXPORTED_TARGETS})
+    target_link_libraries(optimization_input_test
+      forklift_nlp_recovery_input
+      forklift_nlp_recovery_geometry
+      forklift_map_lib
+      ${catkin_LIBRARIES}
+    )
+  endif()
 endif()
 
-install(TARGETS forklift_nlp_recovery_geometry recovery_visualizer_node
+install(TARGETS forklift_nlp_recovery_geometry forklift_nlp_recovery_input
+                recovery_visualizer_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
