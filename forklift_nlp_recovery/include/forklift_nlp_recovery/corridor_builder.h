@@ -16,7 +16,7 @@ struct Pose2d {
 };
 
 struct PathPoint {
-    Pose2d pose;
+    Pose2d pose;  // rear-axle pose
     double s = 0.0;
     uint8_t type = 0;
 };
@@ -32,18 +32,20 @@ struct Aabb {
 };
 
 struct CorridorConfig {
+    double vehicle_radius = 0.0;
+    double shelf_inflation_reduction = 0.0;
     double expansion_step = 0.02;
     double path_sample_step = 0.05;
     double min_rejoin_distance = 0.20;
     double rejoin_distance = 0.80;
     double max_width = 2.50;
     double max_height = 2.00;
-    double safety_margin = 0.01;
+    double safety_margin = 0.0;
     int max_bridge_depth = 8;
 };
 
 struct RejoinPoint {
-    Pose2d pose;
+    Pose2d pose;  // rear-axle pose on the original path
     double path_s = 0.0;
     int path_gen = 0;
     uint8_t type = 0;
@@ -53,7 +55,7 @@ struct CorridorResult {
     bool success = false;
     std::string reason;
     std::vector<Aabb> boxes;
-    std::vector<Pose2d> seeds;
+    std::vector<Pose2d> seeds;  // body-center seeds used by AABB geometry
     RejoinPoint terminal;
 };
 
@@ -64,13 +66,17 @@ public:
                     const CorridorConfig& config);
 
     double vehicleRadius() const { return vehicle_radius_; }
-    double clearance() const { return clearance_; }
+    double boundaryClearance() const { return boundary_clearance_; }
+    double shelfInflation() const { return shelf_inflation_; }
     const std::vector<Aabb>& inflatedShelves() const { return inflated_shelves_; }
 
+    Pose2d bodyCenter(const Pose2d& rear_axle_pose) const;
+    // The point/seed arguments below are body-center coordinates.
     bool pointLegal(const Pose2d& point) const;
     bool aabbLegal(const Aabb& box) const;
     bool connected(const Aabb& first, const Aabb& second) const;
     bool generateAabb(const Pose2d& seed, Aabb& box, std::string& reason) const;
+    // start and path are rear-axle poses; only internal geometry is body-centered.
     CorridorResult build(const Pose2d& start, const std::vector<PathPoint>& path,
                          double current_s, int path_gen) const;
 
@@ -90,7 +96,8 @@ private:
     MapParam map_param_;
     CorridorConfig config_;
     double vehicle_radius_ = 0.0;
-    double clearance_ = 0.0;
+    double boundary_clearance_ = 0.0;
+    double shelf_inflation_ = 0.0;
     std::vector<Aabb> inflated_shelves_;
 };
 

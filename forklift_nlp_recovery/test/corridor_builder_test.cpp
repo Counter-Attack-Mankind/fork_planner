@@ -18,11 +18,45 @@ protected:
     fnr::CorridorBuilder builder;
 };
 
-TEST_F(CorridorBuilderTest, UsesRearAxleCircumscribedRadius) {
-    const double expected = std::hypot(param.vehicle_length - param.rear_hang,
+TEST_F(CorridorBuilderTest, UsesBodyCenteredFallbackRadius) {
+    const double expected = std::hypot(param.vehicle_length * 0.5,
                                        param.vehicle_width * 0.5);
     EXPECT_NEAR(builder.vehicleRadius(), expected, 1e-12);
-    EXPECT_NEAR(builder.clearance(), expected + config.safety_margin, 1e-12);
+    EXPECT_NEAR(builder.boundaryClearance(), expected + config.safety_margin, 1e-12);
+    EXPECT_NEAR(builder.shelfInflation(), expected + config.safety_margin, 1e-12);
+}
+
+TEST_F(CorridorBuilderTest, AppliesRadiusOverrideAndShelfInflationReduction) {
+    fnr::CorridorConfig configured = config;
+    configured.vehicle_radius = 0.12;
+    configured.safety_margin = 0.01;
+    configured.shelf_inflation_reduction = 0.03;
+    const fnr::CorridorBuilder configured_builder(
+        param, map.shelf_blocks(), configured);
+    EXPECT_NEAR(configured_builder.vehicleRadius(), 0.12, 1e-12);
+    EXPECT_NEAR(configured_builder.boundaryClearance(), 0.13, 1e-12);
+    EXPECT_NEAR(configured_builder.shelfInflation(), 0.10, 1e-12);
+    ASSERT_FALSE(configured_builder.inflatedShelves().empty());
+    EXPECT_NEAR(configured_builder.inflatedShelves().front().min_x,
+                map.shelf_blocks().front().x - 0.10, 1e-12);
+
+    configured.shelf_inflation_reduction = 1.0;
+    const fnr::CorridorBuilder zero_inflation_builder(
+        param, map.shelf_blocks(), configured);
+    EXPECT_DOUBLE_EQ(zero_inflation_builder.shelfInflation(), 0.0);
+}
+
+TEST_F(CorridorBuilderTest, ConvertsRearAxlePoseToBodyCenter) {
+    const fnr::Pose2d x_aligned{1.0, 2.0, 0.0};
+    const fnr::Pose2d x_center = builder.bodyCenter(x_aligned);
+    EXPECT_NEAR(x_center.x, x_aligned.x + param.rear_axle_to_center, 1e-12);
+    EXPECT_NEAR(x_center.y, x_aligned.y, 1e-12);
+    EXPECT_NEAR(x_center.yaw, x_aligned.yaw, 1e-12);
+
+    const fnr::Pose2d y_aligned{1.0, 2.0, M_PI * 0.5};
+    const fnr::Pose2d y_center = builder.bodyCenter(y_aligned);
+    EXPECT_NEAR(y_center.x, y_aligned.x, 1e-12);
+    EXPECT_NEAR(y_center.y, y_aligned.y + param.rear_axle_to_center, 1e-12);
 }
 
 TEST_F(CorridorBuilderTest, ExpansionRemainsLegalAndContainsSeed) {
@@ -54,10 +88,15 @@ TEST_F(CorridorBuilderTest, BuildsConnectedCorridorAndPreservesEndpointMetadata)
     const auto result = builder.build(actual_start, path, 0.0, 17);
     ASSERT_TRUE(result.success) << result.reason;
     ASSERT_FALSE(result.boxes.empty());
-    EXPECT_NEAR(result.seeds.front().x, actual_start.x, 1e-12);
-    EXPECT_NEAR(result.seeds.front().y, actual_start.y, 1e-12);
+    const fnr::Pose2d expected_center = builder.bodyCenter(actual_start);
+    EXPECT_NEAR(result.seeds.front().x, expected_center.x, 1e-12);
+    EXPECT_NEAR(result.seeds.front().y, expected_center.y, 1e-12);
     EXPECT_EQ(result.terminal.path_gen, 17);
     EXPECT_NEAR(result.terminal.path_s, config.rejoin_distance, 1e-9);
+    EXPECT_NEAR(result.terminal.pose.x, 1.25, 1e-9);
+    EXPECT_NEAR(result.terminal.pose.y, param.corridor4_cy(), 1e-9);
+    EXPECT_NEAR(result.terminal.pose.yaw, 0.0, 1e-12);
+    EXPECT_EQ(result.terminal.type, uint8_t{1});
     for (size_t i = 0; i < result.boxes.size(); ++i) {
         EXPECT_TRUE(builder.aabbLegal(result.boxes[i]));
         if (i > 0) {
@@ -86,7 +125,7 @@ TEST_F(CorridorBuilderTest, ShortensRejoinAtLastLegalPathIntersection) {
     ASSERT_TRUE(result.success) << result.reason;
     EXPECT_GE(result.terminal.path_s, config.min_rejoin_distance);
     EXPECT_LT(result.terminal.path_s, path.back().s);
-    EXPECT_TRUE(builder.pointLegal(result.terminal.pose));
+    EXPECT_TRUE(builder.pointLegal(builder.bodyCenter(result.terminal.pose)));
     EXPECT_NE(result.reason.find("shortened"), std::string::npos);
 }
 

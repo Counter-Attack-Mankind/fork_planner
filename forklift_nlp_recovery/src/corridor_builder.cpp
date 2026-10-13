@@ -33,20 +33,29 @@ CorridorBuilder::CorridorBuilder(const MapParam& map_param,
                                  const std::vector<ShelfBlock>& shelves,
                                  const CorridorConfig& config)
     : map_param_(map_param), config_(config) {
-    const double front = map_param_.vehicle_length - map_param_.rear_hang;
-    const double rear = map_param_.rear_hang;
-    const double half_width = map_param_.vehicle_width * 0.5;
+    const double geometric_radius = std::hypot(map_param_.vehicle_length * 0.5,
+                                               map_param_.vehicle_width * 0.5);
+    vehicle_radius_ = config_.vehicle_radius > 0.0
+        ? config_.vehicle_radius : geometric_radius;
+    boundary_clearance_ = std::max(0.0, vehicle_radius_ + config_.safety_margin);
+    shelf_inflation_ = std::max(
+        0.0, vehicle_radius_ + config_.safety_margin -
+                 config_.shelf_inflation_reduction);
 
-    //vehicle_radius_ = std::hypot(std::max(front, rear), half_width);
-
-    vehicle_radius_ = 0.14;
-    clearance_ = vehicle_radius_ + std::max(0.0, config_.safety_margin);
-    
     inflated_shelves_.reserve(shelves.size());
     for (const auto& shelf : shelves) {
-        inflated_shelves_.push_back({shelf.x - clearance_, shelf.x_max() + clearance_,
-                                     shelf.y - clearance_, shelf.y_max() + clearance_});
+        inflated_shelves_.push_back({shelf.x - shelf_inflation_,
+                                     shelf.x_max() + shelf_inflation_,
+                                     shelf.y - shelf_inflation_,
+                                     shelf.y_max() + shelf_inflation_});
     }
+}
+
+Pose2d CorridorBuilder::bodyCenter(const Pose2d& rear_axle_pose) const {
+    Pose2d center = rear_axle_pose;
+    center.x += map_param_.rear_axle_to_center * std::cos(rear_axle_pose.yaw);
+    center.y += map_param_.rear_axle_to_center * std::sin(rear_axle_pose.yaw);
+    return center;
 }
 
 bool CorridorBuilder::pointLegal(const Pose2d& point) const {
@@ -55,10 +64,10 @@ bool CorridorBuilder::pointLegal(const Pose2d& point) const {
 }
 
 bool CorridorBuilder::aabbLegal(const Aabb& box) const {
-    if (box.min_x < clearance_ - kEpsilon ||
-        box.max_x > map_param_.field_width - clearance_ + kEpsilon ||
-        box.min_y < clearance_ - kEpsilon ||
-        box.max_y > map_param_.field_height - clearance_ + kEpsilon) {
+    if (box.min_x < boundary_clearance_ - kEpsilon ||
+        box.max_x > map_param_.field_width - boundary_clearance_ + kEpsilon ||
+        box.min_y < boundary_clearance_ - kEpsilon ||
+        box.max_y > map_param_.field_height - boundary_clearance_ + kEpsilon) {
         return false;
     }
     for (const auto& obstacle : inflated_shelves_) {
@@ -227,10 +236,12 @@ CorridorResult CorridorBuilder::build(const Pose2d& start,
         result.reason = "offline path has fewer than two distinct points";
         return result;
     }
-    if (!pointLegal(start)) {
+    const Pose2d start_center = bodyCenter(start);
+    if (!pointLegal(start_center)) {
         std::ostringstream out;
         out << "actual rear-axle start (" << start.x << ", " << start.y
-            << ") is not legal for the configured single-disc model";
+            << ") places body center (" << start_center.x << ", "
+            << start_center.y << ") outside the configured single-disc free space";
         result.reason = out.str();
         return result;
     }
@@ -243,12 +254,13 @@ CorridorResult CorridorBuilder::build(const Pose2d& start,
     }
 
     std::string reason;
-    if (!appendConnected(start, 0, result.seeds, result.boxes, reason)) {
+    if (!appendConnected(start_center, 0, result.seeds, result.boxes, reason)) {
         result.reason = reason;
         return result;
     }
     const PathPoint current = interpolate(path, clamped_s);
-    if (!appendConnected(current.pose, 0, result.seeds, result.boxes, reason)) {
+    if (!appendConnected(bodyCenter(current.pose), 0,
+                         result.seeds, result.boxes, reason)) {
         result.reason = "cannot connect actual start to current path: " + reason;
         return result;
     }
@@ -263,7 +275,8 @@ CorridorResult CorridorBuilder::build(const Pose2d& start,
         const PathPoint point = interpolate(path, sample_s);
         const size_t seed_count = result.seeds.size();
         const size_t box_count = result.boxes.size();
-        if (!appendConnected(point.pose, 0, result.seeds, result.boxes, reason)) {
+        if (!appendConnected(bodyCenter(point.pose), 0,
+                             result.seeds, result.boxes, reason)) {
             result.seeds.resize(seed_count);
             result.boxes.resize(box_count);
             const double usable_distance = terminal.s - clamped_s;

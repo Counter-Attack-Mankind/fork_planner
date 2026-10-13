@@ -63,6 +63,11 @@ public:
         private_nh_.param("vehicle_b_id", vehicle_b_id_, 1);
         private_nh_.param<std::string>("snapshot_topic", snapshot_topic_,
                                        "/forklift_planner/recovery_snapshot");
+        private_nh_.param("vehicle_radius", config_.vehicle_radius,
+                          config_.vehicle_radius);
+        private_nh_.param("shelf_inflation_reduction",
+                          config_.shelf_inflation_reduction,
+                          config_.shelf_inflation_reduction);
         private_nh_.param("expansion_step", config_.expansion_step, config_.expansion_step);
         private_nh_.param("path_sample_step", config_.path_sample_step,
                           config_.path_sample_step);
@@ -82,9 +87,11 @@ public:
         snapshot_sub_ = private_nh_.subscribe(
             snapshot_topic_, 1, &RecoveryVisualizerNode::snapshotCallback, this);
         ROS_INFO("[nlp_recovery] read-only phase-1 visualizer: A=%d B=%d "
-                 "disc_radius=%.4f clearance=%.4f topic=%s",
+                 "disc_radius=%.4f boundary_clearance=%.4f "
+                 "shelf_inflation=%.4f topic=%s",
                  vehicle_a_id_, vehicle_b_id_, builder_->vehicleRadius(),
-                 builder_->clearance(), snapshot_topic_.c_str());
+                 builder_->boundaryClearance(), builder_->shelfInflation(),
+                 snapshot_topic_.c_str());
     }
 
 private:
@@ -136,13 +143,42 @@ private:
         markers.markers.push_back(marker);
     }
 
+    void addSolidPoint(visualization_msgs::MarkerArray& markers,
+                       const std::string& ns, int id, const Pose2d& pose,
+                       const std_msgs::ColorRGBA& rgba) const {
+        auto marker = baseMarker(ns, id, visualization_msgs::Marker::SPHERE);
+        marker.pose.position = point(pose.x, pose.y, 0.13);
+        marker.scale.x = 0.075;
+        marker.scale.y = 0.075;
+        marker.scale.z = 0.075;
+        marker.color = rgba;
+        marker.color.a = 1.0f;
+        markers.markers.push_back(marker);
+    }
+
     void addDisc(visualization_msgs::MarkerArray& markers, const std::string& ns,
-                 int id, const Pose2d& pose, const std_msgs::ColorRGBA& rgba) const {
+                 int id, const Pose2d& rear_axle_pose,
+                 const std_msgs::ColorRGBA& rgba) const {
+        const Pose2d center = builder_->bodyCenter(rear_axle_pose);
         auto marker = baseMarker(ns, id, visualization_msgs::Marker::CYLINDER);
-        marker.pose.position = point(pose.x, pose.y, 0.025);
+        marker.pose.position = point(center.x, center.y, 0.025);
         marker.scale.x = 2.0 * builder_->vehicleRadius();
         marker.scale.y = 2.0 * builder_->vehicleRadius();
         marker.scale.z = 0.05;
+        marker.color = rgba;
+        markers.markers.push_back(marker);
+    }
+
+    void addBody(visualization_msgs::MarkerArray& markers, const std::string& ns,
+                 int id, const Pose2d& rear_axle_pose,
+                 const std_msgs::ColorRGBA& rgba) const {
+        const Pose2d center = builder_->bodyCenter(rear_axle_pose);
+        auto marker = baseMarker(ns, id, visualization_msgs::Marker::CUBE);
+        marker.pose.position = point(center.x, center.y, 0.055);
+        setYaw(marker.pose.orientation, rear_axle_pose.yaw);
+        marker.scale.x = map_param_.vehicle_length;
+        marker.scale.y = map_param_.vehicle_width;
+        marker.scale.z = 0.07;
         marker.color = rgba;
         markers.markers.push_back(marker);
     }
@@ -166,7 +202,7 @@ private:
                          color(0.95f, 0.15f, 0.15f, 0.9f));
         }
         const Aabb field{0.0, map_param_.field_width, 0.0, map_param_.field_height};
-        const double c = builder_->clearance();
+        const double c = builder_->boundaryClearance();
         const Aabb inset{c, map_param_.field_width - c,
                          c, map_param_.field_height - c};
         addRectangle(markers, "map_boundary", 0, field, 0.02, 0.02,
@@ -189,10 +225,16 @@ private:
                             const std_msgs::ColorRGBA& rgba) {
         const Pose2d start{vehicle.pose.x, vehicle.pose.y, vehicle.pose.theta};
         addDisc(markers, name + "_disc", id_offset, start,
-                color(rgba.r, rgba.g, rgba.b, 0.28f));
-        addArrow(markers, name + "_start", id_offset, start, rgba);
+                color(rgba.r, rgba.g, rgba.b, 0.20f));
+        addBody(markers, name + "_body", id_offset, start,
+                color(rgba.r, rgba.g, rgba.b, 0.48f));
+        addSolidPoint(markers, name + "_start_point", id_offset, start,
+                      color(1.0f, 0.0f, 0.0f, 1.0f));
+        addArrow(markers, name + "_start_arrow", id_offset, start,
+                 color(1.0f, 0.0f, 0.0f, 1.0f));
         addText(markers, name + "_start_text", id_offset, start.x, start.y, 0.28,
-                poseText(name + " start", start), rgba);
+                poseText("V" + std::to_string(vehicle.id) + " NLP start rear", start),
+                color(1.0f, 0.0f, 0.0f, 1.0f));
 
         auto path_marker = baseMarker(name + "_offline_path", id_offset,
                                       visualization_msgs::Marker::LINE_STRIP);
@@ -222,15 +264,19 @@ private:
                     (box.min_y + box.max_y) * 0.5, 0.18,
                     name + "[" + std::to_string(i) + "]", rgba, 0.055);
         }
-        addArrow(markers, name + "_terminal", id_offset, result.terminal.pose, rgba);
+        addSolidPoint(markers, name + "_terminal_point", id_offset,
+                      result.terminal.pose, color(0.0f, 1.0f, 0.0f, 1.0f));
+        addArrow(markers, name + "_terminal_arrow", id_offset,
+                 result.terminal.pose, color(0.0f, 1.0f, 0.0f, 1.0f));
         std::ostringstream terminal_text;
-        terminal_text << poseText(name + " end", result.terminal.pose)
+        terminal_text << poseText("V" + std::to_string(vehicle.id) +
+                                      " NLP end rear", result.terminal.pose)
                       << " s=" << std::fixed << std::setprecision(2)
                       << result.terminal.path_s << " gen=" << result.terminal.path_gen
                       << " type=" << static_cast<int>(result.terminal.type);
         addText(markers, name + "_terminal_text", id_offset,
                 result.terminal.pose.x, result.terminal.pose.y, 0.28,
-                terminal_text.str(), rgba);
+                terminal_text.str(), color(0.0f, 1.0f, 0.0f, 1.0f));
         ROS_INFO_THROTTLE(2.0, "[nlp_recovery] %s corridor valid: boxes=%zu "
                           "start=(%.3f,%.3f) end=(%.3f,%.3f) s=%.3f gen=%d",
                           name.c_str(), result.boxes.size(), start.x, start.y,
@@ -257,7 +303,9 @@ private:
                 !vehicle.pose_valid) continue;
             const Pose2d pose{vehicle.pose.x, vehicle.pose.y, vehicle.pose.theta};
             addDisc(markers, "static_vehicle_discs", other_id, pose,
-                    color(1.0f, 0.55f, 0.05f, 0.42f));
+                    color(1.0f, 0.55f, 0.05f, 0.20f));
+            addBody(markers, "static_vehicle_bodies", other_id, pose,
+                    color(1.0f, 0.55f, 0.05f, 0.48f));
             addText(markers, "static_vehicle_ids", other_id++, pose.x, pose.y, 0.16,
                     "static V" + std::to_string(vehicle.id),
                     color(1.0f, 0.45f, 0.0f, 1.0f), 0.055);

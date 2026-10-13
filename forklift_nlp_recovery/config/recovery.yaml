@@ -2,8 +2,10 @@ vehicle_a_id: 0
 vehicle_b_id: 1
 snapshot_topic: /forklift_planner/recovery_snapshot
 
-# Center-space inflation is disc_radius + safety_margin.
-safety_margin: 0
+# A positive override is used directly. Values <= 0 use hypot(length/2, width/2).
+vehicle_radius: 0.14
+safety_margin: 0.0
+shelf_inflation_reduction: 0.05
 expansion_step: 0.02
 path_sample_step: 0.05
 min_rejoin_distance: 0.20
