@@ -36,8 +36,12 @@ CorridorBuilder::CorridorBuilder(const MapParam& map_param,
     const double front = map_param_.vehicle_length - map_param_.rear_hang;
     const double rear = map_param_.rear_hang;
     const double half_width = map_param_.vehicle_width * 0.5;
-    vehicle_radius_ = std::hypot(std::max(front, rear), half_width);
+
+    //vehicle_radius_ = std::hypot(std::max(front, rear), half_width);
+
+    vehicle_radius_ = 0.14;
     clearance_ = vehicle_radius_ + std::max(0.0, config_.safety_margin);
+    
     inflated_shelves_.reserve(shelves.size());
     for (const auto& shelf : shelves) {
         inflated_shelves_.push_back({shelf.x - clearance_, shelf.x_max() + clearance_,
