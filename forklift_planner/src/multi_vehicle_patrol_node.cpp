@@ -2550,6 +2550,14 @@ private:
         sandbox_msgs::RecoverySnapshot snapshot;
         snapshot.header.stamp = ros::Time::now();
         snapshot.header.frame_id = pp_.frame_id;
+        const auto& recovery = rule_engine_->recoveryDirective();
+        snapshot.recovery_phase = static_cast<uint8_t>(recovery.phase);
+        snapshot.retreat_vehicle_id = recovery.retreat_vehicle_id;
+        snapshot.pass_vehicle_id = recovery.pass_vehicle_id;
+        snapshot.retreat_path_gen = recovery.retreat_path_gen;
+        snapshot.pass_path_gen = recovery.pass_path_gen;
+        snapshot.retreat_attempt = recovery.retreat_attempt;
+        snapshot.reason = recovery.reason;
         snapshot.vehicles.reserve(agents_.size());
         for (const auto& vehicle : agents_) {
             sandbox_msgs::RecoveryVehicleState state;

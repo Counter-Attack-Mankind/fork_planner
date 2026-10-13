@@ -1,5 +1,12 @@
 header:
   frame_id: map
+recovery_phase: 0
+retreat_vehicle_id: -1
+pass_vehicle_id: -1
+retreat_path_gen: -1
+pass_path_gen: -1
+retreat_attempt: 0
+reason: ''
 vehicles:
   - id: 7
     path_gen: 11

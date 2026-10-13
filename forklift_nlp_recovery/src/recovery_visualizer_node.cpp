@@ -1,6 +1,7 @@
 #include <ros/ros.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iomanip>
 #include <memory>
@@ -21,6 +22,8 @@
 
 namespace forklift_nlp_recovery {
 namespace {
+
+enum class OperatingMode { DEBUG, AUTO };
 
 std_msgs::ColorRGBA color(float r, float g, float b, float a = 1.0f) {
     std_msgs::ColorRGBA value;
@@ -59,6 +62,16 @@ public:
         ros::NodeHandle global_nh;
         map_param_ = MapParam::fromROSParam(global_nh);
         map_ = std::make_unique<ForkliftMap>(map_param_);
+        private_nh_.param<std::string>("mode", mode_name_, "debug");
+        std::transform(mode_name_.begin(), mode_name_.end(), mode_name_.begin(),
+                       [](unsigned char value) { return std::tolower(value); });
+        if (mode_name_ == "auto") {
+            mode_ = OperatingMode::AUTO;
+        } else if (mode_name_ != "debug") {
+            ROS_ERROR("[nlp_recovery] unsupported mode='%s'; using debug",
+                      mode_name_.c_str());
+            mode_name_ = "debug";
+        }
         private_nh_.param("vehicle_a_id", vehicle_a_id_, 0);
         private_nh_.param("vehicle_b_id", vehicle_b_id_, 1);
         private_nh_.param<std::string>("snapshot_topic", snapshot_topic_,
@@ -88,10 +101,11 @@ public:
             "/forklift_nlp_recovery/markers", 1, true);
         snapshot_sub_ = private_nh_.subscribe(
             snapshot_topic_, 1, &RecoveryVisualizerNode::snapshotCallback, this);
-        ROS_INFO("[nlp_recovery] read-only phase-1 visualizer: A=%d B=%d "
+        ROS_INFO("[nlp_recovery] read-only phase-1 visualizer: mode=%s A=%d B=%d "
                  "disc_radius=%.4f boundary_clearance=%.4f "
                  "shelf_inflation=%.4f topic=%s",
-                 vehicle_a_id_, vehicle_b_id_, builder_->vehicleRadius(),
+                 mode_name_.c_str(), vehicle_a_id_, vehicle_b_id_,
+                 builder_->vehicleRadius(),
                  builder_->boundaryClearance(), builder_->shelfInflation(),
                  snapshot_topic_.c_str());
     }
@@ -221,8 +235,16 @@ private:
         return CorridorBuilder::parameterizePath(poses, vehicle.path_types);
     }
 
+    CorridorResult analyze(
+        const sandbox_msgs::RecoveryVehicleState& vehicle) const {
+        const Pose2d start{vehicle.pose.x, vehicle.pose.y, vehicle.pose.theta};
+        return builder_->build(
+            start, pathFromMessage(vehicle), vehicle.path_s, vehicle.path_gen);
+    }
+
     void addVehicleAnalysis(visualization_msgs::MarkerArray& markers,
                             const sandbox_msgs::RecoveryVehicleState& vehicle,
+                            const CorridorResult& result,
                             const std::string& name, int id_offset,
                             const std_msgs::ColorRGBA& rgba) {
         const Pose2d start{vehicle.pose.x, vehicle.pose.y, vehicle.pose.theta};
@@ -247,8 +269,6 @@ private:
         }
         markers.markers.push_back(path_marker);
 
-        const CorridorResult result = builder_->build(
-            start, pathFromMessage(vehicle), vehicle.path_s, vehicle.path_gen);
         if (!result.success) {
             addText(markers, name + "_failure", id_offset, start.x, start.y + 0.15, 0.3,
                     name + " FAILED: " + result.reason,
@@ -286,33 +306,136 @@ private:
                           result.terminal.path_s, result.terminal.path_gen);
     }
 
-    void snapshotCallback(const sandbox_msgs::RecoverySnapshot::ConstPtr& snapshot) {
-        const sandbox_msgs::RecoveryVehicleState* vehicle_a = nullptr;
-        const sandbox_msgs::RecoveryVehicleState* vehicle_b = nullptr;
-        for (const auto& vehicle : snapshot->vehicles) {
-            if (vehicle.id == vehicle_a_id_) vehicle_a = &vehicle;
-            if (vehicle.id == vehicle_b_id_) vehicle_b = &vehicle;
-        }
-        visualization_msgs::MarkerArray markers;
-        auto clear = baseMarker("clear", 0, visualization_msgs::Marker::CUBE);
-        clear.action = visualization_msgs::Marker::DELETEALL;
-        markers.markers.push_back(clear);
-        addMap(markers);
+    void addOrangeVehicle(visualization_msgs::MarkerArray& markers,
+                          const sandbox_msgs::RecoveryVehicleState& vehicle) const {
+        if (!vehicle.pose_valid) return;
+        const Pose2d pose{vehicle.pose.x, vehicle.pose.y, vehicle.pose.theta};
+        addDisc(markers, "normal_vehicle_discs", vehicle.id, pose,
+                color(1.0f, 0.55f, 0.05f, 0.20f));
+        addBody(markers, "normal_vehicle_bodies", vehicle.id, pose,
+                color(1.0f, 0.55f, 0.05f, 0.48f));
+        addText(markers, "normal_vehicle_ids", vehicle.id, pose.x, pose.y, 0.16,
+                "V" + std::to_string(vehicle.id),
+                color(1.0f, 0.45f, 0.0f, 1.0f), 0.055);
+    }
 
-        int other_id = 0;
-        for (const auto& vehicle : snapshot->vehicles) {
-            if (vehicle.id == vehicle_a_id_ || vehicle.id == vehicle_b_id_ ||
-                !vehicle.pose_valid) continue;
-            const Pose2d pose{vehicle.pose.x, vehicle.pose.y, vehicle.pose.theta};
-            addDisc(markers, "static_vehicle_discs", other_id, pose,
-                    color(1.0f, 0.55f, 0.05f, 0.20f));
-            addBody(markers, "static_vehicle_bodies", other_id, pose,
-                    color(1.0f, 0.55f, 0.05f, 0.48f));
-            addText(markers, "static_vehicle_ids", other_id++, pose.x, pose.y, 0.16,
-                    "static V" + std::to_string(vehicle.id),
-                    color(1.0f, 0.45f, 0.0f, 1.0f), 0.055);
+    const sandbox_msgs::RecoveryVehicleState* findVehicle(
+        const sandbox_msgs::RecoverySnapshot& snapshot, int id) const {
+        const auto found = std::find_if(
+            snapshot.vehicles.begin(), snapshot.vehicles.end(),
+            [id](const auto& vehicle) { return vehicle.id == id; });
+        return found == snapshot.vehicles.end() ? nullptr : &*found;
+    }
+
+    bool validForAnalysis(
+        const sandbox_msgs::RecoveryVehicleState* vehicle) const {
+        return vehicle && vehicle->pose_valid && vehicle->path.size() >= 2;
+    }
+
+    void clearLockedTransaction() {
+        if (locked_.active) {
+            ROS_INFO("[nlp_recovery][auto] clear locked UNRESOLVED transaction "
+                     "retreat=V%d pass=V%d",
+                     locked_.retreat_id, locked_.pass_id);
+        }
+        locked_ = LockedTransaction{};
+    }
+
+    bool directiveMatchesLocked(
+        const sandbox_msgs::RecoverySnapshot& snapshot) const {
+        return locked_.active &&
+               locked_.retreat_id == snapshot.retreat_vehicle_id &&
+               locked_.pass_id == snapshot.pass_vehicle_id &&
+               locked_.directive_retreat_path_gen == snapshot.retreat_path_gen &&
+               locked_.directive_pass_path_gen == snapshot.pass_path_gen &&
+               locked_.retreat_attempt == snapshot.retreat_attempt;
+    }
+
+    void addAutoMarkers(visualization_msgs::MarkerArray& markers,
+                        const sandbox_msgs::RecoverySnapshot& snapshot) {
+        if (snapshot.recovery_phase !=
+            sandbox_msgs::RecoverySnapshot::PHASE_UNRESOLVED) {
+            clearLockedTransaction();
+            for (const auto& vehicle : snapshot.vehicles) {
+                addOrangeVehicle(markers, vehicle);
+            }
+            return;
         }
 
+        const auto* retreat = findVehicle(snapshot, snapshot.retreat_vehicle_id);
+        const auto* passer = findVehicle(snapshot, snapshot.pass_vehicle_id);
+        if (locked_.active) {
+            const bool live_path_changed =
+                (retreat && retreat->path_gen != locked_.retreat_path_gen) ||
+                (passer && passer->path_gen != locked_.pass_path_gen);
+            if (!directiveMatchesLocked(snapshot) || live_path_changed) {
+                clearLockedTransaction();
+            }
+        }
+        if (!locked_.active &&
+            (!validForAnalysis(retreat) || !validForAnalysis(passer))) {
+            for (const auto& vehicle : snapshot.vehicles) {
+                addOrangeVehicle(markers, vehicle);
+            }
+            addText(markers, "auto_status", 0, map_param_.field_width * 0.5,
+                    map_param_.field_height - 0.12, 0.3,
+                    "UNRESOLVED waiting for valid retreat/pass snapshots",
+                    color(1.0f, 0.1f, 0.1f, 1.0f), 0.065);
+            ROS_WARN_THROTTLE(
+                2.0, "[nlp_recovery][auto] UNRESOLVED pair V%d/V%d is not "
+                     "available with valid pose and path",
+                snapshot.retreat_vehicle_id, snapshot.pass_vehicle_id);
+            return;
+        }
+
+        if (!locked_.active) {
+            locked_.active = true;
+            locked_.retreat_id = retreat->id;
+            locked_.pass_id = passer->id;
+            locked_.retreat_path_gen = retreat->path_gen;
+            locked_.pass_path_gen = passer->path_gen;
+            locked_.directive_retreat_path_gen = snapshot.retreat_path_gen;
+            locked_.directive_pass_path_gen = snapshot.pass_path_gen;
+            locked_.retreat_attempt = snapshot.retreat_attempt;
+            locked_.reason = snapshot.reason;
+            locked_.retreat = *retreat;
+            locked_.passer = *passer;
+            locked_.retreat_result = analyze(*retreat);
+            locked_.pass_result = analyze(*passer);
+            ROS_WARN("[nlp_recovery][auto] locked UNRESOLVED transaction "
+                     "retreat=V%d(gen=%d) pass=V%d(gen=%d) attempt=%d reason=%s",
+                     locked_.retreat_id, locked_.retreat_path_gen,
+                     locked_.pass_id, locked_.pass_path_gen,
+                     locked_.retreat_attempt, locked_.reason.c_str());
+        }
+
+        for (const auto& vehicle : snapshot.vehicles) {
+            if (vehicle.id != locked_.retreat_id && vehicle.id != locked_.pass_id) {
+                addOrangeVehicle(markers, vehicle);
+            }
+        }
+        addVehicleAnalysis(markers, locked_.retreat, locked_.retreat_result,
+                           "retreat", 1000, color(0.05f, 0.45f, 1.0f, 0.95f));
+        addVehicleAnalysis(markers, locked_.passer, locked_.pass_result,
+                           "pass", 2000, color(0.75f, 0.2f, 0.95f, 0.95f));
+        addText(markers, "auto_status", 0, map_param_.field_width * 0.5,
+                map_param_.field_height - 0.12, 0.3,
+                "UNRESOLVED locked: retreat V" + std::to_string(locked_.retreat_id) +
+                    " / pass V" + std::to_string(locked_.pass_id) +
+                    " attempt=" + std::to_string(locked_.retreat_attempt) +
+                    " " + locked_.reason,
+                color(1.0f, 0.2f, 0.2f, 1.0f), 0.06);
+    }
+
+    void addDebugMarkers(visualization_msgs::MarkerArray& markers,
+                         const sandbox_msgs::RecoverySnapshot& snapshot) {
+        const auto* vehicle_a = findVehicle(snapshot, vehicle_a_id_);
+        const auto* vehicle_b = findVehicle(snapshot, vehicle_b_id_);
+        for (const auto& vehicle : snapshot.vehicles) {
+            if (vehicle.id != vehicle_a_id_ && vehicle.id != vehicle_b_id_) {
+                addOrangeVehicle(markers, vehicle);
+            }
+        }
         if (!vehicle_a || !vehicle_b) {
             std::ostringstream out;
             out << "waiting for selected IDs A=" << vehicle_a_id_
@@ -321,24 +444,51 @@ private:
                     map_param_.field_height - 0.12, 0.3, out.str(),
                     color(1.0f, 0.1f, 0.1f, 1.0f), 0.08);
             ROS_WARN_THROTTLE(2.0, "[nlp_recovery] %s", out.str().c_str());
-        } else {
-            if (!vehicle_a->pose_valid || vehicle_a->path.size() < 2) {
-                addText(markers, "status", 1, 1.25, 4.25, 0.3,
-                        "A pose/path unavailable", color(1.0f, 0.1f, 0.1f, 1.0f));
-            } else {
-                addVehicleAnalysis(markers, *vehicle_a, "A", 1000,
-                                   color(0.05f, 0.45f, 1.0f, 0.95f));
-            }
-            if (!vehicle_b->pose_valid || vehicle_b->path.size() < 2) {
-                addText(markers, "status", 2, 1.25, 4.12, 0.3,
-                        "B pose/path unavailable", color(1.0f, 0.1f, 0.1f, 1.0f));
-            } else {
-                addVehicleAnalysis(markers, *vehicle_b, "B", 2000,
-                                   color(0.1f, 0.85f, 0.25f, 0.95f));
-            }
+            return;
         }
+        if (!validForAnalysis(vehicle_a)) {
+            addText(markers, "status", 1, 1.25, 4.25, 0.3,
+                    "A pose/path unavailable", color(1.0f, 0.1f, 0.1f, 1.0f));
+        } else {
+            addVehicleAnalysis(markers, *vehicle_a, analyze(*vehicle_a),
+                               "A", 1000, color(0.05f, 0.45f, 1.0f, 0.95f));
+        }
+        if (!validForAnalysis(vehicle_b)) {
+            addText(markers, "status", 2, 1.25, 4.12, 0.3,
+                    "B pose/path unavailable", color(1.0f, 0.1f, 0.1f, 1.0f));
+        } else {
+            addVehicleAnalysis(markers, *vehicle_b, analyze(*vehicle_b),
+                               "B", 2000, color(0.1f, 0.85f, 0.25f, 0.95f));
+        }
+    }
+
+    void snapshotCallback(const sandbox_msgs::RecoverySnapshot::ConstPtr& snapshot) {
+        visualization_msgs::MarkerArray markers;
+        auto clear = baseMarker("clear", 0, visualization_msgs::Marker::CUBE);
+        clear.action = visualization_msgs::Marker::DELETEALL;
+        markers.markers.push_back(clear);
+        addMap(markers);
+
+        if (mode_ == OperatingMode::AUTO) addAutoMarkers(markers, *snapshot);
+        else addDebugMarkers(markers, *snapshot);
         marker_pub_.publish(markers);
     }
+
+    struct LockedTransaction {
+        bool active = false;
+        int retreat_id = -1;
+        int pass_id = -1;
+        int retreat_path_gen = -1;
+        int pass_path_gen = -1;
+        int directive_retreat_path_gen = -1;
+        int directive_pass_path_gen = -1;
+        int retreat_attempt = 0;
+        std::string reason;
+        sandbox_msgs::RecoveryVehicleState retreat;
+        sandbox_msgs::RecoveryVehicleState passer;
+        CorridorResult retreat_result;
+        CorridorResult pass_result;
+    };
 
     ros::NodeHandle private_nh_;
     ros::Publisher marker_pub_;
@@ -347,6 +497,9 @@ private:
     std::unique_ptr<ForkliftMap> map_;
     CorridorConfig config_;
     std::unique_ptr<CorridorBuilder> builder_;
+    OperatingMode mode_ = OperatingMode::DEBUG;
+    std::string mode_name_ = "debug";
+    LockedTransaction locked_;
     int vehicle_a_id_ = 0;
     int vehicle_b_id_ = 1;
     std::string snapshot_topic_;
