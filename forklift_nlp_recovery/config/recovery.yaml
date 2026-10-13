@@ -1,0 +1,13 @@
+vehicle_a_id: 0
+vehicle_b_id: 1
+snapshot_topic: /forklift_planner/recovery_snapshot
+
+# Center-space inflation is disc_radius + safety_margin.
+safety_margin: 0.01
+expansion_step: 0.02
+path_sample_step: 0.05
+min_rejoin_distance: 0.20
+rejoin_distance: 0.80
+max_width: 2.50
+max_height: 2.00
+max_bridge_depth: 8

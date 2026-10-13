@@ -39,6 +39,8 @@
 #include "forklift_planner/planner_param.h"
 #include "geometry_msgs/Point.h"
 #include "sandbox_msgs/AprilObject.h"
+#include "sandbox_msgs/RecoverySnapshot.h"
+#include "sandbox_msgs/RecoveryVehicleState.h"
 #include "sandbox_msgs/Trajectory.h"
 #include "sandbox_msgs/TrajectoryPoint.h"
 #include "std_msgs/Float64.h"
@@ -125,6 +127,8 @@ public:
         // A方案:仿真也画每车完整轨迹。real 模式 setupRealIO 会再 advertise(同topic,无害)。
         horizon_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>(
             "/forklift_planner/markers", 10);
+        recovery_snapshot_pub_ = nh_.advertise<sandbox_msgs::RecoverySnapshot>(
+            "/forklift_planner/recovery_snapshot", 1, true);
 
         if (stress_quiet_) {
             ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME,
@@ -2518,6 +2522,62 @@ private:
         }
     }
 
+    bool recoveryPose(const VehicleAgent& vehicle, geometry_msgs::Pose2D& pose) const {
+        if (vehicle.real_pose_valid) {
+            pose.x = vehicle.real_x;
+            pose.y = vehicle.real_y;
+            pose.theta = vehicle.real_yaw;
+            return true;
+        }
+        if (!vehicle.track.empty()) {
+            const RoughWp p = vehicle.track.poseAtS(
+                std::clamp(vehicle.path_s, 0.0, vehicle.track.length()));
+            pose.x = p.x;
+            pose.y = p.y;
+            pose.theta = p.theta;
+            return true;
+        }
+        if (vehicle.stationary_pose_valid) {
+            pose.x = vehicle.stationary_x;
+            pose.y = vehicle.stationary_y;
+            pose.theta = vehicle.stationary_yaw;
+            return true;
+        }
+        return false;
+    }
+
+    void publishRecoverySnapshot() {
+        sandbox_msgs::RecoverySnapshot snapshot;
+        snapshot.header.stamp = ros::Time::now();
+        snapshot.header.frame_id = pp_.frame_id;
+        snapshot.vehicles.reserve(agents_.size());
+        for (const auto& vehicle : agents_) {
+            sandbox_msgs::RecoveryVehicleState state;
+            state.id = vehicle.id;
+            state.path_gen = vehicle.path_gen;
+            state.path_s = vehicle.path_s;
+            state.current_speed = vehicle.current_speed;
+            state.pose_valid = recoveryPose(vehicle, state.pose);
+            state.mode = static_cast<int>(vehicle.mode);
+            state.action = static_cast<int>(vehicle.action);
+            state.blocker_id = vehicle.blocker_id;
+            state.loaded = vehicle.loaded;
+            const RoughPath& path = vehicle.track.path();
+            state.path.reserve(path.size());
+            state.path_types.reserve(path.size());
+            for (const auto& waypoint : path) {
+                geometry_msgs::Pose2D point;
+                point.x = waypoint.x;
+                point.y = waypoint.y;
+                point.theta = waypoint.theta;
+                state.path.push_back(point);
+                state.path_types.push_back(static_cast<uint8_t>(waypoint.type));
+            }
+            snapshot.vehicles.push_back(std::move(state));
+        }
+        recovery_snapshot_pub_.publish(snapshot);
+    }
+
     void tick(const ros::TimerEvent&) {
         const double dt = 1.0 / pp_.update_rate;
 
@@ -2566,6 +2626,7 @@ private:
                     rule_engine_->a1DepartureClusters(),
                     rule_engine_->recoveryDirective());
                 publishRealTrailMarkers();
+                publishRecoverySnapshot();
                 return;
             }
 
@@ -2609,6 +2670,7 @@ private:
                 rule_engine_->a1DepartureClusters(),
                 rule_engine_->recoveryDirective());
             publishRealTrailMarkers();
+            publishRecoverySnapshot();
             return;
         }
 
@@ -2650,6 +2712,7 @@ private:
             speed_stats_start_sim_time_ = sim_time_;
             max_sim_callback_time_ = 0.0;
         }
+        publishRecoverySnapshot();
     }
     
     //===========================================================================
@@ -2887,6 +2950,7 @@ private:
                 while (trail.size() > kMaxRealTrailPoints) trail.pop_front();
             }
         }
+        publishRecoverySnapshot();
     }
 
     // Enter:摆位完成、开跑。未全部就位也允许启动(未就位的车由动捕看门狗摁停),但会告警。
@@ -3208,6 +3272,7 @@ private:
     std::vector<ros::Publisher> traj_pubs_, speed_pubs_;// /traj_i + /coord_speed_i
     std::vector<ros::Publisher> state_pubs_;            // /coord_state_i(只读调试:停车原因)
     ros::Publisher horizon_marker_pub_;                 // 推演 5s 轨迹的 RViz 可视化(LINE_STRIP/车)
+    ros::Publisher recovery_snapshot_pub_;              // read-only rear-axle pose and raw offline path
     ros::Publisher snapshot_trigger_pub_;
     bool snapshot_debug_enabled_ = false;
     double debug_timeline_start_ = -1.0;

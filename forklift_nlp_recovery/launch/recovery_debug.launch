@@ -1,0 +1,30 @@
+<launch>
+  <arg name="vehicle_a_id" default="0"/>
+  <arg name="vehicle_b_id" default="1"/>
+  <arg name="start_planner" default="true"/>
+  <arg name="real_mode" default="false"/>
+  <arg name="start_rviz" default="true"/>
+
+  <param name="/use_sim_time" value="false"/>
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml"/>
+  <param name="/forklift_planner/multi_vehicle/real_mode" value="$(arg real_mode)"/>
+
+  <node if="$(arg start_planner)" pkg="forklift_planner"
+        type="multi_vehicle_patrol_node" name="multi_vehicle_patrol_node"
+        output="screen"/>
+
+  <node pkg="forklift_nlp_recovery" type="recovery_visualizer_node"
+        name="forklift_nlp_recovery" output="screen">
+    <rosparam command="load" file="$(find forklift_nlp_recovery)/config/recovery.yaml"/>
+    <param name="vehicle_a_id" value="$(arg vehicle_a_id)"/>
+    <param name="vehicle_b_id" value="$(arg vehicle_b_id)"/>
+  </node>
+
+  <node if="$(arg start_rviz)" pkg="rviz" type="rviz" name="recovery_debug_rviz"
+        args="-d $(find forklift_nlp_recovery)/rviz/recovery_debug.rviz"
+        required="false">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

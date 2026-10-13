@@ -1,0 +1,47 @@
+header:
+  frame_id: map
+vehicles:
+  - id: 7
+    path_gen: 11
+    path_s: 0.0
+    current_speed: 0.0
+    pose_valid: true
+    pose: {x: 0.46, y: 0.58, theta: 0.0}
+    mode: 1
+    action: 0
+    blocker_id: -1
+    loaded: false
+    path:
+      - {x: 0.45, y: 0.57, theta: 0.0}
+      - {x: 0.85, y: 0.57, theta: 0.0}
+      - {x: 1.25, y: 0.57, theta: 0.0}
+      - {x: 1.65, y: 0.57, theta: 0.0}
+    path_types: [0, 0, 0, 0]
+  - id: 9
+    path_gen: 12
+    path_s: 0.0
+    current_speed: 0.0
+    pose_valid: true
+    pose: {x: 0.46, y: 1.69, theta: 0.0}
+    mode: 1
+    action: 0
+    blocker_id: -1
+    loaded: false
+    path:
+      - {x: 0.45, y: 1.69, theta: 0.0}
+      - {x: 0.85, y: 1.69, theta: 0.0}
+      - {x: 1.25, y: 1.69, theta: 0.0}
+      - {x: 1.65, y: 1.69, theta: 0.0}
+    path_types: [0, 0, 0, 0]
+  - id: 3
+    path_gen: 2
+    path_s: 0.0
+    current_speed: 0.0
+    pose_valid: true
+    pose: {x: 2.10, y: 0.57, theta: 3.14}
+    mode: 1
+    action: 0
+    blocker_id: -1
+    loaded: false
+    path: []
+    path_types: []

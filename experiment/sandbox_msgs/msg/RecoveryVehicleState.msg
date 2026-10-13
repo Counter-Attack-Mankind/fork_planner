@@ -1,0 +1,15 @@
+int32 FORWARD=0
+int32 REVERSE=1
+
+int32 id
+int32 path_gen
+float64 path_s
+float64 current_speed
+bool pose_valid
+geometry_msgs/Pose2D pose
+int32 mode
+int32 action
+int32 blocker_id
+bool loaded
+geometry_msgs/Pose2D[] path
+uint8[] path_types

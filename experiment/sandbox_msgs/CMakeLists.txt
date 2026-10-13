@@ -17,6 +17,8 @@ add_message_files(
   Trajectory.msg
   TrajectoryPoint.msg
   ChassisCommand.msg
+  RecoveryVehicleState.msg
+  RecoverySnapshot.msg
 )
 
 ## Generate added messages and services with any dependencies listed here
