@@ -32,6 +32,7 @@ struct Aabb {
 };
 
 struct CorridorConfig {
+    double boundary_inset_reduction = 0.0;
     double vehicle_radius = 0.0;
     double shelf_inflation_reduction = 0.0;
     double expansion_step = 0.02;

@@ -37,7 +37,7 @@ CorridorBuilder::CorridorBuilder(const MapParam& map_param,
                                                map_param_.vehicle_width * 0.5);
     vehicle_radius_ = config_.vehicle_radius > 0.0
         ? config_.vehicle_radius : geometric_radius;
-    boundary_clearance_ = std::max(0.0, vehicle_radius_ + config_.safety_margin);
+    boundary_clearance_ = std::max(0.0, vehicle_radius_ + config_.safety_margin - config_.boundary_inset_reduction);
     shelf_inflation_ = std::max(
         0.0, vehicle_radius_ + config_.safety_margin -
                  config_.shelf_inflation_reduction);

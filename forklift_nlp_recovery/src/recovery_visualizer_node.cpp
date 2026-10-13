@@ -80,6 +80,8 @@ public:
         private_nh_.param("safety_margin", config_.safety_margin, config_.safety_margin);
         private_nh_.param("max_bridge_depth", config_.max_bridge_depth,
                           config_.max_bridge_depth);
+        private_nh_.param("boundary_inset_reduction",config_.boundary_inset_reduction,
+                          config_.boundary_inset_reduction);
         builder_ = std::make_unique<CorridorBuilder>(
             map_param_, map_->shelf_blocks(), config_);
         marker_pub_ = private_nh_.advertise<visualization_msgs::MarkerArray>(
