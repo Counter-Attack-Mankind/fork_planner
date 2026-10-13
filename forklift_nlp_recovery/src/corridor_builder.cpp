@@ -42,13 +42,17 @@ CorridorBuilder::CorridorBuilder(const MapParam& map_param,
         0.0, vehicle_radius_ + config_.safety_margin -
                  config_.shelf_inflation_reduction);
 
-    inflated_shelves_.reserve(shelves.size());
+    
+    original_shelves_.reserve(shelves.size());
     for (const auto& shelf : shelves) {
-        inflated_shelves_.push_back({shelf.x - shelf_inflation_,
-                                     shelf.x_max() + shelf_inflation_,
-                                     shelf.y - shelf_inflation_,
-                                     shelf.y_max() + shelf_inflation_});
+        original_shelves_.push_back({
+        shelf.x,
+        shelf.x_max(),
+        shelf.y,
+        shelf.y_max()
+        });
     }
+
 }
 
 Pose2d CorridorBuilder::bodyCenter(const Pose2d& rear_axle_pose) const {
@@ -70,14 +74,40 @@ bool CorridorBuilder::aabbLegal(const Aabb& box) const {
         box.max_y > map_param_.field_height - boundary_clearance_ + kEpsilon) {
         return false;
     }
-    for (const auto& obstacle : inflated_shelves_) {
+
+    for (const auto& shelf : original_shelves_) {
+        // 两个 AABB 在 X、Y 方向的间距
+        const double dx = std::max({
+            0.0,
+            shelf.min_x - box.max_x,
+            box.min_x - shelf.max_x
+        });
+
+        const double dy = std::max({
+            0.0,
+            shelf.min_y - box.max_y,
+            box.min_y - shelf.max_y
+        });
+
+        // 两个矩形内部发生重叠
         const bool interior_overlap =
-            box.max_x > obstacle.min_x + kEpsilon &&
-            box.min_x < obstacle.max_x - kEpsilon &&
-            box.max_y > obstacle.min_y + kEpsilon &&
-            box.min_y < obstacle.max_y - kEpsilon;
-        if (interior_overlap) return false;
+            box.max_x > shelf.min_x + kEpsilon &&
+            box.min_x < shelf.max_x - kEpsilon &&
+            box.max_y > shelf.min_y + kEpsilon &&
+            box.min_y < shelf.max_y - kEpsilon;
+
+        if (interior_overlap) {
+            return false;
+        }
+
+        // 两个矩形之间的最小欧氏距离
+        const double distance = std::hypot(dx, dy);
+
+        if (distance < shelf_inflation_ - kEpsilon) {
+            return false;
+        }
     }
+
     return true;
 }
 

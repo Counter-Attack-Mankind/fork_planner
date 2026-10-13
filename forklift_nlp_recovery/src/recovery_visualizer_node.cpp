@@ -136,6 +136,39 @@ private:
         markers.markers.push_back(marker);
     }
 
+    void addRoundedRectangle(
+        visualization_msgs::MarkerArray& markers,
+        const std::string& ns,
+        int id,
+        const Aabb& box,
+        double radius,
+        double z,
+        double width,
+        const std_msgs::ColorRGBA& rgba) const
+    {
+        auto marker = baseMarker(ns, id, visualization_msgs::Marker::LINE_STRIP);
+        marker.scale.x = width;
+        marker.color = rgba;
+        constexpr int kArcSegments = 12;
+        constexpr double kPi = 3.14159265358979323846;
+        auto addArc = [&](double cx, double cy, double start) {
+            for (int i = 0; i <= kArcSegments; ++i) {
+                const double angle = start + (kPi * 0.5) * i / kArcSegments;
+                marker.points.push_back(point(cx + radius * std::cos(angle), cy + radius * std::sin(angle), z));
+            }
+        };
+
+        // 从右下角开始，逆时针依次绘制
+        addArc(box.max_x, box.min_y, -kPi * 0.5);
+        addArc(box.max_x, box.max_y, 0.0);
+        addArc(box.min_x, box.max_y, kPi * 0.5);
+        addArc(box.min_x, box.min_y, kPi);
+
+        // 闭合轮廓
+        marker.points.push_back(marker.points.front());
+        markers.markers.push_back(marker);
+    }
+
     void addText(visualization_msgs::MarkerArray& markers, const std::string& ns,
                  int id, double x, double y, double z, const std::string& text,
                  const std_msgs::ColorRGBA& rgba, double height = 0.07) const {
@@ -213,10 +246,11 @@ private:
             ++id;
         }
         id = 0;
-        for (const auto& obstacle : builder_->inflatedShelves()) {
-            addRectangle(markers, "shelves_inflated", id++, obstacle, 0.09, 0.012,
-                         color(0.95f, 0.15f, 0.15f, 0.9f));
-        }
+
+        for (const auto& shelf : builder_->originalShelves()) 
+            addRoundedRectangle(markers,"shelves_inflated",id++,shelf,builder_->shelfInflation(),0.09,0.012,color(0.95f, 0.15f, 0.15f, 0.9f));
+
+
         const Aabb field{0.0, map_param_.field_width, 0.0, map_param_.field_height};
         const double c = builder_->boundaryClearance();
         const Aabb inset{c, map_param_.field_width - c,

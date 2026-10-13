@@ -69,7 +69,7 @@ public:
     double vehicleRadius() const { return vehicle_radius_; }
     double boundaryClearance() const { return boundary_clearance_; }
     double shelfInflation() const { return shelf_inflation_; }
-    const std::vector<Aabb>& inflatedShelves() const { return inflated_shelves_; }
+    const std::vector<Aabb>& originalShelves() const {return original_shelves_;}
 
     Pose2d bodyCenter(const Pose2d& rear_axle_pose) const;
     // The point/seed arguments below are body-center coordinates.
@@ -99,7 +99,7 @@ private:
     double vehicle_radius_ = 0.0;
     double boundary_clearance_ = 0.0;
     double shelf_inflation_ = 0.0;
-    std::vector<Aabb> inflated_shelves_;
+    std::vector<Aabb> original_shelves_;
 };
 
 }  // namespace forklift_nlp_recovery
