@@ -53,6 +53,177 @@ PathPoint interpolatePath(const std::vector<PathPoint>& path, double query_s) {
     return result;
 }
 
+struct DirectionSegment {
+    double length = 0.0;
+    uint8_t type = 0;
+};
+
+struct ReferenceMotion {
+    double path_begin = 0.0;
+    double path_end = 0.0;
+    PathPoint projected_start;
+    double connector_length = 0.0;
+    double path_length = 0.0;
+    double total_length = 0.0;
+    size_t direction_changes = 0;
+    std::vector<DirectionSegment> segments;
+};
+
+void appendDirectionSegment(std::vector<DirectionSegment>& segments,
+                            double length, uint8_t type) {
+    if (length <= kEpsilon) return;
+    if (!segments.empty() && segments.back().type == type) {
+        segments.back().length += length;
+    } else {
+        segments.push_back({length, type});
+    }
+}
+
+bool buildReferenceMotion(const NlpVehicleInput& vehicle,
+                          ReferenceMotion& reference, std::string& error) {
+    if (!vehicle.corridor_valid) {
+        error = vehicle.corridor_reason;
+        return false;
+    }
+    if (vehicle.original_path.size() < 2) {
+        error = "original path has fewer than two points";
+        return false;
+    }
+    for (size_t i = 0; i < vehicle.original_path.size(); ++i) {
+        const PathPoint& point = vehicle.original_path[i];
+        if (!std::isfinite(point.s) || !std::isfinite(point.pose.x) ||
+            !std::isfinite(point.pose.y) || !std::isfinite(point.pose.yaw)) {
+            error = "original path contains non-finite geometry";
+            return false;
+        }
+        if (i > 0 && point.s + kEpsilon < vehicle.original_path[i - 1].s) {
+            error = "original path arc length is not monotonic";
+            return false;
+        }
+    }
+
+    const double first_s = vehicle.original_path.front().s;
+    const double last_s = vehicle.original_path.back().s;
+    if (vehicle.path_s < first_s - kEpsilon || vehicle.path_s > last_s + kEpsilon) {
+        error = "current path_s is outside the original path";
+        return false;
+    }
+    if (vehicle.terminal.path_s < vehicle.path_s - kEpsilon ||
+        vehicle.terminal.path_s > last_s + kEpsilon) {
+        error = "terminal path_s is behind the current state or outside the original path";
+        return false;
+    }
+    if (vehicle.terminal.path_gen != vehicle.path_gen) {
+        error = "terminal path_gen does not match the frozen path";
+        return false;
+    }
+
+    reference.path_begin = std::clamp(vehicle.path_s, first_s, last_s);
+    reference.path_end = std::clamp(vehicle.terminal.path_s, reference.path_begin, last_s);
+    reference.projected_start = interpolatePath(vehicle.original_path, reference.path_begin);
+    const PathPoint expected_terminal = interpolatePath(vehicle.original_path, reference.path_end);
+    if (poseDistance(expected_terminal.pose, vehicle.terminal.pose) > 1e-4 ||
+        angleDistance(expected_terminal.pose.yaw, vehicle.terminal.pose.yaw) > 1e-4) {
+        error = "terminal pose does not match terminal path_s on the frozen path";
+        return false;
+    }
+
+    reference.connector_length = poseDistance(
+        vehicle.initial_state.rear_axle_pose, reference.projected_start.pose);
+    reference.path_length = reference.path_end - reference.path_begin;
+    reference.total_length = reference.connector_length + reference.path_length;
+    appendDirectionSegment(reference.segments, reference.connector_length,
+                           reference.projected_start.type);
+
+    std::vector<double> boundaries{reference.path_begin, reference.path_end};
+    for (size_t i = 1; i < vehicle.original_path.size(); ++i) {
+        if (vehicle.original_path[i - 1].type == vehicle.original_path[i].type) continue;
+        const double transition = 0.5 * (vehicle.original_path[i - 1].s +
+                                         vehicle.original_path[i].s);
+        if (transition > reference.path_begin + kEpsilon &&
+            transition < reference.path_end - kEpsilon) {
+            boundaries.push_back(transition);
+        }
+    }
+    std::sort(boundaries.begin(), boundaries.end());
+    boundaries.erase(std::unique(boundaries.begin(), boundaries.end(),
+        [](double first, double second) { return std::abs(first - second) <= kEpsilon; }),
+        boundaries.end());
+    for (size_t i = 1; i < boundaries.size(); ++i) {
+        const double length = boundaries[i] - boundaries[i - 1];
+        const uint8_t type = interpolatePath(
+            vehicle.original_path, 0.5 * (boundaries[i] + boundaries[i - 1])).type;
+        appendDirectionSegment(reference.segments, length, type);
+    }
+    reference.direction_changes = reference.segments.empty() ? 0 :
+                                  reference.segments.size() - 1;
+
+    if (reference.total_length <= 1e-6) {
+        const double heading_change = angleDistance(
+            vehicle.initial_state.rear_axle_pose.yaw, vehicle.terminal.pose.yaw);
+        if (heading_change > M_PI / 180.0) {
+            error = "zero-length reference requires a heading change that the kinematic bicycle cannot perform";
+            return false;
+        }
+        if (std::abs(vehicle.initial_state.longitudinal_speed) > 1e-6) {
+            error = "zero-length reference cannot stop the nonzero initial speed within the endpoint";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool estimateTravelTime(const NlpVehicleInput& vehicle,
+                        const ReferenceMotion& reference,
+                        double& estimated_time, std::string& error) {
+    const VehicleParameters& parameters = vehicle.parameters;
+    if (!(parameters.max_speed > 0.0) || !(parameters.max_accel > 0.0) ||
+        !(parameters.max_decel > 0.0) || !std::isfinite(parameters.max_speed) ||
+        !std::isfinite(parameters.max_accel) || !std::isfinite(parameters.max_decel)) {
+        error = "max_speed, max_accel and max_decel must be finite and positive";
+        return false;
+    }
+    estimated_time = 0.0;
+    double start_speed = std::abs(vehicle.initial_state.longitudinal_speed);
+    for (const DirectionSegment& segment : reference.segments) {
+        const double stopping_distance = start_speed * start_speed /
+                                         (2.0 * parameters.max_decel);
+        if (segment.length + 1e-8 < stopping_distance) {
+            std::ostringstream reason;
+            reason << "reference segment length " << segment.length
+                   << " is shorter than the required stopping distance "
+                   << stopping_distance;
+            error = reason.str();
+            return false;
+        }
+        const double speed_cap = std::max(parameters.max_speed, start_speed);
+        const double peak_squared =
+            (2.0 * parameters.max_accel * parameters.max_decel * segment.length +
+             parameters.max_decel * start_speed * start_speed) /
+            (parameters.max_accel + parameters.max_decel);
+        const double peak_speed = std::sqrt(std::max(0.0, peak_squared));
+        if (peak_speed <= speed_cap + kEpsilon) {
+            estimated_time += std::max(0.0, peak_speed - start_speed) /
+                              parameters.max_accel;
+            estimated_time += peak_speed / parameters.max_decel;
+        } else {
+            const double acceleration_distance =
+                std::max(0.0, speed_cap * speed_cap - start_speed * start_speed) /
+                (2.0 * parameters.max_accel);
+            const double deceleration_distance = speed_cap * speed_cap /
+                                                 (2.0 * parameters.max_decel);
+            const double cruise_distance = std::max(
+                0.0, segment.length - acceleration_distance - deceleration_distance);
+            estimated_time += std::max(0.0, speed_cap - start_speed) /
+                              parameters.max_accel;
+            estimated_time += cruise_distance / speed_cap;
+            estimated_time += speed_cap / parameters.max_decel;
+        }
+        start_speed = 0.0;
+    }
+    return true;
+}
+
 Pose2d discCenter(const Pose2d& rear, const VehicleParameters& parameters) {
     return {rear.x + parameters.rear_axle_to_center * std::cos(rear.yaw),
             rear.y + parameters.rear_axle_to_center * std::sin(rear.yaw), rear.yaw};
@@ -166,18 +337,9 @@ InitialGuessGenerator::InitialGuessGenerator(const InitialGuessConfig& config)
 
 NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& input) const {
     NlpInitialGuess result;
-    result.node_count = config_.node_count;
-    result.total_time = config_.total_time;
+    result.automatic_timing = config_.automatic;
     if (!input.valid) {
         result.reason = "optimization input is invalid: " + input.reason;
-        return result;
-    }
-    if (config_.node_count < 2) {
-        result.reason = "initial_guess_nodes must be at least 2";
-        return result;
-    }
-    if (!(config_.total_time > 0.0) || !std::isfinite(config_.total_time)) {
-        result.reason = "initial_guess_total_time must be finite and positive";
         return result;
     }
     if (input.vehicles.empty()) {
@@ -185,66 +347,124 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
         return result;
     }
 
-    const double dt = config_.total_time / static_cast<double>(config_.node_count - 1);
-    result.time_grid.reserve(config_.node_count);
-    for (size_t node = 0; node < config_.node_count; ++node) {
+    std::vector<ReferenceMotion> references(input.vehicles.size());
+    std::vector<double> estimated_times(input.vehicles.size(), 0.0);
+    size_t feature_nodes = 2;
+    double maximum_estimated_time = 0.0;
+    for (size_t i = 0; i < input.vehicles.size(); ++i) {
+        const NlpVehicleInput& vehicle = input.vehicles[i];
+        if (!(vehicle.parameters.wheel_base > 0.0) ||
+            !(vehicle.parameters.disc_radius > 0.0)) {
+            result.reason = "V" + std::to_string(vehicle.id) +
+                            ": invalid wheel base or disc radius";
+            return result;
+        }
+        std::string error;
+        if (!buildReferenceMotion(vehicle, references[i], error)) {
+            result.reason = "V" + std::to_string(vehicle.id) + ": " + error;
+            return result;
+        }
+        if (!estimateTravelTime(vehicle, references[i], estimated_times[i], error)) {
+            result.reason = "V" + std::to_string(vehicle.id) +
+                            " timing failed: " + error;
+            return result;
+        }
+        maximum_estimated_time = std::max(maximum_estimated_time, estimated_times[i]);
+        feature_nodes = std::max(feature_nodes,
+            3 + 2 * references[i].direction_changes);
+        feature_nodes = std::max(feature_nodes, 1 + 2 * vehicle.corridor.size());
+    }
+
+    if (config_.automatic) {
+        if (!(config_.target_dt > 0.0) || !std::isfinite(config_.target_dt)) {
+            result.reason = "initial_guess_target_dt must be finite and positive";
+            return result;
+        }
+        if (config_.min_nodes < 2 || config_.max_nodes < config_.min_nodes) {
+            result.reason = "initial guess node limits are invalid";
+            return result;
+        }
+        if (!(config_.time_margin >= 1.0) || !std::isfinite(config_.time_margin)) {
+            result.reason = "initial_guess_time_margin must be finite and at least 1.0";
+            return result;
+        }
+        if (feature_nodes > config_.max_nodes) {
+            result.reason = "initial_guess_max_nodes is too small for corridor and direction changes";
+            return result;
+        }
+        result.total_time = maximum_estimated_time * config_.time_margin;
+        size_t time_nodes = result.total_time > kEpsilon ?
+            static_cast<size_t>(std::ceil(result.total_time / config_.target_dt)) + 1 :
+            config_.min_nodes;
+        result.node_count = std::clamp(
+            std::max({time_nodes, config_.min_nodes, feature_nodes}),
+            config_.min_nodes, config_.max_nodes);
+        if (result.total_time <= kEpsilon) {
+            result.total_time = config_.target_dt *
+                                static_cast<double>(result.node_count - 1);
+        }
+    } else {
+        if (config_.node_count < 2) {
+            result.reason = "initial_guess_nodes must be at least 2";
+            return result;
+        }
+        if (!(config_.total_time > 0.0) || !std::isfinite(config_.total_time)) {
+            result.reason = "initial_guess_total_time must be finite and positive";
+            return result;
+        }
+        result.node_count = config_.node_count;
+        result.total_time = config_.total_time;
+    }
+
+    result.average_dt = result.total_time /
+                        static_cast<double>(result.node_count - 1);
+    const double dt = result.average_dt;
+    result.time_grid.reserve(result.node_count);
+    for (size_t node = 0; node < result.node_count; ++node) {
         result.time_grid.push_back(dt * static_cast<double>(node));
     }
 
-    for (const NlpVehicleInput& input_vehicle : input.vehicles) {
+    for (size_t vehicle_index = 0; vehicle_index < input.vehicles.size();
+         ++vehicle_index) {
+        const NlpVehicleInput& input_vehicle = input.vehicles[vehicle_index];
+        const ReferenceMotion& reference = references[vehicle_index];
         VehicleInitialGuess vehicle;
         vehicle.id = input_vehicle.id;
-        if (!input_vehicle.corridor_valid || input_vehicle.original_path.size() < 2) {
-            vehicle.reason = !input_vehicle.corridor_valid ? input_vehicle.corridor_reason : "original path has fewer than two points";
-            result.vehicles.push_back(std::move(vehicle));
-            result.reason = "V" + std::to_string(input_vehicle.id) + ": " + result.vehicles.back().reason;
-            return result;
-        }
-        if (!(input_vehicle.parameters.wheel_base > 0.0) ||
-            !(input_vehicle.parameters.disc_radius > 0.0)) {
-            vehicle.reason = "invalid wheel base or disc radius";
-            result.vehicles.push_back(std::move(vehicle));
-            result.reason = "V" + std::to_string(input_vehicle.id) + ": invalid vehicle parameters";
-            return result;
-        }
+        vehicle.diagnostics.reference_length = reference.total_length;
+        vehicle.diagnostics.estimated_travel_time = estimated_times[vehicle_index];
+        vehicle.diagnostics.direction_changes = reference.direction_changes;
+        vehicle.nodes.resize(result.node_count);
 
-        const double path_begin = std::clamp(input_vehicle.path_s,
-                                              input_vehicle.original_path.front().s,
-                                              input_vehicle.original_path.back().s);
-        const double path_end = std::clamp(input_vehicle.terminal.path_s, path_begin,
-                                            input_vehicle.original_path.back().s);
-        const PathPoint projected_start = interpolatePath(input_vehicle.original_path, path_begin);
-        const double connector_length = poseDistance(input_vehicle.initial_state.rear_axle_pose,
-                                                     projected_start.pose);
-        const double path_length = std::max(0.0, path_end - path_begin);
-        const double total_length = connector_length + path_length;
-        vehicle.nodes.resize(config_.node_count);
-
-        for (size_t node = 0; node < config_.node_count; ++node) {
+        for (size_t node = 0; node < result.node_count; ++node) {
             InitialGuessNode& state = vehicle.nodes[node];
             state.index = node;
             state.time = result.time_grid[node];
             const double ratio = static_cast<double>(node) /
-                                 static_cast<double>(config_.node_count - 1);
-            const double progress = ratio * total_length;
+                                 static_cast<double>(result.node_count - 1);
+            const double progress = ratio * reference.total_length;
             if (node == 0) {
                 state.rear_axle_pose = input_vehicle.initial_state.rear_axle_pose;
-                state.path_s = path_begin;
-                state.path_type = projected_start.type;
-            } else if (node + 1 == config_.node_count) {
+                state.path_s = reference.path_begin;
+                state.path_type = reference.projected_start.type;
+            } else if (node + 1 == result.node_count) {
                 state.rear_axle_pose = input_vehicle.terminal.pose;
                 state.path_s = input_vehicle.terminal.path_s;
                 state.path_type = input_vehicle.terminal.type;
-            } else if (connector_length > kEpsilon && progress < connector_length) {
+            } else if (reference.connector_length > kEpsilon &&
+                       progress < reference.connector_length) {
                 state.rear_axle_pose = interpolatePose(
-                    input_vehicle.initial_state.rear_axle_pose, projected_start.pose,
-                    progress / connector_length);
-                state.path_s = path_begin;
-                state.path_type = projected_start.type;
+                    input_vehicle.initial_state.rear_axle_pose,
+                    reference.projected_start.pose,
+                    progress / reference.connector_length);
+                state.path_s = reference.path_begin;
+                state.path_type = reference.projected_start.type;
             } else {
-                const double path_progress = std::max(0.0, progress - connector_length);
+                const double path_progress = std::max(
+                    0.0, progress - reference.connector_length);
                 const PathPoint sample = interpolatePath(
-                    input_vehicle.original_path, std::min(path_end, path_begin + path_progress));
+                    input_vehicle.original_path,
+                    std::min(reference.path_end,
+                             reference.path_begin + path_progress));
                 state.rear_axle_pose = sample.pose;
                 state.path_s = sample.s;
                 state.path_type = sample.type;
@@ -252,13 +472,13 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
             state.disc_center = discCenter(state.rear_axle_pose, input_vehicle.parameters);
         }
 
-        for (size_t node = 0; node < config_.node_count; ++node) {
+        for (size_t node = 0; node < result.node_count; ++node) {
             InitialGuessNode& state = vehicle.nodes[node];
             const double direction = state.path_type == 1 ? -1.0 : 1.0;
             if (node == 0) {
                 state.signed_speed = direction * std::abs(input_vehicle.initial_state.longitudinal_speed);
                 state.speed_source = GuessValueSource::SNAPSHOT_MAGNITUDE_PATH_SIGN;
-            } else if (node + 1 == config_.node_count) {
+            } else if (node + 1 == result.node_count) {
                 state.signed_speed = 0.0;
                 state.speed_source = GuessValueSource::TERMINAL_ZERO_ASSUMPTION;
             } else {
@@ -268,17 +488,17 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
                 state.speed_source = GuessValueSource::PATH_TIME_DIFFERENCE;
             }
         }
-        for (size_t node = 0; node + 1 < config_.node_count; ++node) {
+        for (size_t node = 0; node + 1 < result.node_count; ++node) {
             if (vehicle.nodes[node].path_type != vehicle.nodes[node + 1].path_type) {
                 vehicle.nodes[node].signed_speed = 0.0;
                 vehicle.nodes[node + 1].signed_speed = 0.0;
             }
         }
 
-        for (size_t node = 0; node < config_.node_count; ++node) {
+        for (size_t node = 0; node < result.node_count; ++node) {
             InitialGuessNode& state = vehicle.nodes[node];
             const size_t lo = node == 0 ? 0 : node - 1;
-            const size_t hi = node + 1 < config_.node_count ? node + 1 : node;
+            const size_t hi = node + 1 < result.node_count ? node + 1 : node;
             const double distance = poseDistance(vehicle.nodes[lo].rear_axle_pose,
                                                  vehicle.nodes[hi].rear_axle_pose);
             const double direction = vehicle.nodes[node].path_type == 1 ? -1.0 : 1.0;
@@ -294,9 +514,9 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
             state.steer_source = GuessValueSource::PATH_GEOMETRY_ESTIMATE;
         }
 
-        for (size_t node = 0; node < config_.node_count; ++node) {
+        for (size_t node = 0; node < result.node_count; ++node) {
             const size_t lo = node == 0 ? 0 : node - 1;
-            const size_t hi = node + 1 < config_.node_count ? node + 1 : node;
+            const size_t hi = node + 1 < result.node_count ? node + 1 : node;
             const double span = static_cast<double>(hi - lo) * dt;
             vehicle.nodes[node].acceleration = span > 0.0 ?
                 (vehicle.nodes[hi].signed_speed - vehicle.nodes[lo].signed_speed) / span : 0.0;
@@ -326,7 +546,7 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
             vehicle.nodes.back().rear_axle_pose, input_vehicle.terminal.pose);
         diagnostics.terminal_heading_error = angleDistance(
             vehicle.nodes.back().rear_axle_pose.yaw, input_vehicle.terminal.pose.yaw);
-        for (size_t node = 0; node < config_.node_count; ++node) {
+        for (size_t node = 0; node < result.node_count; ++node) {
             InitialGuessNode& state = vehicle.nodes[node];
             bool bounds_violated = false;
             const double speed_violation = positiveViolation(std::abs(state.signed_speed), input_vehicle.parameters.max_speed);
@@ -342,7 +562,7 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
                               accel_violation > kEpsilon || rate_violation > kEpsilon;
             if (bounds_violated) ++diagnostics.bound_violation_nodes;
 
-            if (node + 1 < config_.node_count) {
+            if (node + 1 < result.node_count) {
                 const InitialGuessNode& next = vehicle.nodes[node + 1];
                 const double predicted_x = state.rear_axle_pose.x + dt * state.signed_speed * std::cos(state.rear_axle_pose.yaw);
                 const double predicted_y = state.rear_axle_pose.y + dt * state.signed_speed * std::sin(state.rear_axle_pose.yaw);
@@ -375,7 +595,7 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
         for (size_t second = first + 1; second < result.vehicles.size(); ++second) {
             const double required = input.vehicles[first].parameters.disc_radius +
                                     input.vehicles[second].parameters.disc_radius;
-            for (size_t node = 0; node < config_.node_count; ++node) {
+            for (size_t node = 0; node < result.node_count; ++node) {
                 const double distance = poseDistance(result.vehicles[first].nodes[node].disc_center,
                                                      result.vehicles[second].nodes[node].disc_center);
                 const double clearance = distance - required;
@@ -393,7 +613,7 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
     for (size_t participant = 0; participant < result.vehicles.size(); ++participant) {
         for (const StaticVehicleObstacle& obstacle : input.static_vehicles) {
             const double required = input.vehicles[participant].parameters.disc_radius + obstacle.disc_radius;
-            for (size_t node = 0; node < config_.node_count; ++node) {
+            for (size_t node = 0; node < result.node_count; ++node) {
                 const double distance = poseDistance(result.vehicles[participant].nodes[node].disc_center,
                                                      obstacle.disc_center);
                 const double clearance = distance - required;
@@ -467,6 +687,21 @@ CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
         result.reason = write_error;
         return result;
     }
+    std::ofstream yaml(case_path / "optimization_input.yaml", std::ios::app);
+    if (!yaml) {
+        result.reason = "cannot append initial guess timing to optimization_input.yaml";
+        return result;
+    }
+    yaml << std::boolalpha << std::fixed << std::setprecision(9)
+         << "initial_guess_grid: {automatic: " << guess.automatic_timing
+         << ", node_count: " << guess.node_count
+         << ", total_time: " << guess.total_time
+         << ", average_dt: " << guess.average_dt << "}\n";
+    yaml.close();
+    if (!yaml) {
+        result.reason = "failed while appending initial guess timing";
+        return result;
+    }
     std::ofstream csv(case_path / "initial_guess.csv", std::ios::trunc);
     if (!csv) {
         result.reason = "cannot open initial_guess.csv";
@@ -477,7 +712,9 @@ CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
            "rear_x,rear_y,heading,signed_speed,front_steer,acceleration,steer_rate,"
            "aabb_index,disc_center_x,disc_center_y,speed_source,steer_source,"
            "acceleration_source,steer_rate_source,kinematic_position_residual,"
-           "kinematic_heading_residual\n";
+           "kinematic_heading_residual,grid_node_count,grid_total_time,"
+           "grid_average_dt,reference_length,estimated_travel_time,"
+           "direction_changes\n";
     csv << std::fixed << std::setprecision(9);
     for (const VehicleInitialGuess& vehicle : guess.vehicles) {
         for (const InitialGuessNode& node : vehicle.nodes) {
@@ -493,7 +730,11 @@ CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
                 << guessValueSourceName(node.acceleration_source) << ','
                 << guessValueSourceName(node.steer_rate_source) << ','
                 << node.kinematic_position_residual << ','
-                << node.kinematic_heading_residual << '\n';
+                << node.kinematic_heading_residual << ',' << guess.node_count << ','
+                << guess.total_time << ',' << guess.average_dt << ','
+                << vehicle.diagnostics.reference_length << ','
+                << vehicle.diagnostics.estimated_travel_time << ','
+                << vehicle.diagnostics.direction_changes << '\n';
         }
     }
     if (!csv) {

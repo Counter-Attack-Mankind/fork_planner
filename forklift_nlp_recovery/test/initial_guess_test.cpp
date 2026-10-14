@@ -70,12 +70,178 @@ fnr::NlpOptimizationInput makeInput(const std::vector<int>& ids) {
 
 fnr::InitialGuessGenerator generator(size_t nodes = 9, double total_time = 8.0) {
     fnr::InitialGuessConfig config;
+    config.automatic = false;
     config.node_count = nodes;
     config.total_time = total_time;
     return fnr::InitialGuessGenerator(config);
 }
 
+fnr::InitialGuessGenerator automaticGenerator(size_t min_nodes = 11,
+                                              size_t max_nodes = 101,
+                                              double target_dt = 0.2,
+                                              double margin = 1.2) {
+    fnr::InitialGuessConfig config;
+    config.automatic = true;
+    config.target_dt = target_dt;
+    config.min_nodes = min_nodes;
+    config.max_nodes = max_nodes;
+    config.time_margin = margin;
+    return fnr::InitialGuessGenerator(config);
+}
+
 }  // namespace
+
+TEST(InitialGuessTest, AutomaticGridScalesWithReferenceLengthAndMotionLimits) {
+    fnr::NlpOptimizationInput short_input = makeInput({2});
+    short_input.vehicles.front() = makeVehicle(2, 0.0, {0, 0});
+    fnr::NlpOptimizationInput long_input = makeInput({9});
+    long_input.vehicles.front() = makeVehicle(
+        9, 0.0, {0, 0, 0, 0, 0, 0, 0, 0, 0});
+    long_input.vehicles.front().corridor = {{-0.25, 4.0, -0.4, 0.4}};
+
+    const fnr::NlpInitialGuess short_guess = automaticGenerator().generate(short_input);
+    const fnr::NlpInitialGuess long_guess = automaticGenerator().generate(long_input);
+    ASSERT_TRUE(short_guess.generated) << short_guess.reason;
+    ASSERT_TRUE(long_guess.generated) << long_guess.reason;
+    EXPECT_TRUE(short_guess.automatic_timing);
+    EXPECT_GE(short_guess.node_count, 11U);
+    EXPECT_LE(long_guess.node_count, 101U);
+    EXPECT_GT(long_guess.total_time, short_guess.total_time);
+    EXPECT_GT(long_guess.node_count, short_guess.node_count);
+    EXPECT_LE(short_guess.average_dt, 0.2 + 1e-12);
+    EXPECT_LE(long_guess.average_dt, 0.2 + 1e-12);
+    EXPECT_NEAR(short_guess.total_time,
+                short_guess.vehicles.front().diagnostics.estimated_travel_time * 1.2,
+                1e-9);
+}
+
+TEST(InitialGuessTest, AutomaticGridUsesLongestVehicleAndSupportsNonContiguousIds) {
+    fnr::NlpOptimizationInput input = makeInput({2, 5, 9});
+    input.vehicles[0] = makeVehicle(2, 0.0, {0, 0});
+    input.vehicles[1] = makeVehicle(5, 0.8, {0, 0, 0, 0});
+    input.vehicles[2] = makeVehicle(9, 1.6, {0, 0, 0, 0, 0, 0});
+    input.vehicles[2].corridor = {{-0.25, 3.0, 1.2, 2.0}};
+    const fnr::NlpInitialGuess guess = automaticGenerator().generate(input);
+    ASSERT_TRUE(guess.generated) << guess.reason;
+    ASSERT_EQ(guess.vehicles.size(), 3U);
+    double longest_estimate = 0.0;
+    for (const auto& vehicle : guess.vehicles) {
+        longest_estimate = std::max(
+            longest_estimate, vehicle.diagnostics.estimated_travel_time);
+        ASSERT_EQ(vehicle.nodes.size(), guess.node_count);
+        for (size_t node = 0; node < guess.node_count; ++node) {
+            EXPECT_DOUBLE_EQ(vehicle.nodes[node].time, guess.time_grid[node]);
+        }
+    }
+    EXPECT_NEAR(guess.total_time, longest_estimate * 1.2, 1e-9);
+    EXPECT_EQ(guess.vehicles[0].id, 2);
+    EXPECT_EQ(guess.vehicles[1].id, 5);
+    EXPECT_EQ(guess.vehicles[2].id, 9);
+}
+
+TEST(InitialGuessTest, ConnectorAndDirectionChangeIncreaseAutomaticTiming) {
+    fnr::NlpOptimizationInput straight = makeInput({3});
+    straight.vehicles.front() = makeVehicle(3, 0.0, {0, 0, 0, 0});
+    fnr::NlpOptimizationInput offset = straight;
+    offset.vehicles.front().initial_state.rear_axle_pose.y = -0.3;
+    offset.vehicles.front().corridor = {{-0.25, 2.0, -0.5, 0.4}};
+    fnr::NlpOptimizationInput reversing = straight;
+    reversing.vehicles.front() = makeVehicle(3, 0.0, {0, 0, 1, 1});
+
+    const auto straight_guess = automaticGenerator().generate(straight);
+    const auto offset_guess = automaticGenerator().generate(offset);
+    const auto reversing_guess = automaticGenerator().generate(reversing);
+    ASSERT_TRUE(straight_guess.generated) << straight_guess.reason;
+    ASSERT_TRUE(offset_guess.generated) << offset_guess.reason;
+    ASSERT_TRUE(reversing_guess.generated) << reversing_guess.reason;
+    EXPECT_GT(offset_guess.vehicles.front().diagnostics.reference_length,
+              straight_guess.vehicles.front().diagnostics.reference_length);
+    EXPECT_GT(offset_guess.total_time, straight_guess.total_time);
+    EXPECT_EQ(reversing_guess.vehicles.front().diagnostics.direction_changes, 1U);
+    EXPECT_GT(reversing_guess.total_time, straight_guess.total_time);
+}
+
+TEST(InitialGuessTest, CoincidentEndpointCanProduceStationaryAutomaticGuess) {
+    fnr::NlpOptimizationInput input = makeInput({4});
+    auto& vehicle = input.vehicles.front();
+    vehicle.initial_state.longitudinal_speed = 0.0;
+    vehicle.terminal.pose = vehicle.initial_state.rear_axle_pose;
+    vehicle.terminal.path_s = vehicle.path_s;
+    vehicle.terminal.type = vehicle.original_path.front().type;
+    const fnr::NlpInitialGuess guess = automaticGenerator().generate(input);
+    ASSERT_TRUE(guess.generated) << guess.reason;
+    EXPECT_EQ(guess.node_count, 11U);
+    EXPECT_DOUBLE_EQ(guess.total_time, 2.0);
+    EXPECT_DOUBLE_EQ(guess.average_dt, 0.2);
+    EXPECT_DOUBLE_EQ(guess.vehicles.front().diagnostics.reference_length, 0.0);
+    for (const auto& node : guess.vehicles.front().nodes) {
+        EXPECT_DOUBLE_EQ(node.rear_axle_pose.x,
+                         vehicle.initial_state.rear_axle_pose.x);
+        EXPECT_DOUBLE_EQ(node.rear_axle_pose.y,
+                         vehicle.initial_state.rear_axle_pose.y);
+    }
+}
+
+TEST(InitialGuessTest, CoincidentPositionDoesNotHideRequiredHeadingChange) {
+    fnr::NlpOptimizationInput input = makeInput({4});
+    auto& vehicle = input.vehicles.front();
+    vehicle.initial_state.longitudinal_speed = 0.0;
+    vehicle.original_path = {{{0.0, 0.0, 0.0}, 0.0, 0},
+                             {{0.0, 0.0, 0.2}, 0.0, 0}};
+    vehicle.initial_state.rear_axle_pose = vehicle.original_path.front().pose;
+    vehicle.path_s = 0.0;
+    vehicle.terminal.pose = vehicle.original_path.back().pose;
+    vehicle.terminal.path_s = 0.0;
+    vehicle.terminal.type = 0;
+    vehicle.corridor = {{-0.3, 0.3, -0.3, 0.3}};
+    const fnr::NlpInitialGuess guess = automaticGenerator().generate(input);
+    EXPECT_FALSE(guess.generated);
+    EXPECT_NE(guess.reason.find("terminal pose does not match"), std::string::npos);
+}
+
+TEST(InitialGuessTest, CoincidentEndpointsStillFollowNonzeroReferencePath) {
+    fnr::NlpOptimizationInput input = makeInput({10});
+    auto& vehicle = input.vehicles.front();
+    vehicle.initial_state.longitudinal_speed = 0.0;
+    vehicle.original_path = {{{0.0, 0.0, 0.0}, 0.0, 0},
+                             {{0.4, 0.0, 0.0}, 0.4, 0},
+                             {{0.0, 0.0, M_PI}, 0.8, 0}};
+    vehicle.initial_state.rear_axle_pose = vehicle.original_path.front().pose;
+    vehicle.path_s = 0.0;
+    vehicle.terminal.pose = vehicle.original_path.back().pose;
+    vehicle.terminal.path_s = 0.8;
+    vehicle.terminal.type = 0;
+    vehicle.corridor = {{-0.3, 0.7, -0.3, 0.3}};
+    const fnr::NlpInitialGuess guess = automaticGenerator().generate(input);
+    ASSERT_TRUE(guess.generated) << guess.reason;
+    EXPECT_DOUBLE_EQ(guess.vehicles.front().diagnostics.reference_length, 0.8);
+    EXPECT_GT(guess.vehicles.front().diagnostics.estimated_travel_time, 0.0);
+    const auto& nodes = guess.vehicles.front().nodes;
+    EXPECT_GT(std::max_element(nodes.begin(), nodes.end(),
+        [](const auto& first, const auto& second) {
+            return first.rear_axle_pose.x < second.rear_axle_pose.x;
+        })->rear_axle_pose.x, 0.3);
+}
+
+TEST(InitialGuessTest, AutomaticNodeCountHonorsConfiguredMaximum) {
+    fnr::NlpOptimizationInput input = makeInput({12});
+    input.vehicles.front() = makeVehicle(
+        12, 0.0, {0, 0, 0, 0, 0, 0, 0, 0, 0});
+    input.vehicles.front().corridor = {{-0.25, 4.0, -0.4, 0.4}};
+    const fnr::NlpInitialGuess guess = automaticGenerator(7, 15).generate(input);
+    ASSERT_TRUE(guess.generated) << guess.reason;
+    EXPECT_EQ(guess.node_count, 15U);
+    EXPECT_GT(guess.average_dt, 0.2);
+}
+
+TEST(InitialGuessTest, ManualModeKeepsConfiguredDimensions) {
+    const fnr::NlpInitialGuess guess = generator(23, 7.5).generate(makeInput({6}));
+    ASSERT_TRUE(guess.generated) << guess.reason;
+    EXPECT_FALSE(guess.automatic_timing);
+    EXPECT_EQ(guess.node_count, 23U);
+    EXPECT_DOUBLE_EQ(guess.total_time, 7.5);
+    EXPECT_DOUBLE_EQ(guess.average_dt, 7.5 / 22.0);
+}
 
 TEST(InitialGuessTest, BuildsTwoAndThreeVehicleCommonTimeGridWithExactBounds) {
     for (const std::vector<int> ids : {std::vector<int>{2, 9},
@@ -239,6 +405,13 @@ TEST(InitialGuessTest, SavesConsecutiveCasesWithoutOverwriteAndMatchesMemory) {
     EXPECT_NE(first.case_directory, second.case_directory);
     EXPECT_TRUE(std::filesystem::exists(std::filesystem::path(first.case_directory) /
                                         "optimization_input.yaml"));
+    std::ifstream yaml(std::filesystem::path(first.case_directory) /
+                       "optimization_input.yaml");
+    ASSERT_TRUE(yaml.good());
+    const std::string yaml_text((std::istreambuf_iterator<char>(yaml)),
+                                std::istreambuf_iterator<char>());
+    EXPECT_NE(yaml_text.find("initial_guess_grid:"), std::string::npos);
+    EXPECT_NE(yaml_text.find("node_count: 7"), std::string::npos);
     const std::filesystem::path csv_path = std::filesystem::path(first.case_directory) /
                                            "initial_guess.csv";
     std::ifstream csv(csv_path);

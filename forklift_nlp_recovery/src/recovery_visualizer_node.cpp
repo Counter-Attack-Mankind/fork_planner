@@ -110,6 +110,8 @@ public:
                                        "/tmp/forklift_nlp_recovery_input.yaml");
         private_nh_.param<std::string>("results_dir", results_directory_,
                                        "package://forklift_nlp_recovery/results");
+        private_nh_.param("initial_guess_auto", initial_guess_config_.automatic,
+                          initial_guess_config_.automatic);
         int initial_guess_nodes = static_cast<int>(initial_guess_config_.node_count);
         private_nh_.param("initial_guess_nodes", initial_guess_nodes,
                           initial_guess_nodes);
@@ -118,6 +120,21 @@ public:
         private_nh_.param("initial_guess_total_time",
                           initial_guess_config_.total_time,
                           initial_guess_config_.total_time);
+        private_nh_.param("initial_guess_target_dt", initial_guess_config_.target_dt,
+                          initial_guess_config_.target_dt);
+        int initial_guess_min_nodes = static_cast<int>(initial_guess_config_.min_nodes);
+        int initial_guess_max_nodes = static_cast<int>(initial_guess_config_.max_nodes);
+        private_nh_.param("initial_guess_min_nodes", initial_guess_min_nodes,
+                          initial_guess_min_nodes);
+        private_nh_.param("initial_guess_max_nodes", initial_guess_max_nodes,
+                          initial_guess_max_nodes);
+        initial_guess_config_.min_nodes = initial_guess_min_nodes > 0 ?
+            static_cast<size_t>(initial_guess_min_nodes) : 0;
+        initial_guess_config_.max_nodes = initial_guess_max_nodes > 0 ?
+            static_cast<size_t>(initial_guess_max_nodes) : 0;
+        private_nh_.param("initial_guess_time_margin",
+                          initial_guess_config_.time_margin,
+                          initial_guess_config_.time_margin);
         private_nh_.param("vehicle_radius", config_.vehicle_radius,
                           config_.vehicle_radius);
         private_nh_.param("shelf_inflation_reduction",
@@ -181,13 +198,18 @@ public:
         }
         ROS_INFO("[nlp_recovery] read-only phase-1 visualizer: mode=%s debug_ids=[%s] "
                  "disc_radius=%.4f boundary_clearance=%.4f "
-                 "shelf_inflation=%.4f topic=%s output=%s nodes=%zu T=%.3f results=%s",
+                 "shelf_inflation=%.4f topic=%s output=%s timing=%s "
+                 "manual=(N=%zu,T=%.3f) auto=(dt=%.3f,N=[%zu,%zu],margin=%.2f) "
+                 "results=%s",
                  mode_name_.c_str(), selected_ids.str().c_str(),
                  builder_->vehicleRadius(),
                  builder_->boundaryClearance(), builder_->shelfInflation(),
                  snapshot_topic_.c_str(), debug_output_file_.c_str(),
-                 initial_guess_config_.node_count,
-                 initial_guess_config_.total_time, results_directory_.c_str());
+                 initial_guess_config_.automatic ? "auto" : "manual",
+                 initial_guess_config_.node_count, initial_guess_config_.total_time,
+                 initial_guess_config_.target_dt, initial_guess_config_.min_nodes,
+                 initial_guess_config_.max_nodes, initial_guess_config_.time_margin,
+                 results_directory_.c_str());
     }
 
 private:
@@ -489,10 +511,12 @@ private:
                       guess.reason.c_str());
             return;
         }
-        ROS_INFO("[nlp_recovery][initial_guess] vehicles=%zu nodes=%zu T=%.3f "
+        ROS_INFO("[nlp_recovery][initial_guess] vehicles=%zu timing=%s N=%zu "
+                 "T_init=%.3f dt=%.3f "
                  "status=%s max_pos_res=%.6f max_yaw_res=%.6f bounds=%zu "
                  "vehicle_collisions=%zu static_collisions=%zu min_clear=(%.6f,%.6f)",
-                 guess.vehicles.size(), guess.node_count, guess.total_time,
+                 guess.vehicles.size(), guess.automatic_timing ? "auto" : "manual",
+                 guess.node_count, guess.total_time, guess.average_dt,
                  guess.constraints_satisfied ? "valid" : "constraint_violation",
                  guess.diagnostics.max_kinematic_position_residual,
                  guess.diagnostics.max_kinematic_heading_residual,
@@ -503,9 +527,11 @@ private:
                  guess.diagnostics.minimum_static_clearance);
         for (const VehicleInitialGuess& vehicle : guess.vehicles) {
             const auto& d = vehicle.diagnostics;
-            ROS_INFO("[nlp_recovery][initial_guess] V%d initial_error=(%.3g m,%.3g rad,%.3g m/s) "
+            ROS_INFO("[nlp_recovery][initial_guess] V%d length=%.3f estimate=%.3f "
+                     "cusps=%zu initial_error=(%.3g m,%.3g rad,%.3g m/s) "
                      "end=(%.3g m,%.3g rad) aabb=%s max_res=(%.6f m,%.6f rad)",
-                     vehicle.id, d.start_position_error, d.start_heading_error,
+                     vehicle.id, d.reference_length, d.estimated_travel_time,
+                     d.direction_changes, d.start_position_error, d.start_heading_error,
                      d.start_speed_magnitude_error, d.terminal_position_error,
                      d.terminal_heading_error,
                      vehicle.aabb_assignment_valid ? "ok" : "failed",
