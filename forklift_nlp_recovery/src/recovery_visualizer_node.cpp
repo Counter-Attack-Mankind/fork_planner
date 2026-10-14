@@ -1,4 +1,5 @@
 #include <ros/ros.h>
+#include <ros/package.h>
 #include <XmlRpcValue.h>
 
 #include <algorithm>
@@ -6,6 +7,7 @@
 #include <cmath>
 #include <iomanip>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -20,6 +22,7 @@
 #include "forklift_map/forklift_map.h"
 #include "forklift_map/map_param.h"
 #include "forklift_nlp_recovery/corridor_builder.h"
+#include "forklift_nlp_recovery/initial_guess.h"
 #include "forklift_nlp_recovery/optimization_input.h"
 
 namespace forklift_nlp_recovery {
@@ -105,6 +108,16 @@ public:
                                        "/forklift_planner/recovery_snapshot");
         private_nh_.param<std::string>("debug_output_file", debug_output_file_,
                                        "/tmp/forklift_nlp_recovery_input.yaml");
+        private_nh_.param<std::string>("results_dir", results_directory_,
+                                       "package://forklift_nlp_recovery/results");
+        int initial_guess_nodes = static_cast<int>(initial_guess_config_.node_count);
+        private_nh_.param("initial_guess_nodes", initial_guess_nodes,
+                          initial_guess_nodes);
+        initial_guess_config_.node_count = initial_guess_nodes > 0 ?
+            static_cast<size_t>(initial_guess_nodes) : 0;
+        private_nh_.param("initial_guess_total_time",
+                          initial_guess_config_.total_time,
+                          initial_guess_config_.total_time);
         private_nh_.param("vehicle_radius", config_.vehicle_radius,
                           config_.vehicle_radius);
         private_nh_.param("shelf_inflation_reduction",
@@ -147,6 +160,16 @@ public:
                         vehicle_parameters.fixed_retreat_speed, 0.10);
         input_builder_ = std::make_unique<OptimizationInputBuilder>(
             *builder_, vehicle_parameters);
+        initial_guess_generator_ = std::make_unique<InitialGuessGenerator>(
+            initial_guess_config_);
+        const std::string package_prefix = "package://forklift_nlp_recovery";
+        if (results_directory_.compare(0, package_prefix.size(), package_prefix) == 0) {
+            const std::string package_path = ros::package::getPath("forklift_nlp_recovery");
+            if (!package_path.empty()) {
+                results_directory_ = package_path +
+                    results_directory_.substr(package_prefix.size());
+            }
+        }
         marker_pub_ = private_nh_.advertise<visualization_msgs::MarkerArray>(
             "/forklift_nlp_recovery/markers", 1, true);
         snapshot_sub_ = private_nh_.subscribe(
@@ -158,11 +181,13 @@ public:
         }
         ROS_INFO("[nlp_recovery] read-only phase-1 visualizer: mode=%s debug_ids=[%s] "
                  "disc_radius=%.4f boundary_clearance=%.4f "
-                 "shelf_inflation=%.4f topic=%s output=%s",
+                 "shelf_inflation=%.4f topic=%s output=%s nodes=%zu T=%.3f results=%s",
                  mode_name_.c_str(), selected_ids.str().c_str(),
                  builder_->vehicleRadius(),
                  builder_->boundaryClearance(), builder_->shelfInflation(),
-                 snapshot_topic_.c_str(), debug_output_file_.c_str());
+                 snapshot_topic_.c_str(), debug_output_file_.c_str(),
+                 initial_guess_config_.node_count,
+                 initial_guess_config_.total_time, results_directory_.c_str());
     }
 
 private:
@@ -449,6 +474,81 @@ private:
         }
     }
 
+    std::string inputIdentity(const OptimizationInputBuildResult& build) const {
+        std::ostringstream key;
+        key << build.input.source_mode;
+        for (const NlpVehicleInput& vehicle : build.input.vehicles) {
+            key << ':' << vehicle.id << '@' << vehicle.path_gen;
+        }
+        return key.str();
+    }
+
+    void logInitialGuess(const NlpInitialGuess& guess) const {
+        if (!guess.generated) {
+            ROS_ERROR("[nlp_recovery][initial_guess] structural failure: %s",
+                      guess.reason.c_str());
+            return;
+        }
+        ROS_INFO("[nlp_recovery][initial_guess] vehicles=%zu nodes=%zu T=%.3f "
+                 "status=%s max_pos_res=%.6f max_yaw_res=%.6f bounds=%zu "
+                 "vehicle_collisions=%zu static_collisions=%zu min_clear=(%.6f,%.6f)",
+                 guess.vehicles.size(), guess.node_count, guess.total_time,
+                 guess.constraints_satisfied ? "valid" : "constraint_violation",
+                 guess.diagnostics.max_kinematic_position_residual,
+                 guess.diagnostics.max_kinematic_heading_residual,
+                 guess.diagnostics.bound_violation_nodes,
+                 guess.diagnostics.participant_collision_nodes,
+                 guess.diagnostics.static_collision_nodes,
+                 guess.diagnostics.minimum_participant_clearance,
+                 guess.diagnostics.minimum_static_clearance);
+        for (const VehicleInitialGuess& vehicle : guess.vehicles) {
+            const auto& d = vehicle.diagnostics;
+            ROS_INFO("[nlp_recovery][initial_guess] V%d initial_error=(%.3g m,%.3g rad,%.3g m/s) "
+                     "end=(%.3g m,%.3g rad) aabb=%s max_res=(%.6f m,%.6f rad)",
+                     vehicle.id, d.start_position_error, d.start_heading_error,
+                     d.start_speed_magnitude_error, d.terminal_position_error,
+                     d.terminal_heading_error,
+                     vehicle.aabb_assignment_valid ? "ok" : "failed",
+                     d.max_kinematic_position_residual,
+                     d.max_kinematic_heading_residual);
+        }
+        std::set<std::string> collision_pairs;
+        for (const InitialCollision& collision : guess.diagnostics.collisions) {
+            collision_pairs.insert("V" + std::to_string(collision.vehicle_a_id) +
+                (collision.vehicle_b_is_static ? "-staticV" : "-V") +
+                std::to_string(collision.vehicle_b_id));
+        }
+        if (!collision_pairs.empty()) {
+            std::ostringstream pairs;
+            for (const std::string& pair : collision_pairs) {
+                if (pairs.tellp() > 0) pairs << ',';
+                pairs << pair;
+            }
+            ROS_WARN("[nlp_recovery][initial_guess] colliding_pairs=%s",
+                     pairs.str().c_str());
+        }
+    }
+
+    NlpInitialGuess generateInitialGuess(const OptimizationInputBuildResult& build,
+                                         bool save_case,
+                                         bool* case_saved = nullptr) {
+        if (case_saved != nullptr) *case_saved = false;
+        NlpInitialGuess guess = initial_guess_generator_->generate(build.input);
+        if (save_case || build.input.source_mode == "auto") logInitialGuess(guess);
+        if (!guess.generated || !save_case) return guess;
+        const CaseSaveResult saved = saveInitialGuessCase(
+            build, guess, results_directory_);
+        if (saved.success) {
+            if (case_saved != nullptr) *case_saved = true;
+            ROS_INFO("[nlp_recovery][initial_guess] saved %s at %s",
+                     saved.case_id.c_str(), saved.case_directory.c_str());
+        } else {
+            ROS_ERROR("[nlp_recovery][initial_guess] save failed: %s",
+                      saved.reason.c_str());
+        }
+        return guess;
+    }
+
     void addAutoMarkers(visualization_msgs::MarkerArray& markers,
                         const sandbox_msgs::RecoverySnapshot& snapshot) {
         if (snapshot.recovery_phase !=
@@ -471,6 +571,8 @@ private:
             if (build.complete) {
                 locked_.active = true;
                 locked_.build = std::move(build);
+                locked_.initial_guess = generateInitialGuess(
+                    locked_.build, locked_.build.input.valid);
                 ROS_WARN("[nlp_recovery][auto] locked NLP_PREP input "
                          "participants=%zu valid=%d trigger=%s input=%s",
                          locked_.build.input.vehicles.size(),
@@ -527,6 +629,15 @@ private:
         const OptimizationInputBuildResult build = input_builder_->build(
             snapshot, debug_vehicle_ids_, "debug");
         writeDebugInput(build);
+        const std::string identity = inputIdentity(build);
+        const bool save_case = build.complete && build.input.valid &&
+                               identity != last_debug_case_identity_;
+        bool case_saved = false;
+        latest_debug_initial_guess_ = generateInitialGuess(
+            build, save_case, &case_saved);
+        if (case_saved) {
+            last_debug_case_identity_ = identity;
+        }
         for (size_t i = 0; i < build.input.vehicles.size(); ++i) {
             const NlpVehicleInput& vehicle = build.input.vehicles[i];
             addVehicleAnalysis(markers, vehicle,
@@ -557,6 +668,7 @@ private:
     struct LockedTransaction {
         bool active = false;
         OptimizationInputBuildResult build;
+        NlpInitialGuess initial_guess;
     };
 
     ros::NodeHandle private_nh_;
@@ -567,12 +679,17 @@ private:
     CorridorConfig config_;
     std::unique_ptr<CorridorBuilder> builder_;
     std::unique_ptr<OptimizationInputBuilder> input_builder_;
+    std::unique_ptr<InitialGuessGenerator> initial_guess_generator_;
+    InitialGuessConfig initial_guess_config_;
     OperatingMode mode_ = OperatingMode::DEBUG;
     std::string mode_name_ = "debug";
     LockedTransaction locked_;
     std::vector<int> debug_vehicle_ids_;
     std::string snapshot_topic_;
     std::string debug_output_file_;
+    std::string results_directory_;
+    std::string last_debug_case_identity_;
+    NlpInitialGuess latest_debug_initial_guess_;
 };
 
 }  // namespace forklift_nlp_recovery

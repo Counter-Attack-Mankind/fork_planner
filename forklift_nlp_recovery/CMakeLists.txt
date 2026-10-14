@@ -6,6 +6,7 @@ add_compile_options(-O2 -Wall -Wextra)
 
 find_package(catkin REQUIRED COMPONENTS
   roscpp
+  roslib
   geometry_msgs
   std_msgs
   visualization_msgs
@@ -15,8 +16,8 @@ find_package(catkin REQUIRED COMPONENTS
 
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input
-  CATKIN_DEPENDS roscpp geometry_msgs std_msgs visualization_msgs forklift_map sandbox_msgs
+  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_initial_guess
+  CATKIN_DEPENDS roscpp roslib geometry_msgs std_msgs visualization_msgs forklift_map sandbox_msgs
 )
 
 include_directories(include ${catkin_INCLUDE_DIRS})
@@ -32,9 +33,17 @@ target_link_libraries(forklift_nlp_recovery_input
   ${catkin_LIBRARIES}
 )
 
+add_library(forklift_nlp_recovery_initial_guess src/initial_guess.cpp)
+add_dependencies(forklift_nlp_recovery_initial_guess ${catkin_EXPORTED_TARGETS})
+target_link_libraries(forklift_nlp_recovery_initial_guess
+  forklift_nlp_recovery_input
+  ${catkin_LIBRARIES}
+)
+
 add_executable(recovery_visualizer_node src/recovery_visualizer_node.cpp)
 add_dependencies(recovery_visualizer_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(recovery_visualizer_node
+  forklift_nlp_recovery_initial_guess
   forklift_nlp_recovery_input
   forklift_nlp_recovery_geometry
   forklift_map_lib
@@ -62,9 +71,21 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES}
     )
   endif()
+
+  catkin_add_gtest(initial_guess_test test/initial_guess_test.cpp)
+  if(TARGET initial_guess_test)
+    add_dependencies(initial_guess_test ${catkin_EXPORTED_TARGETS})
+    target_link_libraries(initial_guess_test
+      forklift_nlp_recovery_initial_guess
+      forklift_nlp_recovery_input
+      forklift_nlp_recovery_geometry
+      ${catkin_LIBRARIES}
+    )
+  endif()
 endif()
 
 install(TARGETS forklift_nlp_recovery_geometry forklift_nlp_recovery_input
+                forklift_nlp_recovery_initial_guess
                 recovery_visualizer_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
@@ -75,4 +96,9 @@ install(DIRECTORY include/${PROJECT_NAME}/
 )
 install(DIRECTORY config launch rviz
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+install(DIRECTORY results/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/results
+  PATTERN "case_*" EXCLUDE
+  PATTERN ".git*" EXCLUDE
 )

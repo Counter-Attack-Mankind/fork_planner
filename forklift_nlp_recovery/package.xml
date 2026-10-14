@@ -2,12 +2,13 @@
 <package format="2">
   <name>forklift_nlp_recovery</name>
   <version>0.1.0</version>
-  <description>AABB corridor diagnostics and read-only NLP recovery input construction.</description>
+  <description>Read-only NLP recovery input, corridor diagnostics, and initial guess generation.</description>
   <maintainer email="yssun@hnu.edu.cn">Yueshuo Sun</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>catkin</buildtool_depend>
   <depend>roscpp</depend>
+  <depend>roslib</depend>
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
   <depend>visualization_msgs</depend>
