@@ -294,6 +294,7 @@ TEST(InitialGuessTest, KeepsForwardReverseSignsAndStopsAtSampledCusp) {
     input.vehicles.front() = makeVehicle(3, 0.0, {0, 0, 1, 1});
     const fnr::NlpInitialGuess guess = generator(13, 12.0).generate(input);
     ASSERT_TRUE(guess.generated) << guess.reason;
+    EXPECT_FALSE(guess.vehicles.front().start_aabb_exempt);
     bool found_positive = false;
     bool found_negative = false;
     bool checked_transition = false;
@@ -356,6 +357,32 @@ TEST(InitialGuessTest, AssignsAnLShapedConnectedCorridorInPathOrder) {
     }
 }
 
+TEST(InitialGuessTest, ExemptsOnlyOutsideStartAndUsesFirstForwardAabb) {
+    fnr::NlpOptimizationInput input = makeInput({2});
+    auto& vehicle = input.vehicles.front();
+    vehicle.initial_state.rear_axle_pose.x = -0.25;
+    vehicle.initial_state.longitudinal_speed = 0.0;
+    vehicle.corridor = {{-0.10, 1.40, -0.30, 0.30}};
+    vehicle.corridor_seeds = {{-0.1765, 0.0, 0.0},
+                              {-0.05, 0.0, 0.0},
+                              {0.50, 0.0, 0.0}};
+
+    const fnr::NlpInitialGuess guess = generator(11, 4.0).generate(input);
+    ASSERT_TRUE(guess.generated) << guess.reason;
+    ASSERT_EQ(guess.vehicles.size(), 1U);
+    const auto& result = guess.vehicles.front();
+    EXPECT_TRUE(result.start_aabb_exempt);
+    EXPECT_TRUE(result.aabb_assignment_valid);
+    EXPECT_EQ(result.nodes.front().aabb_index, 0);
+    EXPECT_LT(result.nodes.front().disc_center.x, vehicle.corridor.front().min_x);
+    for (size_t node = 1; node < result.nodes.size(); ++node) {
+        EXPECT_GE(result.nodes[node].disc_center.x,
+                  vehicle.corridor.front().min_x - 1e-8);
+        EXPECT_LE(result.nodes[node].disc_center.x,
+                  vehicle.corridor.front().max_x + 1e-8);
+    }
+}
+
 TEST(InitialGuessTest, RejectsInvalidInputAndIllegalAabbAssignment) {
     fnr::NlpOptimizationInput invalid = makeInput({1});
     invalid.valid = false;
@@ -366,6 +393,16 @@ TEST(InitialGuessTest, RejectsInvalidInputAndIllegalAabbAssignment) {
     const fnr::NlpInitialGuess guess = generator().generate(uncovered);
     EXPECT_FALSE(guess.generated);
     EXPECT_NE(guess.reason.find("AABB assignment failed"), std::string::npos);
+
+    fnr::NlpOptimizationInput late_entry = makeInput({2});
+    auto& vehicle = late_entry.vehicles.front();
+    vehicle.initial_state.rear_axle_pose.x = -0.50;
+    vehicle.initial_state.longitudinal_speed = 0.0;
+    vehicle.corridor = {{-0.10, 1.40, -0.30, 0.30}};
+    vehicle.corridor_seeds = {{-0.05, 0.0, 0.0}};
+    const fnr::NlpInitialGuess late_guess = generator(11, 4.0).generate(late_entry);
+    EXPECT_FALSE(late_guess.generated);
+    EXPECT_NE(late_guess.reason.find("node 1"), std::string::npos);
 }
 
 TEST(InitialGuessTest, ReportsParticipantAndSelectedStaticCollisions) {

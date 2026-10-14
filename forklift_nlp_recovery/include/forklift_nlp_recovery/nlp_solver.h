@@ -37,6 +37,7 @@ struct OptimizedTrajectoryNode {
 
 struct OptimizedVehicleTrajectory {
     int id = -1;
+    bool start_aabb_exempt = false;
     std::vector<OptimizedTrajectoryNode> nodes;
 };
 

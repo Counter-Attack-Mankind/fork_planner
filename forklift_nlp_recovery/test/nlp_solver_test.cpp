@@ -147,6 +147,32 @@ TEST(NlpSolverTest, RejectsDisconnectedFixedAabbAssignmentBeforeSolve) {
     EXPECT_FALSE(result.solver_success);
 }
 
+TEST(NlpSolverTest, OutsideStartSkipsOnlyStartAndEntryIntervalAabbChecks) {
+    fnr::NlpOptimizationInput input = inputFor({2});
+    auto& source = input.vehicles.front();
+    source.initial_state.rear_axle_pose.x = -0.25;
+    source.initial_state.longitudinal_speed = 0.0;
+    source.corridor = {{-0.10, 1.20, -0.20, 0.20}};
+    source.corridor_seeds = {{-0.1765, 0.0, 0.0},
+                             {-0.05, 0.0, 0.0},
+                             {0.50, 0.0, 0.0}};
+    const fnr::NlpInitialGuess guess = initialGuess(input);
+    ASSERT_TRUE(guess.generated) << guess.reason;
+    ASSERT_TRUE(guess.vehicles.front().start_aabb_exempt);
+    const fnr::NlpSolveResult result = solver().solve(input, guess);
+    EXPECT_TRUE(result.problem_built) << result.reason;
+    EXPECT_TRUE(result.solver_success) << result.reason;
+    EXPECT_TRUE(result.validation_passed) << result.validation.reason;
+    ASSERT_EQ(result.vehicles.size(), 1U);
+    EXPECT_TRUE(result.vehicles.front().start_aabb_exempt);
+    EXPECT_EQ(result.validation.aabb_violation_samples, 0U);
+    EXPECT_EQ(result.validation.invalid_aabb_switches, 0U);
+    EXPECT_LT(result.vehicles.front().nodes.front().disc_center.x,
+              source.corridor.front().min_x);
+    EXPECT_GE(result.vehicles.front().nodes[1].disc_center.x,
+              source.corridor.front().min_x - 2e-4);
+}
+
 TEST(NlpSolverTest, ReportsInitialParticipantCollisionAsNotSafe) {
     fnr::NlpOptimizationInput input = inputFor({3, 8});
     input.vehicles[1] = vehicle(8, 0.0);

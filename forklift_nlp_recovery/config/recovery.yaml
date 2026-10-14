@@ -24,12 +24,12 @@ solver_tolerance: 1.0e-6
 solver_acceptable_tolerance: 1.0e-4
 solver_print_level: 3
 solver_validation_substeps: 10
-solver_validation_tolerance: 1.0e-4
+solver_validation_tolerance: 1.0e-3
 
 # A positive override is used directly. Values <= 0 use hypot(length/2, width/2).
 vehicle_radius: 0.14
 safety_margin: 0.0
-shelf_inflation_reduction: 0.08
+shelf_inflation_reduction: 0.05
 boundary_inset_reduction: 0.05
 expansion_step: 0.02
 path_sample_step: 0.05

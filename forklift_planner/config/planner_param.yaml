@@ -19,7 +19,7 @@ forklift_planner:
 
   # 主控制/仿真更新频率。10Hz 表示 dt=0.1s
   update_rate:  10.0   # Hz
-  simulation_speed: 1.0  # 普通多车仿真倍率；实车与 Batch 忽略
+  simulation_speed: 5.0  # 普通多车仿真倍率；实车与 Batch 忽略
   path_color_r: 0.2
   path_color_g: 0.8
   path_color_b: 1.0
@@ -29,8 +29,8 @@ forklift_planner:
 
   multi_vehicle:
     # 多车基础配置
-    vehicle_count: 2
-    random_seed: 2026
+    vehicle_count: 4
+    random_seed: 2024
     # true: 固定伪随机序列，使用 random_seed，便于重复实验与横向比较
     # false: 每次启动使用系统随机种子，任务目标序列会变化
     reproducible_task_random: true

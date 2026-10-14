@@ -71,6 +71,7 @@ struct VehicleInitialGuess {
     int id = -1;
     bool valid = false;
     bool aabb_assignment_valid = false;
+    bool start_aabb_exempt = false;
     std::string reason;
     std::vector<InitialGuessNode> nodes;
     VehicleInitialGuessDiagnostics diagnostics;

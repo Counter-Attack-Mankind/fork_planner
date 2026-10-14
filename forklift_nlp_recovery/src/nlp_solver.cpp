@@ -242,6 +242,7 @@ NlpSolutionValidation validateSolution(
                 validation.max_aabb_violation = kInfinity;
                 continue;
             }
+            if (node == 0 && vehicle.start_aabb_exempt) continue;
             const double violation = pointAabbViolation(
                 value.disc_center, source.corridor[value.aabb_index]);
             validation.max_aabb_violation = std::max(validation.max_aabb_violation,
@@ -285,12 +286,14 @@ NlpSolutionValidation validateSolution(
                 samples[index].push_back(state);
                 const Pose2d center = bodyCenter(
                     {state.x, state.y, state.yaw}, source.parameters.rear_axle_to_center);
-                const double violation = pointAabbUnionViolation(center, current_box,
-                                                                  next_box);
-                validation.max_aabb_violation = std::max(
-                    validation.max_aabb_violation, violation);
-                if (violation > config.validation_tolerance) {
-                    ++validation.aabb_violation_samples;
+                if (!(interval == 0 && vehicle.start_aabb_exempt)) {
+                    const double violation = pointAabbUnionViolation(
+                        center, current_box, next_box);
+                    validation.max_aabb_violation = std::max(
+                        validation.max_aabb_violation, violation);
+                    if (violation > config.validation_tolerance) {
+                        ++validation.aabb_violation_samples;
+                    }
                 }
             }
         }
@@ -501,8 +504,10 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
             const Aabb& box = vehicle.corridor[box_index];
             const casadi::MX center = symbolicCenter(state(casadi::Slice(), node),
                 vehicle.parameters.rear_axle_to_center);
-            constraints.add(center(0), box.min_x, box.max_x);
-            constraints.add(center(1), box.min_y, box.max_y);
+            if (!(node == 0 && guess->start_aabb_exempt)) {
+                constraints.add(center(0), box.min_x, box.max_x);
+                constraints.add(center(1), box.min_y, box.max_y);
+            }
             if (node + 1 == nodes) continue;
             const casadi::MX current_state = state(casadi::Slice(), node);
             const casadi::MX current_control = control(casadi::Slice(), node);
@@ -528,8 +533,10 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                                   std::min(box.max_x, next_box.max_x),
                                   std::max(box.min_y, next_box.min_y),
                                   std::min(box.max_y, next_box.max_y)};
-            constraints.add(midpoint_center(0), middle_box.min_x, middle_box.max_x);
-            constraints.add(midpoint_center(1), middle_box.min_y, middle_box.max_y);
+            if (!(node == 0 && guess->start_aabb_exempt)) {
+                constraints.add(midpoint_center(0), middle_box.min_x, middle_box.max_x);
+                constraints.add(midpoint_center(1), middle_box.min_y, middle_box.max_y);
+            }
             const casadi::MX acceleration = control(0, node);
             const casadi::MX steer_rate = control(1, node);
             objective += dt * (config_.acceleration_weight * acceleration * acceleration +
@@ -643,6 +650,7 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
         for (const SymbolicVehicle& symbolic : symbolic_vehicles) {
             OptimizedVehicleTrajectory trajectory;
             trajectory.id = symbolic.input->id;
+            trajectory.start_aabb_exempt = symbolic.guess->start_aabb_exempt;
             trajectory.nodes.resize(nodes);
             for (size_t node = 0; node < nodes; ++node) {
                 OptimizedTrajectoryNode& value = trajectory.nodes[node];

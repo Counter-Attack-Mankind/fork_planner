@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <ros/ros.h>
 #include <sstream>
 #include <system_error>
 
@@ -234,6 +235,30 @@ bool contains(const Aabb& box, const Pose2d& point, double tolerance) {
            point.y >= box.min_y - tolerance && point.y <= box.max_y + tolerance;
 }
 
+int containingAabb(const std::vector<Aabb>& corridor, const Pose2d& point,
+                   double tolerance) {
+    for (size_t box = 0; box < corridor.size(); ++box) {
+        if (contains(corridor[box], point, tolerance)) return static_cast<int>(box);
+    }
+    return -1;
+}
+
+int firstForwardAabb(const VehicleInitialGuess& guess, const NlpVehicleInput& input,
+                     double tolerance) {
+    const Pose2d& start = guess.nodes.front().disc_center;
+    for (const Pose2d& seed : input.corridor_seeds) {
+        if (poseDistance(seed, start) <= tolerance) continue;
+        const int box = containingAabb(input.corridor, seed, tolerance);
+        if (box >= 0) return box;
+    }
+    for (size_t node = 1; node < guess.nodes.size(); ++node) {
+        const int box = containingAabb(
+            input.corridor, guess.nodes[node].disc_center, tolerance);
+        if (box >= 0) return box;
+    }
+    return -1;
+}
+
 bool assignAabbs(VehicleInitialGuess& guess, const NlpVehicleInput& input,
                  double tolerance, std::string& reason) {
     if (input.corridor.empty()) {
@@ -250,6 +275,17 @@ bool assignAabbs(VehicleInitialGuess& guess, const NlpVehicleInput& input,
         if (contains(input.corridor[box], guess.nodes.front().disc_center, tolerance)) {
             cost[0][box] = static_cast<int>(box);
         }
+    }
+    const bool start_covered = std::any_of(cost.front().begin(), cost.front().end(),
+        [&](int value) { return value != unreachable; });
+    if (!start_covered) {
+        const int first_forward_box = firstForwardAabb(guess, input, tolerance);
+        if (first_forward_box < 0) {
+            reason = "start disc center is outside every AABB and the forward reference path never enters one";
+            return false;
+        }
+        guess.start_aabb_exempt = true;
+        cost[0][static_cast<size_t>(first_forward_box)] = first_forward_box;
     }
     for (size_t node = 1; node < node_count; ++node) {
         for (size_t box = 0; box < box_count; ++box) {
@@ -273,7 +309,7 @@ bool assignAabbs(VehicleInitialGuess& guess, const NlpVehicleInput& input,
     const auto best = std::min_element(cost.back().begin(), cost.back().end());
     if (best == cost.back().end() || *best == unreachable) {
         size_t first_uncovered = node_count;
-        for (size_t node = 0; node < node_count; ++node) {
+        for (size_t node = guess.start_aabb_exempt ? 1 : 0; node < node_count; ++node) {
             const bool covered = std::any_of(input.corridor.begin(), input.corridor.end(),
                 [&](const Aabb& box) { return contains(box, guess.nodes[node].disc_center, tolerance); });
             if (!covered) {
@@ -292,6 +328,10 @@ bool assignAabbs(VehicleInitialGuess& guess, const NlpVehicleInput& input,
     for (size_t reverse = node_count; reverse-- > 0;) {
         guess.nodes[reverse].aabb_index = box;
         if (reverse > 0) box = predecessor[reverse][static_cast<size_t>(box)];
+    }
+    if (guess.start_aabb_exempt) {
+        ROS_WARN("[nlp_recovery][AABB_START_EXEMPT] V%d start outside all AABBs; assign first forward AABB=%d; skip start AABB constraint and required entry-interval check.",
+                 input.id, guess.nodes.front().aabb_index);
     }
     return true;
 }
