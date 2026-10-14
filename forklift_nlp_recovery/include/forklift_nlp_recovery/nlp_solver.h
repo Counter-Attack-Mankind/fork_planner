@@ -1,0 +1,103 @@
+#pragma once
+
+#include <cstddef>
+#include <string>
+#include <vector>
+
+#include "forklift_nlp_recovery/initial_guess.h"
+
+namespace forklift_nlp_recovery {
+
+struct NlpSolverConfig {
+    double min_time_scale = 0.50;
+    double max_time_scale = 3.00;
+    double time_weight = 1.0;
+    double acceleration_weight = 1.0;
+    double steer_rate_weight = 5.0;
+    double control_smooth_weight = 5.0;
+    int max_iterations = 1000;
+    double tolerance = 1e-6;
+    double acceptable_tolerance = 1e-4;
+    int print_level = 3;
+    size_t validation_substeps = 10;
+    double validation_tolerance = 1e-5;
+};
+
+struct OptimizedTrajectoryNode {
+    size_t index = 0;
+    double time = 0.0;
+    Pose2d rear_axle_pose;
+    Pose2d disc_center;
+    double signed_speed = 0.0;
+    double front_steer = 0.0;
+    double acceleration = 0.0;
+    double steer_rate = 0.0;
+    int aabb_index = -1;
+};
+
+struct OptimizedVehicleTrajectory {
+    int id = -1;
+    std::vector<OptimizedTrajectoryNode> nodes;
+};
+
+struct NlpSolutionValidation {
+    bool passed = false;
+    std::string reason;
+    double max_start_error = 0.0;
+    double max_terminal_error = 0.0;
+    double max_kinematic_position_residual = 0.0;
+    double max_kinematic_heading_residual = 0.0;
+    double max_speed_violation = 0.0;
+    double max_steer_violation = 0.0;
+    double max_acceleration_violation = 0.0;
+    double max_steer_rate_violation = 0.0;
+    double max_aabb_violation = 0.0;
+    double minimum_participant_clearance = 0.0;
+    double minimum_static_clearance = 0.0;
+    size_t participant_collision_samples = 0;
+    size_t static_collision_samples = 0;
+    size_t aabb_violation_samples = 0;
+    size_t invalid_aabb_switches = 0;
+};
+
+struct NlpSolverStatistics {
+    bool success = false;
+    std::string casadi_version;
+    std::string solver_name = "ipopt";
+    std::string return_status;
+    int iterations = -1;
+    double cpu_time = 0.0;
+    double wall_time = 0.0;
+    double objective = 0.0;
+    double max_constraint_violation = 0.0;
+};
+
+struct NlpSolveResult {
+    bool problem_built = false;
+    bool solver_success = false;
+    bool validation_passed = false;
+    std::string reason;
+    size_t node_count = 0;
+    double total_time = 0.0;
+    double average_dt = 0.0;
+    std::vector<OptimizedVehicleTrajectory> vehicles;
+    NlpSolverStatistics statistics;
+    NlpSolutionValidation validation;
+};
+
+class NlpSolver {
+public:
+    explicit NlpSolver(const NlpSolverConfig& config);
+
+    NlpSolveResult solve(const NlpOptimizationInput& input,
+                         const NlpInitialGuess& initial_guess) const;
+
+private:
+    NlpSolverConfig config_;
+};
+
+bool saveNlpSolveResult(const NlpSolveResult& result,
+                        const std::string& case_directory,
+                        std::string& error);
+
+}  // namespace forklift_nlp_recovery

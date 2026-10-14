@@ -12,6 +12,20 @@ initial_guess_time_margin: 1.2
 initial_guess_nodes: 31
 initial_guess_total_time: 10.0
 
+# CasADi + IPOPT solve and independent continuous validation.
+solver_min_time_scale: 0.5
+solver_max_time_scale: 3.0
+solver_time_weight: 1.0
+solver_acceleration_weight: 1.0
+solver_steer_rate_weight: 5.0
+solver_control_smooth_weight: 5.0
+solver_max_iterations: 1000
+solver_tolerance: 1.0e-6
+solver_acceptable_tolerance: 1.0e-4
+solver_print_level: 3
+solver_validation_substeps: 10
+solver_validation_tolerance: 1.0e-5
+
 # A positive override is used directly. Values <= 0 use hypot(length/2, width/2).
 vehicle_radius: 0.14
 safety_margin: 0.0

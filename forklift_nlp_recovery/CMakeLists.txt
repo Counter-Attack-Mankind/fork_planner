@@ -13,10 +13,11 @@ find_package(catkin REQUIRED COMPONENTS
   forklift_map
   sandbox_msgs
 )
+find_package(casadi CONFIG REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_initial_guess
+  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_initial_guess forklift_nlp_recovery_solver
   CATKIN_DEPENDS roscpp roslib geometry_msgs std_msgs visualization_msgs forklift_map sandbox_msgs
 )
 
@@ -40,9 +41,18 @@ target_link_libraries(forklift_nlp_recovery_initial_guess
   ${catkin_LIBRARIES}
 )
 
+add_library(forklift_nlp_recovery_solver src/nlp_solver.cpp)
+add_dependencies(forklift_nlp_recovery_solver ${catkin_EXPORTED_TARGETS})
+target_link_libraries(forklift_nlp_recovery_solver
+  forklift_nlp_recovery_initial_guess
+  casadi
+  ${catkin_LIBRARIES}
+)
+
 add_executable(recovery_visualizer_node src/recovery_visualizer_node.cpp)
 add_dependencies(recovery_visualizer_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(recovery_visualizer_node
+  forklift_nlp_recovery_solver
   forklift_nlp_recovery_initial_guess
   forklift_nlp_recovery_input
   forklift_nlp_recovery_geometry
@@ -82,10 +92,24 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES}
     )
   endif()
+
+  catkin_add_gtest(nlp_solver_test test/nlp_solver_test.cpp)
+  if(TARGET nlp_solver_test)
+    add_dependencies(nlp_solver_test ${catkin_EXPORTED_TARGETS})
+    target_link_libraries(nlp_solver_test
+      forklift_nlp_recovery_solver
+      forklift_nlp_recovery_initial_guess
+      forklift_nlp_recovery_input
+      forklift_nlp_recovery_geometry
+      casadi
+      ${catkin_LIBRARIES}
+    )
+  endif()
 endif()
 
 install(TARGETS forklift_nlp_recovery_geometry forklift_nlp_recovery_input
                 forklift_nlp_recovery_initial_guess
+                forklift_nlp_recovery_solver
                 recovery_visualizer_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}

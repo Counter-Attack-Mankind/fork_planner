@@ -23,6 +23,7 @@
 #include "forklift_map/map_param.h"
 #include "forklift_nlp_recovery/corridor_builder.h"
 #include "forklift_nlp_recovery/initial_guess.h"
+#include "forklift_nlp_recovery/nlp_solver.h"
 #include "forklift_nlp_recovery/optimization_input.h"
 
 namespace forklift_nlp_recovery {
@@ -135,6 +136,38 @@ public:
         private_nh_.param("initial_guess_time_margin",
                           initial_guess_config_.time_margin,
                           initial_guess_config_.time_margin);
+        private_nh_.param("solver_min_time_scale", solver_config_.min_time_scale,
+                          solver_config_.min_time_scale);
+        private_nh_.param("solver_max_time_scale", solver_config_.max_time_scale,
+                          solver_config_.max_time_scale);
+        private_nh_.param("solver_time_weight", solver_config_.time_weight,
+                          solver_config_.time_weight);
+        private_nh_.param("solver_acceleration_weight",
+                          solver_config_.acceleration_weight,
+                          solver_config_.acceleration_weight);
+        private_nh_.param("solver_steer_rate_weight",
+                          solver_config_.steer_rate_weight,
+                          solver_config_.steer_rate_weight);
+        private_nh_.param("solver_control_smooth_weight",
+                          solver_config_.control_smooth_weight,
+                          solver_config_.control_smooth_weight);
+        private_nh_.param("solver_max_iterations", solver_config_.max_iterations,
+                          solver_config_.max_iterations);
+        private_nh_.param("solver_tolerance", solver_config_.tolerance,
+                          solver_config_.tolerance);
+        private_nh_.param("solver_acceptable_tolerance",
+                          solver_config_.acceptable_tolerance,
+                          solver_config_.acceptable_tolerance);
+        private_nh_.param("solver_print_level", solver_config_.print_level,
+                          solver_config_.print_level);
+        int validation_substeps = static_cast<int>(solver_config_.validation_substeps);
+        private_nh_.param("solver_validation_substeps", validation_substeps,
+                          validation_substeps);
+        solver_config_.validation_substeps = validation_substeps > 0 ?
+            static_cast<size_t>(validation_substeps) : 0;
+        private_nh_.param("solver_validation_tolerance",
+                          solver_config_.validation_tolerance,
+                          solver_config_.validation_tolerance);
         private_nh_.param("vehicle_radius", config_.vehicle_radius,
                           config_.vehicle_radius);
         private_nh_.param("shelf_inflation_reduction",
@@ -179,6 +212,7 @@ public:
             *builder_, vehicle_parameters);
         initial_guess_generator_ = std::make_unique<InitialGuessGenerator>(
             initial_guess_config_);
+        nlp_solver_ = std::make_unique<NlpSolver>(solver_config_);
         const std::string package_prefix = "package://forklift_nlp_recovery";
         if (results_directory_.compare(0, package_prefix.size(), package_prefix) == 0) {
             const std::string package_path = ros::package::getPath("forklift_nlp_recovery");
@@ -200,7 +234,7 @@ public:
                  "disc_radius=%.4f boundary_clearance=%.4f "
                  "shelf_inflation=%.4f topic=%s output=%s timing=%s "
                  "manual=(N=%zu,T=%.3f) auto=(dt=%.3f,N=[%zu,%zu],margin=%.2f) "
-                 "results=%s",
+                 "solver_time_scale=[%.2f,%.2f] validation_substeps=%zu results=%s",
                  mode_name_.c_str(), selected_ids.str().c_str(),
                  builder_->vehicleRadius(),
                  builder_->boundaryClearance(), builder_->shelfInflation(),
@@ -209,6 +243,8 @@ public:
                  initial_guess_config_.node_count, initial_guess_config_.total_time,
                  initial_guess_config_.target_dt, initial_guess_config_.min_nodes,
                  initial_guess_config_.max_nodes, initial_guess_config_.time_margin,
+                 solver_config_.min_time_scale, solver_config_.max_time_scale,
+                 solver_config_.validation_substeps,
                  results_directory_.c_str());
     }
 
@@ -555,17 +591,118 @@ private:
         }
     }
 
+    void logSolveResult(const NlpSolveResult& result,
+                        const std::string& case_id) const {
+        ROS_INFO("[nlp_recovery][solver] case=%s vehicles=%zu N=%zu T=%.3f "
+                 "status=%s iterations=%d wall=%.3f objective=%.6f "
+                 "max_violation=%.3g validation=%s reason=%s",
+                 case_id.c_str(), result.vehicles.size(), result.node_count,
+                 result.total_time, result.statistics.return_status.c_str(),
+                 result.statistics.iterations, result.statistics.wall_time,
+                 result.statistics.objective,
+                 result.statistics.max_constraint_violation,
+                 result.validation_passed ? "passed" : "failed",
+                 result.reason.c_str());
+        if (!result.validation_passed) {
+            ROS_WARN("[nlp_recovery][solver] independent validation: "
+                     "boundary=(%.3g,%.3g) dynamics=(%.3g,%.3g) "
+                     "bounds=(v %.3g,steer %.3g,a %.3g,omega %.3g) "
+                     "aabb=%.3g/%zu pair=%zu static=%zu switches=%zu",
+                     result.validation.max_start_error,
+                     result.validation.max_terminal_error,
+                     result.validation.max_kinematic_position_residual,
+                     result.validation.max_kinematic_heading_residual,
+                     result.validation.max_speed_violation,
+                     result.validation.max_steer_violation,
+                     result.validation.max_acceleration_violation,
+                     result.validation.max_steer_rate_violation,
+                     result.validation.max_aabb_violation,
+                     result.validation.aabb_violation_samples,
+                     result.validation.participant_collision_samples,
+                     result.validation.static_collision_samples,
+                     result.validation.invalid_aabb_switches);
+        }
+    }
+
+    NlpSolveResult solveAndSave(const OptimizationInputBuildResult& build,
+                                const NlpInitialGuess& guess,
+                                const CaseSaveResult& saved) {
+        NlpSolveResult result = nlp_solver_->solve(build.input, guess);
+        logSolveResult(result, saved.case_id);
+        std::string error;
+        if (!saveNlpSolveResult(result, saved.case_directory, error)) {
+            ROS_ERROR("[nlp_recovery][solver] result save failed: %s",
+                      error.c_str());
+        } else {
+            ROS_INFO("[nlp_recovery][solver] saved optimized_trajectory.csv and "
+                     "solver_report.yaml at %s", saved.case_directory.c_str());
+        }
+        return result;
+    }
+
+    void addOptimizedResult(visualization_msgs::MarkerArray& markers,
+                            const NlpSolveResult& result,
+                            const std::string& prefix) const {
+        if (!result.problem_built && result.reason.empty()) return;
+        const std_msgs::ColorRGBA status_color = result.validation_passed ?
+            color(0.05f, 0.95f, 0.35f, 0.95f) :
+            color(1.0f, 0.1f, 0.1f, 0.95f);
+        for (size_t vehicle_index = 0; vehicle_index < result.vehicles.size();
+             ++vehicle_index) {
+            const auto& vehicle = result.vehicles[vehicle_index];
+            auto path = baseMarker(prefix + "_optimized_path", vehicle.id,
+                                   visualization_msgs::Marker::LINE_STRIP);
+            path.scale.x = 0.028;
+            path.color = status_color;
+            auto centers = baseMarker(prefix + "_optimized_centers", vehicle.id,
+                                      visualization_msgs::Marker::SPHERE_LIST);
+            centers.scale.x = 0.025;
+            centers.scale.y = 0.025;
+            centers.scale.z = 0.025;
+            centers.color = status_color;
+            const size_t body_stride = std::max<size_t>(
+                1, vehicle.nodes.size() / 10);
+            for (size_t node_index = 0; node_index < vehicle.nodes.size();
+                 ++node_index) {
+                const auto& node = vehicle.nodes[node_index];
+                path.points.push_back(point(node.rear_axle_pose.x,
+                                            node.rear_axle_pose.y, 0.22));
+                centers.points.push_back(point(node.disc_center.x,
+                                               node.disc_center.y, 0.21));
+                if (node_index % body_stride == 0 ||
+                    node_index + 1 == vehicle.nodes.size()) {
+                    addBody(markers, prefix + "_optimized_body_V" +
+                            std::to_string(vehicle.id),
+                            static_cast<int>(node_index), node.rear_axle_pose,
+                            color(status_color.r, status_color.g,
+                                  status_color.b, 0.16f));
+                }
+            }
+            markers.markers.push_back(path);
+            markers.markers.push_back(centers);
+        }
+        std::ostringstream status;
+        status << "IPOPT " << result.statistics.return_status
+               << " T=" << std::fixed << std::setprecision(2)
+               << result.total_time << "s iter=" << result.statistics.iterations
+               << " validation=" << (result.validation_passed ? "PASS" : "FAIL");
+        addText(markers, prefix + "_solver_status", 0,
+                map_param_.field_width * 0.5,
+                map_param_.field_height - 0.22, 0.32, status.str(),
+                status_color, 0.065);
+    }
+
     NlpInitialGuess generateInitialGuess(const OptimizationInputBuildResult& build,
                                          bool save_case,
-                                         bool* case_saved = nullptr) {
-        if (case_saved != nullptr) *case_saved = false;
+                                         CaseSaveResult* case_result = nullptr) {
+        if (case_result != nullptr) *case_result = CaseSaveResult{};
         NlpInitialGuess guess = initial_guess_generator_->generate(build.input);
         if (save_case || build.input.source_mode == "auto") logInitialGuess(guess);
         if (!guess.generated || !save_case) return guess;
         const CaseSaveResult saved = saveInitialGuessCase(
             build, guess, results_directory_);
         if (saved.success) {
-            if (case_saved != nullptr) *case_saved = true;
+            if (case_result != nullptr) *case_result = saved;
             ROS_INFO("[nlp_recovery][initial_guess] saved %s at %s",
                      saved.case_id.c_str(), saved.case_directory.c_str());
         } else {
@@ -597,8 +734,13 @@ private:
             if (build.complete) {
                 locked_.active = true;
                 locked_.build = std::move(build);
+                CaseSaveResult saved;
                 locked_.initial_guess = generateInitialGuess(
-                    locked_.build, locked_.build.input.valid);
+                    locked_.build, locked_.build.input.valid, &saved);
+                if (saved.success) {
+                    locked_.solver_result = solveAndSave(
+                        locked_.build, locked_.initial_guess, saved);
+                }
                 ROS_WARN("[nlp_recovery][auto] locked NLP_PREP input "
                          "participants=%zu valid=%d trigger=%s input=%s",
                          locked_.build.input.vehicles.size(),
@@ -642,6 +784,7 @@ private:
                 "NLP_PREP locked: " + ids.str() + " " + input.trigger_reason +
                     " input=" + locked_.build.reason,
                 color(1.0f, 0.2f, 0.2f, 1.0f), 0.06);
+        addOptimizedResult(markers, locked_.solver_result, "auto");
     }
 
     void addDebugMarkers(visualization_msgs::MarkerArray& markers,
@@ -658,11 +801,13 @@ private:
         const std::string identity = inputIdentity(build);
         const bool save_case = build.complete && build.input.valid &&
                                identity != last_debug_case_identity_;
-        bool case_saved = false;
+        CaseSaveResult saved;
         latest_debug_initial_guess_ = generateInitialGuess(
-            build, save_case, &case_saved);
-        if (case_saved) {
+            build, save_case, &saved);
+        if (saved.success) {
             last_debug_case_identity_ = identity;
+            latest_debug_solver_result_ = solveAndSave(
+                build, latest_debug_initial_guess_, saved);
         }
         for (size_t i = 0; i < build.input.vehicles.size(); ++i) {
             const NlpVehicleInput& vehicle = build.input.vehicles[i];
@@ -677,6 +822,7 @@ private:
                     color(1.0f, 0.1f, 0.1f, 1.0f), 0.07);
             ROS_WARN_THROTTLE(2.0, "[nlp_recovery] %s", build.reason.c_str());
         }
+        addOptimizedResult(markers, latest_debug_solver_result_, "debug");
     }
 
     void snapshotCallback(const sandbox_msgs::RecoverySnapshot::ConstPtr& snapshot) {
@@ -695,6 +841,7 @@ private:
         bool active = false;
         OptimizationInputBuildResult build;
         NlpInitialGuess initial_guess;
+        NlpSolveResult solver_result;
     };
 
     ros::NodeHandle private_nh_;
@@ -706,7 +853,9 @@ private:
     std::unique_ptr<CorridorBuilder> builder_;
     std::unique_ptr<OptimizationInputBuilder> input_builder_;
     std::unique_ptr<InitialGuessGenerator> initial_guess_generator_;
+    std::unique_ptr<NlpSolver> nlp_solver_;
     InitialGuessConfig initial_guess_config_;
+    NlpSolverConfig solver_config_;
     OperatingMode mode_ = OperatingMode::DEBUG;
     std::string mode_name_ = "debug";
     LockedTransaction locked_;
@@ -716,6 +865,7 @@ private:
     std::string results_directory_;
     std::string last_debug_case_identity_;
     NlpInitialGuess latest_debug_initial_guess_;
+    NlpSolveResult latest_debug_solver_result_;
 };
 
 }  // namespace forklift_nlp_recovery

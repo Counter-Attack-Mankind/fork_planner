@@ -2,7 +2,7 @@
 <package format="2">
   <name>forklift_nlp_recovery</name>
   <version>0.1.0</version>
-  <description>Read-only NLP recovery input, corridor diagnostics, and initial guess generation.</description>
+  <description>Read-only N-vehicle deadlock recovery trajectory optimization and visualization.</description>
   <maintainer email="yssun@hnu.edu.cn">Yueshuo Sun</maintainer>
   <license>MIT</license>
 
@@ -14,6 +14,7 @@
   <depend>visualization_msgs</depend>
   <depend>forklift_map</depend>
   <depend>sandbox_msgs</depend>
+  <depend>casadi</depend>
   <exec_depend>roslaunch</exec_depend>
   <exec_depend>rviz</exec_depend>
   <test_depend>rostest</test_depend>
