@@ -109,7 +109,8 @@ TEST(NlpSolverTest, SolvesTwoVehiclesWithSingleAndMultipleAabbs) {
               << " iterations=" << result.statistics.iterations
               << " wall=" << result.statistics.wall_time
               << " max_violation=" << result.statistics.max_constraint_violation
-              << " min_clear=" << result.validation.minimum_participant_clearance
+              << " min_obb_margin="
+              << result.validation.minimum_participant_obb_separation_margin
               << std::endl;
 }
 
@@ -132,7 +133,8 @@ TEST(NlpSolverTest, SolvesThreeVehiclesWithNonContiguousIdsOnCommonGrid) {
               << " iterations=" << result.statistics.iterations
               << " wall=" << result.statistics.wall_time
               << " max_violation=" << result.statistics.max_constraint_violation
-              << " min_clear=" << result.validation.minimum_participant_clearance
+              << " min_obb_margin="
+              << result.validation.minimum_participant_obb_separation_margin
               << std::endl;
 }
 
@@ -173,23 +175,34 @@ TEST(NlpSolverTest, OutsideStartSkipsOnlyStartAndEntryIntervalAabbChecks) {
               source.corridor.front().min_x - 2e-4);
 }
 
-TEST(NlpSolverTest, ReportsInitialParticipantCollisionAsNotSafe) {
+TEST(NlpSolverTest, ObbValidationRejectsParticipantOverlapAllowedBySmallDiscs) {
     fnr::NlpOptimizationInput input = inputFor({3, 8});
-    input.vehicles[1] = vehicle(8, 0.0);
+    input.vehicles[1] = vehicle(8, 0.10);
+    input.vehicles[0].parameters.disc_radius = 0.01;
+    input.vehicles[1].parameters.disc_radius = 0.01;
     const fnr::NlpInitialGuess guess = initialGuess(input);
     ASSERT_TRUE(guess.generated) << guess.reason;
     const fnr::NlpSolveResult result = solver().solve(input, guess);
     EXPECT_TRUE(result.problem_built);
+    EXPECT_TRUE(result.solver_success) << result.reason;
     EXPECT_FALSE(result.validation_passed);
+    EXPECT_GT(result.validation.participant_obb_collision_samples, 0U);
+    EXPECT_LT(result.validation.minimum_participant_obb_separation_margin, 0.0);
     EXPECT_FALSE(result.statistics.return_status.empty());
 }
 
-TEST(NlpSolverTest, ReportsStaticObstacleAtFixedTerminalAsInfeasible) {
+TEST(NlpSolverTest, ObbValidationRejectsStaticOverlapAllowedBySmallDiscs) {
     fnr::NlpOptimizationInput input = inputFor({6});
+    input.vehicles.front().parameters.disc_radius = 0.01;
     fnr::StaticVehicleObstacle obstacle;
     obstacle.id = 42;
-    obstacle.disc_radius = input.vehicles.front().parameters.disc_radius;
+    obstacle.disc_radius = 0.01;
+    obstacle.length = input.vehicles.front().parameters.length;
+    obstacle.width = input.vehicles.front().parameters.width;
+    obstacle.rear_axle_to_center =
+        input.vehicles.front().parameters.rear_axle_to_center;
     obstacle.rear_axle_pose = input.vehicles.front().terminal.pose;
+    obstacle.rear_axle_pose.y += 0.05;
     obstacle.disc_center = {
         obstacle.rear_axle_pose.x +
             input.vehicles.front().parameters.rear_axle_to_center,
@@ -200,7 +213,9 @@ TEST(NlpSolverTest, ReportsStaticObstacleAtFixedTerminalAsInfeasible) {
     const fnr::NlpSolveResult result = solver().solve(input, guess);
     EXPECT_TRUE(result.problem_built);
     EXPECT_FALSE(result.validation_passed);
-    EXPECT_FALSE(result.solver_success);
+    EXPECT_TRUE(result.solver_success) << result.reason;
+    EXPECT_GT(result.validation.static_obb_collision_samples, 0U);
+    EXPECT_LT(result.validation.minimum_static_obb_separation_margin, 0.0);
     EXPECT_FALSE(result.statistics.return_status.empty());
     EXPECT_GE(result.statistics.iterations, 0);
 }
@@ -223,6 +238,11 @@ TEST(NlpSolverTest, SavesTrajectoryAndReportInExistingCaseDirectory) {
     const std::string content((std::istreambuf_iterator<char>(report)),
                               std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("validation_passed: true"), std::string::npos);
+    EXPECT_NE(content.find("optimization_constraints: body_center_discs"),
+              std::string::npos);
+    EXPECT_NE(content.find("independent_validation: obb_sat"), std::string::npos);
+    EXPECT_NE(content.find("minimum_participant_obb_separation_margin:"),
+              std::string::npos);
     std::filesystem::remove_all(directory);
 }
 

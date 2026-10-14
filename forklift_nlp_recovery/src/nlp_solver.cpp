@@ -65,6 +65,54 @@ struct NumericControl {
     double steer_rate = 0.0;
 };
 
+struct Vector2 {
+    double x = 0.0;
+    double y = 0.0;
+};
+
+struct Obb {
+    Vector2 center;
+    Vector2 longitudinal_axis;
+    Vector2 lateral_axis;
+    double half_length = 0.0;
+    double half_width = 0.0;
+};
+
+double dot(const Vector2& first, const Vector2& second) {
+    return first.x * second.x + first.y * second.y;
+}
+
+Obb vehicleObb(const Pose2d& rear_axle, double length, double width,
+               double rear_axle_to_center) {
+    const double cosine = std::cos(rear_axle.yaw);
+    const double sine = std::sin(rear_axle.yaw);
+    return {{rear_axle.x + rear_axle_to_center * cosine,
+             rear_axle.y + rear_axle_to_center * sine},
+            {cosine, sine}, {-sine, cosine}, 0.5 * length, 0.5 * width};
+}
+
+double projectionRadius(const Obb& box, const Vector2& axis) {
+    return box.half_length * std::abs(dot(box.longitudinal_axis, axis)) +
+           box.half_width * std::abs(dot(box.lateral_axis, axis));
+}
+
+// Positive means separated on at least one SAT axis. Negative means overlap;
+// its magnitude is the minimum translation distance on the tested OBB axes.
+double obbSatSeparationMargin(const Obb& first, const Obb& second) {
+    const Vector2 delta{second.center.x - first.center.x,
+                        second.center.y - first.center.y};
+    const Vector2 axes[] = {first.longitudinal_axis, first.lateral_axis,
+                            second.longitudinal_axis, second.lateral_axis};
+    double margin = -kInfinity;
+    for (const Vector2& axis : axes) {
+        const double center_distance = std::abs(dot(delta, axis));
+        const double extent = projectionRadius(first, axis) +
+                              projectionRadius(second, axis);
+        margin = std::max(margin, center_distance - extent);
+    }
+    return margin;
+}
+
 NumericState derivative(const NumericState& state, const NumericControl& control,
                         double wheel_base) {
     return {state.speed * std::cos(state.yaw),
@@ -185,8 +233,8 @@ NlpSolutionValidation validateSolution(
     const NlpOptimizationInput& input, const NlpSolveResult& result,
     const NlpSolverConfig& config) {
     NlpSolutionValidation validation;
-    validation.minimum_participant_clearance = kInfinity;
-    validation.minimum_static_clearance = kInfinity;
+    validation.minimum_participant_obb_separation_margin = kInfinity;
+    validation.minimum_static_obb_separation_margin = kInfinity;
     if (result.vehicles.size() != input.vehicles.size() || result.node_count < 2 ||
         result.total_time <= 0.0) {
         validation.reason = "solution dimensions are incomplete";
@@ -200,6 +248,14 @@ NlpSolutionValidation validateSolution(
         const auto& source = input.vehicles[index];
         if (vehicle.id != source.id || vehicle.nodes.size() != result.node_count) {
             validation.reason = "vehicle ordering or node count mismatch";
+            return validation;
+        }
+        if (!(source.parameters.length > 0.0) ||
+            !(source.parameters.width > 0.0) ||
+            !std::isfinite(source.parameters.length) ||
+            !std::isfinite(source.parameters.width) ||
+            !std::isfinite(source.parameters.rear_axle_to_center)) {
+            validation.reason = "participant vehicle has invalid OBB geometry";
             return validation;
         }
         const auto& first = vehicle.nodes.front();
@@ -308,52 +364,58 @@ NlpSolutionValidation validateSolution(
     const size_t sample_count = samples.front().size();
     for (size_t first = 0; first < samples.size(); ++first) {
         for (size_t second = first + 1; second < samples.size(); ++second) {
-            const double required = input.vehicles[first].parameters.disc_radius +
-                                    input.vehicles[second].parameters.disc_radius;
             for (size_t sample = 0; sample < sample_count; ++sample) {
-                const Pose2d first_center = bodyCenter(
-                    {samples[first][sample].x, samples[first][sample].y,
-                     samples[first][sample].yaw},
-                    input.vehicles[first].parameters.rear_axle_to_center);
-                const Pose2d second_center = bodyCenter(
-                    {samples[second][sample].x, samples[second][sample].y,
-                     samples[second][sample].yaw},
-                    input.vehicles[second].parameters.rear_axle_to_center);
-                const double clearance = std::hypot(first_center.x - second_center.x,
-                                                     first_center.y - second_center.y) -
-                                         required;
-                validation.minimum_participant_clearance = std::min(
-                    validation.minimum_participant_clearance, clearance);
-                if (clearance < -config.validation_tolerance) {
-                    ++validation.participant_collision_samples;
+                const NumericState& first_state = samples[first][sample];
+                const NumericState& second_state = samples[second][sample];
+                const VehicleParameters& first_parameters = input.vehicles[first].parameters;
+                const VehicleParameters& second_parameters = input.vehicles[second].parameters;
+                const Obb first_box = vehicleObb(
+                    {first_state.x, first_state.y, first_state.yaw},
+                    first_parameters.length, first_parameters.width,
+                    first_parameters.rear_axle_to_center);
+                const Obb second_box = vehicleObb(
+                    {second_state.x, second_state.y, second_state.yaw},
+                    second_parameters.length, second_parameters.width,
+                    second_parameters.rear_axle_to_center);
+                const double margin = obbSatSeparationMargin(first_box, second_box);
+                validation.minimum_participant_obb_separation_margin = std::min(
+                    validation.minimum_participant_obb_separation_margin, margin);
+                if (margin < -config.validation_tolerance) {
+                    ++validation.participant_obb_collision_samples;
                 }
             }
         }
     }
     for (size_t vehicle = 0; vehicle < samples.size(); ++vehicle) {
         for (const StaticVehicleObstacle& obstacle : input.static_vehicles) {
-            const double required = input.vehicles[vehicle].parameters.disc_radius +
-                                    obstacle.disc_radius;
+            if (!(obstacle.length > 0.0) || !(obstacle.width > 0.0) ||
+                !std::isfinite(obstacle.length) || !std::isfinite(obstacle.width) ||
+                !std::isfinite(obstacle.rear_axle_to_center)) {
+                validation.reason = "static vehicle has invalid OBB geometry";
+                return validation;
+            }
+            const Obb static_box = vehicleObb(
+                obstacle.rear_axle_pose, obstacle.length, obstacle.width,
+                obstacle.rear_axle_to_center);
             for (const NumericState& state : samples[vehicle]) {
-                const Pose2d center = bodyCenter(
-                    {state.x, state.y, state.yaw},
-                    input.vehicles[vehicle].parameters.rear_axle_to_center);
-                const double clearance = std::hypot(center.x - obstacle.disc_center.x,
-                                                     center.y - obstacle.disc_center.y) -
-                                         required;
-                validation.minimum_static_clearance = std::min(
-                    validation.minimum_static_clearance, clearance);
-                if (clearance < -config.validation_tolerance) {
-                    ++validation.static_collision_samples;
+                const VehicleParameters& parameters = input.vehicles[vehicle].parameters;
+                const Obb moving_box = vehicleObb(
+                    {state.x, state.y, state.yaw}, parameters.length,
+                    parameters.width, parameters.rear_axle_to_center);
+                const double margin = obbSatSeparationMargin(moving_box, static_box);
+                validation.minimum_static_obb_separation_margin = std::min(
+                    validation.minimum_static_obb_separation_margin, margin);
+                if (margin < -config.validation_tolerance) {
+                    ++validation.static_obb_collision_samples;
                 }
             }
         }
     }
-    if (!std::isfinite(validation.minimum_participant_clearance)) {
-        validation.minimum_participant_clearance = 0.0;
+    if (!std::isfinite(validation.minimum_participant_obb_separation_margin)) {
+        validation.minimum_participant_obb_separation_margin = 0.0;
     }
-    if (!std::isfinite(validation.minimum_static_clearance)) {
-        validation.minimum_static_clearance = 0.0;
+    if (!std::isfinite(validation.minimum_static_obb_separation_margin)) {
+        validation.minimum_static_obb_separation_margin = 0.0;
     }
     const double tolerance = config.validation_tolerance;
     validation.passed = validation.max_start_error <= tolerance &&
@@ -365,12 +427,13 @@ NlpSolutionValidation validateSolution(
         validation.max_acceleration_violation <= tolerance &&
         validation.max_steer_rate_violation <= tolerance &&
         validation.max_aabb_violation <= tolerance &&
-        validation.participant_collision_samples == 0 &&
-        validation.static_collision_samples == 0 &&
+        validation.participant_obb_collision_samples == 0 &&
+        validation.static_obb_collision_samples == 0 &&
         validation.aabb_violation_samples == 0 &&
         validation.invalid_aabb_switches == 0;
-    validation.reason = validation.passed ? "all discrete and continuous checks passed" :
-        "one or more independent safety checks failed";
+    validation.reason = validation.passed ?
+        "all discrete and continuous checks passed (collision geometry: OBB SAT)" :
+        "one or more independent safety checks failed (collision geometry: OBB SAT)";
     return validation;
 }
 
@@ -732,7 +795,11 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << "node_count: " << result.node_count << '\n'
            << "total_time: " << result.total_time << '\n'
            << "average_dt: " << result.average_dt << '\n'
+           << "collision_models:\n"
+           << "  optimization_constraints: body_center_discs\n"
+           << "  independent_validation: obb_sat\n"
            << "validation:\n"
+           << "  collision_geometry: obb_sat\n"
            << "  reason: " << yamlQuote(result.validation.reason) << '\n'
            << "  max_start_error: " << result.validation.max_start_error << '\n'
            << "  max_terminal_error: " << result.validation.max_terminal_error << '\n'
@@ -747,14 +814,14 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << "  max_steer_rate_violation: "
            << result.validation.max_steer_rate_violation << '\n'
            << "  max_aabb_violation: " << result.validation.max_aabb_violation << '\n'
-           << "  minimum_participant_clearance: "
-           << result.validation.minimum_participant_clearance << '\n'
-           << "  minimum_static_clearance: "
-           << result.validation.minimum_static_clearance << '\n'
-           << "  participant_collision_samples: "
-           << result.validation.participant_collision_samples << '\n'
-           << "  static_collision_samples: "
-           << result.validation.static_collision_samples << '\n'
+           << "  minimum_participant_obb_separation_margin: "
+           << result.validation.minimum_participant_obb_separation_margin << '\n'
+           << "  minimum_static_obb_separation_margin: "
+           << result.validation.minimum_static_obb_separation_margin << '\n'
+           << "  participant_obb_collision_samples: "
+           << result.validation.participant_obb_collision_samples << '\n'
+           << "  static_obb_collision_samples: "
+           << result.validation.static_obb_collision_samples << '\n'
            << "  aabb_violation_samples: "
            << result.validation.aabb_violation_samples << '\n'
            << "  invalid_aabb_switches: "

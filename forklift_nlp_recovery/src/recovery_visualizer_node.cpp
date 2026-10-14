@@ -607,7 +607,8 @@ private:
             ROS_WARN("[nlp_recovery][solver] independent validation: "
                      "boundary=(%.3g,%.3g) dynamics=(%.3g,%.3g) "
                      "bounds=(v %.3g,steer %.3g,a %.3g,omega %.3g) "
-                     "aabb=%.3g/%zu pair=%zu static=%zu switches=%zu",
+                     "aabb=%.3g/%zu obb_sat=(pair %zu,static %zu) "
+                     "min_obb_margin=(pair %.3g,static %.3g) switches=%zu",
                      result.validation.max_start_error,
                      result.validation.max_terminal_error,
                      result.validation.max_kinematic_position_residual,
@@ -618,8 +619,10 @@ private:
                      result.validation.max_steer_rate_violation,
                      result.validation.max_aabb_violation,
                      result.validation.aabb_violation_samples,
-                     result.validation.participant_collision_samples,
-                     result.validation.static_collision_samples,
+                     result.validation.participant_obb_collision_samples,
+                     result.validation.static_obb_collision_samples,
+                     result.validation.minimum_participant_obb_separation_margin,
+                     result.validation.minimum_static_obb_separation_margin,
                      result.validation.invalid_aabb_switches);
         }
     }

@@ -53,10 +53,10 @@ struct NlpSolutionValidation {
     double max_acceleration_violation = 0.0;
     double max_steer_rate_violation = 0.0;
     double max_aabb_violation = 0.0;
-    double minimum_participant_clearance = 0.0;
-    double minimum_static_clearance = 0.0;
-    size_t participant_collision_samples = 0;
-    size_t static_collision_samples = 0;
+    double minimum_participant_obb_separation_margin = 0.0;
+    double minimum_static_obb_separation_margin = 0.0;
+    size_t participant_obb_collision_samples = 0;
+    size_t static_obb_collision_samples = 0;
     size_t aabb_violation_samples = 0;
     size_t invalid_aabb_switches = 0;
 };

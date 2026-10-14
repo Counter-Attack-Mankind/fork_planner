@@ -296,10 +296,22 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
         loaded.report.total_time = requireDouble(report, "total_time");
         const YAML::Node validation = report["validation"];
         loaded.report.validation_reason = validation["reason"] ? validation["reason"].as<std::string>() : "";
-        loaded.report.minimum_participant_clearance = requireDouble(validation, "minimum_participant_clearance");
-        loaded.report.minimum_static_clearance = requireDouble(validation, "minimum_static_clearance");
-        loaded.report.participant_collision_samples = validation["participant_collision_samples"].as<std::size_t>();
-        loaded.report.static_collision_samples = validation["static_collision_samples"].as<std::size_t>();
+        const char* participant_margin_key = validation["minimum_participant_obb_separation_margin"] ?
+            "minimum_participant_obb_separation_margin" : "minimum_participant_clearance";
+        const char* static_margin_key = validation["minimum_static_obb_separation_margin"] ?
+            "minimum_static_obb_separation_margin" : "minimum_static_clearance";
+        const char* participant_samples_key = validation["participant_obb_collision_samples"] ?
+            "participant_obb_collision_samples" : "participant_collision_samples";
+        const char* static_samples_key = validation["static_obb_collision_samples"] ?
+            "static_obb_collision_samples" : "static_collision_samples";
+        loaded.report.minimum_participant_obb_separation_margin =
+            requireDouble(validation, participant_margin_key);
+        loaded.report.minimum_static_obb_separation_margin =
+            requireDouble(validation, static_margin_key);
+        loaded.report.participant_obb_collision_samples =
+            validation[participant_samples_key].as<std::size_t>();
+        loaded.report.static_obb_collision_samples =
+            validation[static_samples_key].as<std::size_t>();
         loaded.report.aabb_violation_samples = validation["aabb_violation_samples"].as<std::size_t>();
         if (loaded.report.node_count != loaded.node_count || std::abs(loaded.report.total_time - loaded.total_time) > 1e-6) {
             throw std::runtime_error("solver report time grid does not match optimized CSV");

@@ -290,10 +290,12 @@ private:
             if (i) ids << ',';
             ids << replay_case_.participant_ids[i];
         }
-        ROS_INFO("NLP replay case=%s vehicles=[%s] T=%.6f solver=%s saved_validation=%s min_pair_clearance=%.6f replay_min_pair_clearance=%.6f intervals=%zu",
+        ROS_INFO("NLP replay case=%s vehicles=[%s] T=%.6f solver=%s "
+                 "saved_validation=%s saved_min_pair_obb_sat_margin=%.6f "
+                 "replay_min_pair_disc_clearance=%.6f intervals=%zu",
                  replay_case_.case_id.c_str(), ids.str().c_str(), replay_case_.total_time,
                  replay_case_.report.return_status.c_str(), replay_case_.report.validation_passed ? "PASS" : "FAIL",
-                 replay_case_.report.minimum_participant_clearance,
+                 replay_case_.report.minimum_participant_obb_separation_margin,
                  diagnostics_.minimum_participant_clearance, diagnostics_.intervals.size());
         for (const ReplayViolationInterval& interval : diagnostics_.intervals) {
             ROS_WARN("replay violation type=%s vehicles=%d,%d time=[%.6f, %.6f] max=%.6f",

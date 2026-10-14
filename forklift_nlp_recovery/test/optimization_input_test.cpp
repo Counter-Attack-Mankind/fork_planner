@@ -121,6 +121,12 @@ TEST_F(OptimizationInputTest, BuildsTwoVehicleInputAndPreservesMetadata) {
     EXPECT_FALSE(result.input.vehicles[0].corridor.empty());
     ASSERT_EQ(result.input.static_vehicles.size(), 1U);
     EXPECT_EQ(result.input.static_vehicles.front().id, 41);
+    EXPECT_DOUBLE_EQ(result.input.static_vehicles.front().length,
+                     result.input.vehicles.front().parameters.length);
+    EXPECT_DOUBLE_EQ(result.input.static_vehicles.front().width,
+                     result.input.vehicles.front().parameters.width);
+    EXPECT_DOUBLE_EQ(result.input.static_vehicles.front().rear_axle_to_center,
+                     result.input.vehicles.front().parameters.rear_axle_to_center);
     EXPECT_EQ(result.input.trigger_reason, "test_deadlock");
 }
 

@@ -51,6 +51,9 @@ struct StaticVehicleObstacle {
     Pose2d rear_axle_pose;
     Pose2d disc_center;
     double disc_radius = 0.0;
+    double length = 0.0;
+    double width = 0.0;
+    double rear_axle_to_center = 0.0;
     double min_distance_to_corridor = 0.0;
     double influence_distance = 0.0;
     std::vector<int> influencing_vehicle_ids;

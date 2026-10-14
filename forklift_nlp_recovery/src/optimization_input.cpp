@@ -98,6 +98,9 @@ void OptimizationInputBuilder::selectStaticVehicles(
         obstacle.disc_center = corridor_builder_.bodyCenter(
             obstacle.rear_axle_pose);
         obstacle.disc_radius = vehicle_parameters_.disc_radius;
+        obstacle.length = vehicle_parameters_.length;
+        obstacle.width = vehicle_parameters_.width;
+        obstacle.rear_axle_to_center = vehicle_parameters_.rear_axle_to_center;
         obstacle.min_distance_to_corridor =
             std::numeric_limits<double>::infinity();
 
@@ -303,6 +306,9 @@ bool writeOptimizationInputDebugFile(const OptimizationInputBuildResult& result,
         out << "\n    disc_center: ";
         writePose(out, obstacle.disc_center);
         out << "\n    disc_radius: " << obstacle.disc_radius << "\n";
+        out << "    length: " << obstacle.length << "\n";
+        out << "    width: " << obstacle.width << "\n";
+        out << "    rear_axle_to_center: " << obstacle.rear_axle_to_center << "\n";
         out << "    min_distance_to_corridor: "
             << obstacle.min_distance_to_corridor << "\n";
         out << "    influence_distance: " << obstacle.influence_distance << "\n";

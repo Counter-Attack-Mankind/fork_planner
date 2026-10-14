@@ -59,10 +59,10 @@ struct ReplaySolverReport {
     std::string validation_reason;
     std::size_t node_count = 0;
     double total_time = 0.0;
-    double minimum_participant_clearance = 0.0;
-    double minimum_static_clearance = 0.0;
-    std::size_t participant_collision_samples = 0;
-    std::size_t static_collision_samples = 0;
+    double minimum_participant_obb_separation_margin = 0.0;
+    double minimum_static_obb_separation_margin = 0.0;
+    std::size_t participant_obb_collision_samples = 0;
+    std::size_t static_obb_collision_samples = 0;
     std::size_t aabb_violation_samples = 0;
 };
 
