@@ -1,0 +1,27 @@
+<launch>
+  <arg name="case" default="case_0004"/>
+  <arg name="case_dir" default="$(find forklift_nlp_recovery)/results/$(arg case)"/>
+  <arg name="playback_rate" default="1.0"/>
+  <arg name="refresh_period" default="0.02"/>
+  <arg name="paused" default="false"/>
+  <arg name="show_discs" default="true"/>
+  <arg name="start_rviz" default="true"/>
+
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
+
+  <node pkg="forklift_nlp_recovery" type="nlp_trajectory_replay_node"
+        name="nlp_trajectory_replay" output="screen" required="true">
+    <rosparam command="load" file="$(find forklift_nlp_recovery)/config/recovery.yaml"/>
+    <param name="case_dir" value="$(arg case_dir)"/>
+    <param name="playback_rate" value="$(arg playback_rate)"/>
+    <param name="refresh_period" value="$(arg refresh_period)"/>
+    <param name="paused" value="$(arg paused)"/>
+    <param name="show_discs" value="$(arg show_discs)"/>
+  </node>
+
+  <node if="$(arg start_rviz)" pkg="rviz" type="rviz" name="nlp_replay_rviz"
+        args="-d $(find forklift_nlp_recovery)/rviz/nlp_replay.rviz" required="false">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

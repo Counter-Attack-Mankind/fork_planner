@@ -9,16 +9,18 @@ find_package(catkin REQUIRED COMPONENTS
   roslib
   geometry_msgs
   std_msgs
+  std_srvs
   visualization_msgs
   forklift_map
   sandbox_msgs
 )
 find_package(casadi CONFIG REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_initial_guess forklift_nlp_recovery_solver
-  CATKIN_DEPENDS roscpp roslib geometry_msgs std_msgs visualization_msgs forklift_map sandbox_msgs
+  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_initial_guess forklift_nlp_recovery_solver forklift_nlp_recovery_replay
+  CATKIN_DEPENDS roscpp roslib geometry_msgs std_msgs std_srvs visualization_msgs forklift_map sandbox_msgs
 )
 
 include_directories(include ${catkin_INCLUDE_DIRS})
@@ -46,6 +48,18 @@ add_dependencies(forklift_nlp_recovery_solver ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_solver
   forklift_nlp_recovery_initial_guess
   casadi
+  ${catkin_LIBRARIES}
+)
+
+add_library(forklift_nlp_recovery_replay src/replay_data.cpp)
+add_dependencies(forklift_nlp_recovery_replay ${catkin_EXPORTED_TARGETS})
+target_link_libraries(forklift_nlp_recovery_replay yaml-cpp ${catkin_LIBRARIES})
+
+add_executable(nlp_trajectory_replay_node src/nlp_trajectory_replay_node.cpp)
+add_dependencies(nlp_trajectory_replay_node ${catkin_EXPORTED_TARGETS})
+target_link_libraries(nlp_trajectory_replay_node
+  forklift_nlp_recovery_replay
+  forklift_map_lib
   ${catkin_LIBRARIES}
 )
 
@@ -105,12 +119,20 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES}
     )
   endif()
+
+  catkin_add_gtest(replay_data_test test/replay_data_test.cpp)
+  if(TARGET replay_data_test)
+    add_dependencies(replay_data_test ${catkin_EXPORTED_TARGETS})
+    target_link_libraries(replay_data_test forklift_nlp_recovery_replay yaml-cpp ${catkin_LIBRARIES})
+  endif()
 endif()
 
 install(TARGETS forklift_nlp_recovery_geometry forklift_nlp_recovery_input
                 forklift_nlp_recovery_initial_guess
                 forklift_nlp_recovery_solver
+                forklift_nlp_recovery_replay
                 recovery_visualizer_node
+                nlp_trajectory_replay_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

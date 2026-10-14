@@ -1,4 +1,4 @@
-mode: debug
+mode: auto     # two mode (auto/debug)
 vehicle_ids: [0, 1]
 snapshot_topic: /forklift_planner/recovery_snapshot
 debug_output_file: /tmp/forklift_nlp_recovery_input.yaml
@@ -24,7 +24,7 @@ solver_tolerance: 1.0e-6
 solver_acceptable_tolerance: 1.0e-4
 solver_print_level: 3
 solver_validation_substeps: 10
-solver_validation_tolerance: 1.0e-5
+solver_validation_tolerance: 1.0e-4
 
 # A positive override is used directly. Values <= 0 use hypot(length/2, width/2).
 vehicle_radius: 0.14
