@@ -23,7 +23,6 @@ struct ReplayParameters {
     double length = 0.0;
     double width = 0.0;
     double rear_axle_to_center = 0.0;
-    double disc_radius = 0.0;
     double wheel_base = 0.0;
 };
 
@@ -48,8 +47,9 @@ struct ReplayVehicle {
 struct ReplayStaticVehicle {
     int id = -1;
     ReplayPose rear_axle;
-    ReplayPose disc_center;
-    double disc_radius = 0.0;
+    double length = 0.0;
+    double width = 0.0;
+    double rear_axle_to_center = 0.0;
 };
 
 struct ReplaySolverReport {
@@ -57,6 +57,8 @@ struct ReplaySolverReport {
     bool validation_passed = false;
     std::string return_status;
     std::string validation_reason;
+    std::string collision_geometry = "unknown";
+    bool has_obb_validation_metrics = false;
     std::size_t node_count = 0;
     double total_time = 0.0;
     double minimum_participant_obb_separation_margin = 0.0;
@@ -77,13 +79,14 @@ struct ReplayCase {
     double total_time = 0.0;
 };
 
-enum class ReplayViolationType { PARTICIPANT_DISC, STATIC_DISC, AABB, OBB };
+enum class ReplayViolationType { AABB, OBB };
 
 struct ReplayViolation {
-    ReplayViolationType type = ReplayViolationType::PARTICIPANT_DISC;
+    ReplayViolationType type = ReplayViolationType::AABB;
     double time = 0.0;
     int vehicle_id = -1;
     int other_id = -1;
+    bool other_is_static = false;
     double actual = 0.0;
     double required = 0.0;
     double magnitude = 0.0;
@@ -92,17 +95,18 @@ struct ReplayViolation {
 };
 
 struct ReplayViolationInterval {
-    ReplayViolationType type = ReplayViolationType::PARTICIPANT_DISC;
+    ReplayViolationType type = ReplayViolationType::AABB;
     int vehicle_id = -1;
     int other_id = -1;
+    bool other_is_static = false;
     double start_time = 0.0;
     double end_time = 0.0;
     double max_violation = 0.0;
 };
 
 struct ReplayDiagnostics {
-    double minimum_participant_clearance = 0.0;
-    double minimum_static_clearance = 0.0;
+    double minimum_participant_obb_separation_margin = 0.0;
+    double minimum_static_obb_separation_margin = 0.0;
     std::vector<ReplayViolation> violations;
     std::vector<ReplayViolationInterval> intervals;
 };

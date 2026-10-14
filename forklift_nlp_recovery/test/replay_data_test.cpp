@@ -12,7 +12,7 @@ namespace {
 ReplayVehicle vehicle(int id, double x, double y, double speed = 0.0) {
     ReplayVehicle value;
     value.id = id;
-    value.parameters = {0.20, 0.10, 0.05, 0.12, 0.50};
+    value.parameters = {0.20, 0.10, 0.05, 0.50};
     value.corridor = {{-10.0, 10.0, -10.0, 10.0}};
     value.nodes = {{0, 0.0, {x, y, 0.0}, speed, 0.0, 0.0, 0.0, 0},
                    {1, 1.0, {x + speed, y, 0.0}, speed, 0.0, 0.0, 0.0, 0}};
@@ -52,6 +52,9 @@ TEST(ReplayDataTest, LoadsNonContiguousVehicleIdsAndCommonGrid) {
     ASSERT_EQ(replay_case.participant_ids, (std::vector<int>{2, 9}));
     EXPECT_EQ(replay_case.node_count, 2u);
     EXPECT_DOUBLE_EQ(replay_case.total_time, 1.0);
+    EXPECT_EQ(replay_case.report.collision_geometry,
+              "legacy_body_center_discs");
+    EXPECT_FALSE(replay_case.report.has_obb_validation_metrics);
     std::filesystem::remove_all(directory);
 }
 
@@ -85,23 +88,36 @@ TEST(ReplayDataTest, UsesSolverRk4ForIntermediatePose) {
     EXPECT_GT(std::abs(half.rear_axle.y), 1e-4);
 }
 
-TEST(ReplayDataTest, SeparatesCircleStaticAabbAndObbViolations) {
+TEST(ReplayDataTest, IgnoresFormerDiscOverlapWhenObbsAreSeparated) {
     ReplayCase replay_case;
-    replay_case.vehicles = {vehicle(2, 0.0, 0.0), vehicle(9, 0.1, 0.0)};
+    replay_case.vehicles = {vehicle(2, 0.0, 0.0), vehicle(9, 0.0, 0.11)};
+    replay_case.participant_ids = {2, 9};
+    replay_case.node_count = 2;
+    replay_case.total_time = 1.0;
+    EXPECT_TRUE(checkReplayInstant(replay_case, 0.5, 1e-6).empty());
+}
+
+TEST(ReplayDataTest, ReportsOnlyObbSatAndSeparateAabbViolations) {
+    ReplayCase replay_case;
+    replay_case.vehicles = {vehicle(2, 0.0, 0.0), vehicle(9, 0.0, 0.05)};
     replay_case.participant_ids = {2, 9};
     replay_case.node_count = 2;
     replay_case.total_time = 1.0;
     replay_case.vehicles[0].corridor = {{0.20, 1.0, -1.0, 1.0}};
-    replay_case.static_vehicles.push_back({17, {}, {0.10, 0.0, 0.0}, 0.12});
+    replay_case.static_vehicles.push_back({17, {0.0, -0.05, 0.0},
+                                           0.20, 0.10, 0.05});
     const auto violations = checkReplayInstant(replay_case, 0.5, 1e-6);
-    bool pair = false, fixed = false, aabb = false, obb = false;
+    bool participant_obb = false, static_obb = false, aabb = false;
     for (const auto& violation : violations) {
-        pair |= violation.type == ReplayViolationType::PARTICIPANT_DISC;
-        fixed |= violation.type == ReplayViolationType::STATIC_DISC;
         aabb |= violation.type == ReplayViolationType::AABB;
-        obb |= violation.type == ReplayViolationType::OBB;
+        participant_obb |= violation.type == ReplayViolationType::OBB &&
+                           !violation.other_is_static;
+        static_obb |= violation.type == ReplayViolationType::OBB &&
+                      violation.other_is_static;
     }
-    EXPECT_TRUE(pair); EXPECT_TRUE(fixed); EXPECT_TRUE(aabb); EXPECT_TRUE(obb);
+    EXPECT_TRUE(participant_obb);
+    EXPECT_TRUE(static_obb);
+    EXPECT_TRUE(aabb);
 }
 
 TEST(ReplayDataTest, ScansIntervalBoundariesAndWrapsClock) {

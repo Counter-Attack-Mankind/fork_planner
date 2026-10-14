@@ -4,7 +4,6 @@
   <arg name="playback_rate" default="1.0"/>
   <arg name="refresh_period" default="0.02"/>
   <arg name="paused" default="false"/>
-  <arg name="show_discs" default="true"/>
   <arg name="start_rviz" default="true"/>
 
   <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
@@ -16,7 +15,6 @@
     <param name="playback_rate" value="$(arg playback_rate)"/>
     <param name="refresh_period" value="$(arg refresh_period)"/>
     <param name="paused" value="$(arg paused)"/>
-    <param name="show_discs" value="$(arg show_discs)"/>
   </node>
 
   <node if="$(arg start_rviz)" pkg="rviz" type="rviz" name="nlp_replay_rviz"

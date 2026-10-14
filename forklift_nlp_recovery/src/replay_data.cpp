@@ -80,11 +80,6 @@ NumericState addScaled(const NumericState& state, const NumericState& delta, dou
             state.steer + scale * delta.steer};
 }
 
-double discClearance(const ReplayPose& first, double first_radius,
-                     const ReplayPose& second, double second_radius) {
-    return std::hypot(first.x - second.x, first.y - second.y) - first_radius - second_radius;
-}
-
 double unionAabbViolation(const ReplayVehicle& vehicle, const ReplayPose& center,
                           std::size_t interval, double time) {
     const ReplayNode& current = vehicle.nodes[interval];
@@ -96,25 +91,30 @@ double unionAabbViolation(const ReplayVehicle& vehicle, const ReplayPose& center
     return violation;
 }
 
-std::array<ReplayPose, 4> obbCorners(const ReplayNode& state, const ReplayParameters& parameters) {
-    const ReplayPose center = replayBodyCenter(state.rear_axle, parameters.rear_axle_to_center);
-    const double c = std::cos(state.rear_axle.yaw);
-    const double s = std::sin(state.rear_axle.yaw);
-    const double hl = parameters.length * 0.5;
-    const double hw = parameters.width * 0.5;
+std::array<ReplayPose, 4> obbCorners(const ReplayPose& rear_axle, double length,
+                                     double width, double rear_axle_to_center) {
+    const ReplayPose center = replayBodyCenter(rear_axle, rear_axle_to_center);
+    const double c = std::cos(rear_axle.yaw);
+    const double s = std::sin(rear_axle.yaw);
+    const double hl = length * 0.5;
+    const double hw = width * 0.5;
     return {{{center.x + c * hl - s * hw, center.y + s * hl + c * hw, 0.0},
              {center.x + c * hl + s * hw, center.y + s * hl - c * hw, 0.0},
              {center.x - c * hl + s * hw, center.y - s * hl - c * hw, 0.0},
              {center.x - c * hl - s * hw, center.y - s * hl + c * hw, 0.0}}};
 }
 
-double obbOverlap(const ReplayNode& first, const ReplayParameters& first_parameters,
-                  const ReplayNode& second, const ReplayParameters& second_parameters) {
-    const auto a = obbCorners(first, first_parameters);
-    const auto b = obbCorners(second, second_parameters);
-    const double angles[] = {first.rear_axle.yaw, first.rear_axle.yaw + M_PI_2,
-                             second.rear_axle.yaw, second.rear_axle.yaw + M_PI_2};
-    double minimum_overlap = std::numeric_limits<double>::infinity();
+double obbSeparationMargin(const ReplayPose& first_rear, double first_length,
+                           double first_width, double first_offset,
+                           const ReplayPose& second_rear, double second_length,
+                           double second_width, double second_offset) {
+    const auto first_corners = obbCorners(first_rear, first_length, first_width,
+                                          first_offset);
+    const auto second_corners = obbCorners(second_rear, second_length, second_width,
+                                           second_offset);
+    const double angles[] = {first_rear.yaw, first_rear.yaw + M_PI_2,
+                             second_rear.yaw, second_rear.yaw + M_PI_2};
+    double separation_margin = -std::numeric_limits<double>::infinity();
     for (double angle : angles) {
         const double ax = std::cos(angle);
         const double ay = std::sin(angle);
@@ -122,42 +122,45 @@ double obbOverlap(const ReplayNode& first, const ReplayParameters& first_paramet
         double amax = -amin;
         double bmin = amin;
         double bmax = -amin;
-        for (const ReplayPose& point : a) {
+        for (const ReplayPose& point : first_corners) {
             const double projection = point.x * ax + point.y * ay;
             amin = std::min(amin, projection);
             amax = std::max(amax, projection);
         }
-        for (const ReplayPose& point : b) {
+        for (const ReplayPose& point : second_corners) {
             const double projection = point.x * ax + point.y * ay;
             bmin = std::min(bmin, projection);
             bmax = std::max(bmax, projection);
         }
-        const double overlap = std::min(amax, bmax) - std::max(amin, bmin);
-        if (overlap <= 0.0) return 0.0;
-        minimum_overlap = std::min(minimum_overlap, overlap);
+        const double axis_margin = std::max(bmin - amax, amin - bmax);
+        separation_margin = std::max(separation_margin, axis_margin);
     }
-    return minimum_overlap;
+    return separation_margin;
 }
 
-using ViolationKey = std::tuple<int, int, int>;
+using ViolationKey = std::tuple<int, int, int, bool>;
 
 void buildIntervals(const std::vector<ReplayViolation>& violations, double maximum_gap,
                     std::vector<ReplayViolationInterval>& intervals) {
     std::map<ViolationKey, std::vector<const ReplayViolation*>> groups;
     for (const ReplayViolation& violation : violations) {
-        groups[{static_cast<int>(violation.type), violation.vehicle_id, violation.other_id}].push_back(&violation);
+        groups[{static_cast<int>(violation.type), violation.vehicle_id,
+                violation.other_id, violation.other_is_static}].push_back(&violation);
     }
     for (auto& item : groups) {
         auto& samples = item.second;
         std::sort(samples.begin(), samples.end(), [](const auto* a, const auto* b) { return a->time < b->time; });
         ReplayViolationInterval interval{samples.front()->type, samples.front()->vehicle_id,
-                                         samples.front()->other_id, samples.front()->time,
+                                         samples.front()->other_id,
+                                         samples.front()->other_is_static,
+                                         samples.front()->time,
                                          samples.front()->time, samples.front()->magnitude};
         for (std::size_t i = 1; i < samples.size(); ++i) {
             if (samples[i]->time - interval.end_time > maximum_gap + kTimeTolerance) {
                 intervals.push_back(interval);
                 interval = {samples[i]->type, samples[i]->vehicle_id, samples[i]->other_id,
-                            samples[i]->time, samples[i]->time, samples[i]->magnitude};
+                            samples[i]->other_is_static, samples[i]->time,
+                            samples[i]->time, samples[i]->magnitude};
             } else {
                 interval.end_time = samples[i]->time;
                 interval.max_violation = std::max(interval.max_violation, samples[i]->magnitude);
@@ -200,10 +203,9 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
             vehicle.parameters.length = requireDouble(parameters, "length");
             vehicle.parameters.width = requireDouble(parameters, "width");
             vehicle.parameters.rear_axle_to_center = requireDouble(parameters, "rear_axle_to_center");
-            vehicle.parameters.disc_radius = requireDouble(parameters, "disc_radius");
             vehicle.parameters.wheel_base = requireDouble(parameters, "wheel_base");
             if (vehicle.parameters.length <= 0.0 || vehicle.parameters.width <= 0.0 ||
-                vehicle.parameters.disc_radius <= 0.0 || vehicle.parameters.wheel_base <= 0.0) {
+                vehicle.parameters.wheel_base <= 0.0) {
                 throw std::runtime_error("vehicle " + std::to_string(vehicle.id) + " has invalid geometry");
             }
             if (!source["aabbs"] || !source["aabbs"].IsSequence() || source["aabbs"].size() == 0) {
@@ -227,9 +229,17 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
                 ReplayStaticVehicle obstacle;
                 obstacle.id = source["id"].as<int>();
                 obstacle.rear_axle = readPose(source["rear_axle_pose"]);
-                obstacle.disc_center = readPose(source["disc_center"]);
-                obstacle.disc_radius = requireDouble(source, "disc_radius");
-                if (obstacle.disc_radius <= 0.0) throw std::runtime_error("static vehicle has invalid radius");
+                const ReplayParameters& fallback = loaded.vehicles.front().parameters;
+                obstacle.length = source["length"] ? requireDouble(source, "length") :
+                                                     fallback.length;
+                obstacle.width = source["width"] ? requireDouble(source, "width") :
+                                                   fallback.width;
+                obstacle.rear_axle_to_center = source["rear_axle_to_center"] ?
+                    requireDouble(source, "rear_axle_to_center") :
+                    fallback.rear_axle_to_center;
+                if (obstacle.length <= 0.0 || obstacle.width <= 0.0) {
+                    throw std::runtime_error("static vehicle has invalid OBB geometry");
+                }
                 loaded.static_vehicles.push_back(obstacle);
             }
         }
@@ -296,22 +306,32 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
         loaded.report.total_time = requireDouble(report, "total_time");
         const YAML::Node validation = report["validation"];
         loaded.report.validation_reason = validation["reason"] ? validation["reason"].as<std::string>() : "";
-        const char* participant_margin_key = validation["minimum_participant_obb_separation_margin"] ?
-            "minimum_participant_obb_separation_margin" : "minimum_participant_clearance";
-        const char* static_margin_key = validation["minimum_static_obb_separation_margin"] ?
-            "minimum_static_obb_separation_margin" : "minimum_static_clearance";
-        const char* participant_samples_key = validation["participant_obb_collision_samples"] ?
-            "participant_obb_collision_samples" : "participant_collision_samples";
-        const char* static_samples_key = validation["static_obb_collision_samples"] ?
-            "static_obb_collision_samples" : "static_collision_samples";
-        loaded.report.minimum_participant_obb_separation_margin =
-            requireDouble(validation, participant_margin_key);
-        loaded.report.minimum_static_obb_separation_margin =
-            requireDouble(validation, static_margin_key);
-        loaded.report.participant_obb_collision_samples =
-            validation[participant_samples_key].as<std::size_t>();
-        loaded.report.static_obb_collision_samples =
-            validation[static_samples_key].as<std::size_t>();
+        loaded.report.has_obb_validation_metrics =
+            validation["minimum_participant_obb_separation_margin"] &&
+            validation["minimum_static_obb_separation_margin"] &&
+            validation["participant_obb_collision_samples"] &&
+            validation["static_obb_collision_samples"];
+        if (loaded.report.has_obb_validation_metrics) {
+            loaded.report.collision_geometry = validation["collision_geometry"] ?
+                validation["collision_geometry"].as<std::string>() : "obb_sat";
+            loaded.report.minimum_participant_obb_separation_margin =
+                requireDouble(validation, "minimum_participant_obb_separation_margin");
+            loaded.report.minimum_static_obb_separation_margin =
+                requireDouble(validation, "minimum_static_obb_separation_margin");
+            loaded.report.participant_obb_collision_samples =
+                validation["participant_obb_collision_samples"].as<std::size_t>();
+            loaded.report.static_obb_collision_samples =
+                validation["static_obb_collision_samples"].as<std::size_t>();
+        } else {
+            const bool legacy_fields = validation["minimum_participant_clearance"] &&
+                validation["minimum_static_clearance"] &&
+                validation["participant_collision_samples"] &&
+                validation["static_collision_samples"];
+            if (!legacy_fields) {
+                throw std::runtime_error("solver report lacks OBB SAT or legacy collision metrics");
+            }
+            loaded.report.collision_geometry = "legacy_body_center_discs";
+        }
         loaded.report.aabb_violation_samples = validation["aabb_violation_samples"].as<std::size_t>();
         if (loaded.report.node_count != loaded.node_count || std::abs(loaded.report.total_time - loaded.total_time) > 1e-6) {
             throw std::runtime_error("solver report time grid does not match optimized CSV");
@@ -387,20 +407,32 @@ std::vector<ReplayViolation> checkReplayInstant(const ReplayCase& replay_case, d
         const auto& vehicle = replay_case.vehicles[i];
         const double outside = unionAabbViolation(vehicle, centers[i], intervals[i], time);
         if (outside > tolerance) result.push_back({ReplayViolationType::AABB, time, vehicle.id, -1,
-                                                   outside, 0.0, outside, centers[i], centers[i]});
+                                                   false, outside, 0.0, outside,
+                                                   centers[i], centers[i]});
         for (std::size_t j = i + 1; j < replay_case.vehicles.size(); ++j) {
             const auto& other = replay_case.vehicles[j];
-            const double required = vehicle.parameters.disc_radius + other.parameters.disc_radius;
-            const double distance = std::hypot(centers[i].x - centers[j].x, centers[i].y - centers[j].y);
-            if (distance - required < -tolerance) result.push_back({ReplayViolationType::PARTICIPANT_DISC, time, vehicle.id, other.id, distance, required, required - distance, centers[i], centers[j]});
-            const double overlap = obbOverlap(states[i], vehicle.parameters, states[j], other.parameters);
-            if (overlap > tolerance) result.push_back({ReplayViolationType::OBB, time, vehicle.id, other.id, overlap, 0.0, overlap, centers[i], centers[j]});
+            const double margin = obbSeparationMargin(
+                states[i].rear_axle, vehicle.parameters.length,
+                vehicle.parameters.width, vehicle.parameters.rear_axle_to_center,
+                states[j].rear_axle, other.parameters.length,
+                other.parameters.width, other.parameters.rear_axle_to_center);
+            if (margin < -tolerance) {
+                result.push_back({ReplayViolationType::OBB, time, vehicle.id,
+                    other.id, false, margin, 0.0, -margin, centers[i], centers[j]});
+            }
         }
         for (const ReplayStaticVehicle& obstacle : replay_case.static_vehicles) {
-            const double required = vehicle.parameters.disc_radius + obstacle.disc_radius;
-            const double distance = std::hypot(centers[i].x - obstacle.disc_center.x,
-                                               centers[i].y - obstacle.disc_center.y);
-            if (distance - required < -tolerance) result.push_back({ReplayViolationType::STATIC_DISC, time, vehicle.id, obstacle.id, distance, required, required - distance, centers[i], obstacle.disc_center});
+            const double margin = obbSeparationMargin(
+                states[i].rear_axle, vehicle.parameters.length,
+                vehicle.parameters.width, vehicle.parameters.rear_axle_to_center,
+                obstacle.rear_axle, obstacle.length, obstacle.width,
+                obstacle.rear_axle_to_center);
+            if (margin < -tolerance) {
+                result.push_back({ReplayViolationType::OBB, time, vehicle.id,
+                    obstacle.id, true, margin, 0.0, -margin, centers[i],
+                    replayBodyCenter(obstacle.rear_axle,
+                                     obstacle.rear_axle_to_center)});
+            }
         }
     }
     return result;
@@ -410,8 +442,10 @@ ReplayDiagnostics scanReplayCase(const ReplayCase& replay_case, std::size_t subs
                                  double tolerance) {
     if (substeps == 0) throw std::invalid_argument("validation substeps must be positive");
     ReplayDiagnostics diagnostics;
-    diagnostics.minimum_participant_clearance = std::numeric_limits<double>::infinity();
-    diagnostics.minimum_static_clearance = std::numeric_limits<double>::infinity();
+    diagnostics.minimum_participant_obb_separation_margin =
+        std::numeric_limits<double>::infinity();
+    diagnostics.minimum_static_obb_separation_margin =
+        std::numeric_limits<double>::infinity();
     std::vector<double> sample_times;
     const auto& nodes = replay_case.vehicles.front().nodes;
     for (std::size_t i = 0; i + 1 < nodes.size(); ++i) {
@@ -424,28 +458,41 @@ ReplayDiagnostics scanReplayCase(const ReplayCase& replay_case, std::size_t subs
     double maximum_gap = 0.0;
     for (std::size_t k = 0; k < sample_times.size(); ++k) {
         if (k > 0) maximum_gap = std::max(maximum_gap, sample_times[k] - sample_times[k - 1]);
-        std::vector<ReplayPose> centers;
+        std::vector<ReplayNode> states;
         for (const ReplayVehicle& vehicle : replay_case.vehicles) {
-            const ReplayNode state = sampleReplayVehicle(vehicle, sample_times[k]);
-            centers.push_back(replayBodyCenter(state.rear_axle, vehicle.parameters.rear_axle_to_center));
+            states.push_back(sampleReplayVehicle(vehicle, sample_times[k]));
         }
         for (std::size_t i = 0; i < replay_case.vehicles.size(); ++i) {
+            const ReplayVehicle& vehicle = replay_case.vehicles[i];
             for (std::size_t j = i + 1; j < replay_case.vehicles.size(); ++j) {
-                diagnostics.minimum_participant_clearance = std::min(diagnostics.minimum_participant_clearance,
-                    discClearance(centers[i], replay_case.vehicles[i].parameters.disc_radius,
-                                  centers[j], replay_case.vehicles[j].parameters.disc_radius));
+                const ReplayVehicle& other = replay_case.vehicles[j];
+                const double margin = obbSeparationMargin(
+                    states[i].rear_axle, vehicle.parameters.length,
+                    vehicle.parameters.width, vehicle.parameters.rear_axle_to_center,
+                    states[j].rear_axle, other.parameters.length,
+                    other.parameters.width, other.parameters.rear_axle_to_center);
+                diagnostics.minimum_participant_obb_separation_margin = std::min(
+                    diagnostics.minimum_participant_obb_separation_margin, margin);
             }
             for (const ReplayStaticVehicle& obstacle : replay_case.static_vehicles) {
-                diagnostics.minimum_static_clearance = std::min(diagnostics.minimum_static_clearance,
-                    discClearance(centers[i], replay_case.vehicles[i].parameters.disc_radius,
-                                  obstacle.disc_center, obstacle.disc_radius));
+                const double margin = obbSeparationMargin(
+                    states[i].rear_axle, vehicle.parameters.length,
+                    vehicle.parameters.width, vehicle.parameters.rear_axle_to_center,
+                    obstacle.rear_axle, obstacle.length, obstacle.width,
+                    obstacle.rear_axle_to_center);
+                diagnostics.minimum_static_obb_separation_margin = std::min(
+                    diagnostics.minimum_static_obb_separation_margin, margin);
             }
         }
         auto violations = checkReplayInstant(replay_case, sample_times[k], tolerance);
         diagnostics.violations.insert(diagnostics.violations.end(), violations.begin(), violations.end());
     }
-    if (!std::isfinite(diagnostics.minimum_participant_clearance)) diagnostics.minimum_participant_clearance = 0.0;
-    if (!std::isfinite(diagnostics.minimum_static_clearance)) diagnostics.minimum_static_clearance = 0.0;
+    if (!std::isfinite(diagnostics.minimum_participant_obb_separation_margin)) {
+        diagnostics.minimum_participant_obb_separation_margin = 0.0;
+    }
+    if (!std::isfinite(diagnostics.minimum_static_obb_separation_margin)) {
+        diagnostics.minimum_static_obb_separation_margin = 0.0;
+    }
     buildIntervals(diagnostics.violations, maximum_gap * 1.01, diagnostics.intervals);
     return diagnostics;
 }
@@ -459,10 +506,8 @@ double wrapReplayTime(double current, double wall_dt, double playback_rate, doub
 
 const char* replayViolationTypeName(ReplayViolationType type) {
     switch (type) {
-        case ReplayViolationType::PARTICIPANT_DISC: return "participant_disc";
-        case ReplayViolationType::STATIC_DISC: return "static_disc";
         case ReplayViolationType::AABB: return "aabb";
-        case ReplayViolationType::OBB: return "obb";
+        case ReplayViolationType::OBB: return "obb_sat";
     }
     return "unknown";
 }

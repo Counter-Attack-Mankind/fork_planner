@@ -48,7 +48,6 @@ public:
         private_nh_.param("playback_rate", playback_rate_, 1.0);
         private_nh_.param("refresh_period", refresh_period_, 0.02);
         private_nh_.param("paused", paused_, false);
-        private_nh_.param("show_discs", show_discs_, true);
         int validation_substeps = 10;
         private_nh_.param("solver_validation_substeps", validation_substeps, validation_substeps);
         private_nh_.param("solver_validation_tolerance", validation_tolerance_, 1e-5);
@@ -114,7 +113,9 @@ private:
         array.markers.push_back(boundary);
     }
 
-    void addFixedGeometry(visualization_msgs::MarkerArray& array, const ros::Time& stamp) {
+    void addFixedGeometry(visualization_msgs::MarkerArray& array,
+                          const std::vector<ReplayViolation>& violations,
+                          const ros::Time& stamp) {
         for (std::size_t vehicle_index = 0; vehicle_index < replay_case_.vehicles.size(); ++vehicle_index) {
             const ReplayVehicle& vehicle = replay_case_.vehicles[vehicle_index];
             const auto base_color = vehicleColor(vehicle_index);
@@ -134,28 +135,43 @@ private:
             for (const ReplayNode& node : vehicle.nodes) trajectory.points.push_back(point(node.rear_axle.x, node.rear_axle.y, 0.035));
             array.markers.push_back(trajectory);
         }
+        std::set<int> colliding_static_ids;
+        for (const ReplayViolation& violation : violations) {
+            if (violation.type == ReplayViolationType::OBB &&
+                violation.other_is_static) {
+                colliding_static_ids.insert(violation.other_id);
+            }
+        }
         for (const ReplayStaticVehicle& obstacle : replay_case_.static_vehicles) {
-            auto disc = marker("static_vehicle_disc", visualization_msgs::Marker::CYLINDER, stamp);
-            disc.pose.position = point(obstacle.disc_center.x, obstacle.disc_center.y, 0.025);
-            disc.scale.x = disc.scale.y = obstacle.disc_radius * 2.0; disc.scale.z = 0.025;
-            disc.color = color(1.0f, 0.55f, 0.10f, 0.45f);
-            array.markers.push_back(disc);
-            addText(array, "static_vehicle_label", obstacle.disc_center.x, obstacle.disc_center.y,
-                    0.13, "static V" + std::to_string(obstacle.id), color(1.0f, 0.65f, 0.2f), 0.07, stamp);
+            const ReplayPose center = replayBodyCenter(
+                obstacle.rear_axle, obstacle.rear_axle_to_center);
+            const bool colliding = colliding_static_ids.count(obstacle.id) != 0;
+            const auto static_color = colliding ? color(1.0f, 0.0f, 0.0f) :
+                                                  color(1.0f, 0.55f, 0.10f);
+            auto body = marker("static_vehicle_body", visualization_msgs::Marker::CUBE, stamp);
+            body.pose.position = point(center.x, center.y, 0.075);
+            body.pose.orientation.z = std::sin(obstacle.rear_axle.yaw * 0.5);
+            body.pose.orientation.w = std::cos(obstacle.rear_axle.yaw * 0.5);
+            body.scale.x = obstacle.length;
+            body.scale.y = obstacle.width;
+            body.scale.z = 0.10;
+            body.color = color(static_color.r, static_color.g, static_color.b, 0.85f);
+            array.markers.push_back(body);
+            addText(array, "static_vehicle_label", center.x, center.y, 0.18,
+                    "static V" + std::to_string(obstacle.id), static_color, 0.07, stamp);
         }
         addHistoricalViolations(array, stamp);
     }
 
     void addHistoricalViolations(visualization_msgs::MarkerArray& array, const ros::Time& stamp) {
-        for (ReplayViolationType type : {ReplayViolationType::PARTICIPANT_DISC, ReplayViolationType::STATIC_DISC,
-                                         ReplayViolationType::AABB, ReplayViolationType::OBB}) {
+        for (ReplayViolationType type : {ReplayViolationType::AABB,
+                                         ReplayViolationType::OBB}) {
             auto points = marker(std::string("history_") + replayViolationTypeName(type),
                                  visualization_msgs::Marker::SPHERE_LIST, stamp);
             points.scale.x = points.scale.y = points.scale.z = 0.035;
-            points.color = type == ReplayViolationType::OBB ? color(1.0f, 0.1f, 0.9f, 0.75f) :
-                           type == ReplayViolationType::AABB ? color(1.0f, 0.45f, 0.0f, 0.75f) :
-                           type == ReplayViolationType::STATIC_DISC ? color(1.0f, 0.0f, 0.45f, 0.75f) :
-                           color(1.0f, 0.0f, 0.0f, 0.75f);
+            points.color = type == ReplayViolationType::OBB ?
+                color(1.0f, 0.1f, 0.1f, 0.75f) :
+                color(1.0f, 0.45f, 0.0f, 0.75f);
             for (const ReplayViolation& violation : diagnostics_.violations) {
                 if (violation.type != type) continue;
                 points.points.push_back(point(violation.first_center.x, violation.first_center.y, 0.055));
@@ -169,8 +185,9 @@ private:
                             const std::vector<ReplayViolation>& violations, const ros::Time& stamp) {
         std::set<int> violated;
         for (const ReplayViolation& violation : violations) {
+            if (violation.type != ReplayViolationType::OBB) continue;
             violated.insert(violation.vehicle_id);
-            if (violation.type == ReplayViolationType::PARTICIPANT_DISC || violation.type == ReplayViolationType::OBB) violated.insert(violation.other_id);
+            if (!violation.other_is_static) violated.insert(violation.other_id);
         }
         for (std::size_t i = 0; i < replay_case_.vehicles.size(); ++i) {
             const ReplayVehicle& vehicle = replay_case_.vehicles[i];
@@ -184,13 +201,6 @@ private:
             body.scale.x = vehicle.parameters.length; body.scale.y = vehicle.parameters.width; body.scale.z = 0.10;
             body.color = color(base.r, base.g, base.b, 0.9f);
             array.markers.push_back(body);
-            if (show_discs_) {
-                auto disc = marker("current_disc", visualization_msgs::Marker::CYLINDER, stamp);
-                disc.pose.position = point(center.x, center.y, 0.025);
-                disc.scale.x = disc.scale.y = vehicle.parameters.disc_radius * 2.0; disc.scale.z = 0.025;
-                disc.color = color(base.r, base.g, base.b, 0.25f);
-                array.markers.push_back(disc);
-            }
             std::ostringstream label;
             label << "V" << vehicle.id << "  t=" << std::fixed << std::setprecision(2) << playback_time_;
             addText(array, "current_vehicle_label", center.x, center.y, 0.18, label.str(), base, 0.075, stamp);
@@ -201,35 +211,35 @@ private:
                               const std::vector<ReplayViolation>& violations, const ros::Time& stamp) {
         for (const ReplayViolation& violation : violations) {
             const bool obb = violation.type == ReplayViolationType::OBB;
-            const auto marker_color = obb ? color(1.0f, 0.0f, 0.9f) : color(1.0f, 0.0f, 0.0f);
-            auto line = marker(std::string("current_") + replayViolationTypeName(violation.type),
-                               visualization_msgs::Marker::LINE_LIST, stamp);
-            line.scale.x = 0.025;
-            line.color = marker_color;
-            line.points = {point(violation.first_center.x, violation.first_center.y, 0.12),
-                           point(violation.second_center.x, violation.second_center.y, 0.12)};
-            array.markers.push_back(line);
-            if (violation.type == ReplayViolationType::STATIC_DISC) {
-                const auto obstacle = std::find_if(replay_case_.static_vehicles.begin(),
-                    replay_case_.static_vehicles.end(), [&](const ReplayStaticVehicle& value) {
-                        return value.id == violation.other_id;
-                    });
-                if (obstacle != replay_case_.static_vehicles.end()) {
-                    auto static_alert = marker("current_static_collision", visualization_msgs::Marker::CYLINDER, stamp);
-                    static_alert.pose.position = point(obstacle->disc_center.x, obstacle->disc_center.y, 0.055);
-                    static_alert.scale.x = static_alert.scale.y = obstacle->disc_radius * 2.0;
-                    static_alert.scale.z = 0.035;
-                    static_alert.color = color(1.0f, 0.0f, 0.0f, 0.85f);
-                    array.markers.push_back(static_alert);
-                }
+            const auto marker_color = obb ? color(1.0f, 0.0f, 0.0f) :
+                                            color(1.0f, 0.45f, 0.0f);
+            if (obb) {
+                auto line = marker("current_obb_sat", visualization_msgs::Marker::LINE_LIST,
+                                   stamp);
+                line.scale.x = 0.025;
+                line.color = marker_color;
+                line.points = {
+                    point(violation.first_center.x, violation.first_center.y, 0.12),
+                    point(violation.second_center.x, violation.second_center.y, 0.12)};
+                array.markers.push_back(line);
+            } else {
+                auto location = marker("current_aabb_violation",
+                    visualization_msgs::Marker::SPHERE, stamp);
+                location.pose.position = point(violation.first_center.x,
+                                               violation.first_center.y, 0.08);
+                location.scale.x = location.scale.y = location.scale.z = 0.05;
+                location.color = marker_color;
+                array.markers.push_back(location);
             }
             std::ostringstream text;
             text << replayViolationTypeName(violation.type) << " V" << violation.vehicle_id;
-            if (violation.other_id >= 0) text << "-" << (violation.type == ReplayViolationType::STATIC_DISC ? "static V" : "V") << violation.other_id;
+            if (violation.other_id >= 0) {
+                text << "-" << (violation.other_is_static ? "static V" : "V")
+                     << violation.other_id;
+            }
             text << " t=" << std::fixed << std::setprecision(2) << violation.time;
             if (violation.type == ReplayViolationType::AABB) text << " outside=" << std::setprecision(4) << violation.magnitude;
-            else if (violation.type == ReplayViolationType::OBB) text << " overlap=" << std::setprecision(4) << violation.magnitude;
-            else text << " d=" << std::setprecision(4) << violation.actual << " safe=" << violation.required;
+            else text << " overlap=" << std::setprecision(4) << violation.magnitude;
             addText(array, "current_violation_text",
                     (violation.first_center.x + violation.second_center.x) * 0.5,
                     (violation.first_center.y + violation.second_center.y) * 0.5, 0.24,
@@ -244,9 +254,10 @@ private:
         array.markers.push_back(clear);
         next_marker_id_ = 0;
         const ros::Time stamp = ros::Time::now();
+        const auto violations = checkReplayInstant(
+            replay_case_, playback_time_, validation_tolerance_);
         addMap(array, stamp);
-        addFixedGeometry(array, stamp);
-        const auto violations = checkReplayInstant(replay_case_, playback_time_, validation_tolerance_);
+        addFixedGeometry(array, violations, stamp);
         addCurrentVehicles(array, violations, stamp);
         addCurrentViolations(array, violations, stamp);
         std::ostringstream status;
@@ -291,18 +302,21 @@ private:
             ids << replay_case_.participant_ids[i];
         }
         ROS_INFO("NLP replay case=%s vehicles=[%s] T=%.6f solver=%s "
-                 "saved_validation=%s saved_min_pair_obb_sat_margin=%.6f "
-                 "replay_min_pair_disc_clearance=%.6f intervals=%zu",
+                 "saved_validation=%s saved_collision_geometry=%s "
+                 "replay_min_pair_obb_sat_margin=%.6f "
+                 "replay_min_static_obb_sat_margin=%.6f intervals=%zu",
                  replay_case_.case_id.c_str(), ids.str().c_str(), replay_case_.total_time,
                  replay_case_.report.return_status.c_str(), replay_case_.report.validation_passed ? "PASS" : "FAIL",
-                 replay_case_.report.minimum_participant_obb_separation_margin,
-                 diagnostics_.minimum_participant_clearance, diagnostics_.intervals.size());
+                 replay_case_.report.collision_geometry.c_str(),
+                 diagnostics_.minimum_participant_obb_separation_margin,
+                 diagnostics_.minimum_static_obb_separation_margin,
+                 diagnostics_.intervals.size());
         for (const ReplayViolationInterval& interval : diagnostics_.intervals) {
             ROS_WARN("replay violation type=%s vehicles=%d,%d time=[%.6f, %.6f] max=%.6f",
                      replayViolationTypeName(interval.type), interval.vehicle_id, interval.other_id,
                      interval.start_time, interval.end_time, interval.max_violation);
         }
-        ROS_INFO("Shelf geometry is displayed from current forklift_map parameters; the saved input contains no complete shelf geometry, so replay safety diagnostics use saved AABBs and vehicle circles only.");
+        ROS_INFO("Replay collision diagnostics use saved vehicle OBB geometry and SAT only; AABB diagnostics remain separate. Shelf geometry is display-only because the saved input contains no complete shelf geometry.");
     }
 
     ros::NodeHandle nh_;
@@ -324,7 +338,6 @@ private:
     std::size_t validation_substeps_ = 10;
     int next_marker_id_ = 0;
     bool paused_ = false;
-    bool show_discs_ = true;
 };
 
 }  // namespace forklift_nlp_recovery
