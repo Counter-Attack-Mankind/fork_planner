@@ -27,7 +27,7 @@ solver_validation_substeps: 10
 solver_validation_tolerance: 1.0e-3
 
 # A positive override is used directly. Values <= 0 use hypot(length/2, width/2).
-vehicle_radius: 0.14
+vehicle_radius: 0.145
 safety_margin: 0.0
 shelf_inflation_reduction: 0.05
 boundary_inset_reduction: 0.05

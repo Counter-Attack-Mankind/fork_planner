@@ -259,6 +259,250 @@ int firstForwardAabb(const VehicleInitialGuess& guess, const NlpVehicleInput& in
     return -1;
 }
 
+std::vector<size_t> containingAabbs(const std::vector<Aabb>& corridor,
+                                    const Pose2d& point, double tolerance) {
+    std::vector<size_t> result;
+    for (size_t box = 0; box < corridor.size(); ++box) {
+        if (contains(corridor[box], point, tolerance)) result.push_back(box);
+    }
+    return result;
+}
+
+std::string indexList(const std::vector<size_t>& indices) {
+    std::ostringstream text;
+    text << '[';
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (i > 0) text << ',';
+        text << indices[i];
+    }
+    text << ']';
+    return text.str();
+}
+
+std::vector<size_t> reachableAabbs(const std::vector<int>& costs, int unreachable) {
+    std::vector<size_t> result;
+    for (size_t box = 0; box < costs.size(); ++box) {
+        if (costs[box] != unreachable) result.push_back(box);
+    }
+    return result;
+}
+
+bool segmentIntersectsAabb(const Pose2d& first, const Pose2d& second,
+                           const Aabb& box, double tolerance,
+                           double& entry_ratio, double& exit_ratio) {
+    entry_ratio = 0.0;
+    exit_ratio = 1.0;
+    const double dx = second.x - first.x;
+    const double dy = second.y - first.y;
+    const auto clip = [&](double origin, double delta, double minimum, double maximum) {
+        minimum -= tolerance;
+        maximum += tolerance;
+        if (std::abs(delta) <= kEpsilon) return origin >= minimum && origin <= maximum;
+        double near = (minimum - origin) / delta;
+        double far = (maximum - origin) / delta;
+        if (near > far) std::swap(near, far);
+        entry_ratio = std::max(entry_ratio, near);
+        exit_ratio = std::min(exit_ratio, far);
+        return entry_ratio <= exit_ratio;
+    };
+    return clip(first.x, dx, box.min_x, box.max_x) &&
+           clip(first.y, dy, box.min_y, box.max_y) &&
+           entry_ratio <= 1.0 && exit_ratio >= 0.0;
+}
+
+void logAabbAssignmentFailure(const VehicleInitialGuess& guess,
+                              const NlpVehicleInput& input, double tolerance,
+                              const std::vector<std::vector<int>>& cost,
+                              int unreachable, int logical_start_box,
+                              const std::string& reason) {
+    std::ostringstream log;
+    log << std::fixed << std::setprecision(6);
+    log << "[nlp_recovery][AABB_ASSIGNMENT_FAILED] V" << input.id
+        << " reason=\"" << reason << "\""
+        << " start_exempt=" << (guess.start_aabb_exempt ? "true" : "false")
+        << " logical_start_aabb=";
+    if (logical_start_box >= 0) log << logical_start_box;
+    else log << "unresolved";
+    log << " tolerance=" << tolerance << '\n';
+
+    log << "AABBs:\n";
+    for (size_t box = 0; box < input.corridor.size(); ++box) {
+        const Aabb& bounds = input.corridor[box];
+        log << "  box=" << box << " bounds=[" << bounds.min_x << ',' << bounds.max_x
+            << "]x[" << bounds.min_y << ',' << bounds.max_y << "]\n";
+    }
+    log << "Adjacent intersections:\n";
+    for (size_t box = 0; box + 1 < input.corridor.size(); ++box) {
+        const Aabb& first = input.corridor[box];
+        const Aabb& second = input.corridor[box + 1];
+        const double min_x = std::max(first.min_x, second.min_x);
+        const double max_x = std::min(first.max_x, second.max_x);
+        const double min_y = std::max(first.min_y, second.min_y);
+        const double max_y = std::min(first.max_y, second.max_y);
+        const bool overlaps = min_x <= max_x + tolerance && min_y <= max_y + tolerance;
+        log << "  " << box << "->" << box + 1 << " overlap="
+            << (overlaps ? "true" : "false") << " intersection=[" << min_x << ','
+            << max_x << "]x[" << min_y << ',' << max_y << "]\n";
+    }
+
+    log << "Nodes (disc center, candidates, DP reachable):\n";
+    size_t first_empty = guess.nodes.size();
+    for (size_t node = 0; node < guess.nodes.size(); ++node) {
+        const Pose2d& center = guess.nodes[node].disc_center;
+        const std::vector<size_t> candidates = containingAabbs(input.corridor, center, tolerance);
+        const std::vector<size_t> reachable = node < cost.size() ?
+            reachableAabbs(cost[node], unreachable) : std::vector<size_t>{};
+        if (first_empty == guess.nodes.size() && reachable.empty()) first_empty = node;
+        log << "  k=" << node << " disc=(" << center.x << ',' << center.y << ')'
+            << " candidates=" << indexList(candidates)
+            << " reachable=" << indexList(reachable) << '\n';
+    }
+
+    log << "firstForwardAabb audit:\n";
+    log << "  implementation=corridor_seeds_array_order_then_discrete_nodes"
+        << " (does not geometrically prove first path entry)\n";
+    for (size_t seed = 0; seed < input.corridor_seeds.size(); ++seed) {
+        const Pose2d& point = input.corridor_seeds[seed];
+        log << "  seed_index=" << seed << " point=(" << point.x << ',' << point.y
+            << ") candidates="
+            << indexList(containingAabbs(input.corridor, point, tolerance))
+            << " distance_from_start=" << poseDistance(point, guess.nodes.front().disc_center)
+            << '\n';
+    }
+    const int implementation_choice = guess.start_aabb_exempt ?
+        firstForwardAabb(guess, input, tolerance) : -1;
+    int first_discrete_box = -1;
+    size_t first_discrete_node = guess.nodes.size();
+    for (size_t node = 1; node < guess.nodes.size(); ++node) {
+        const std::vector<size_t> candidates = containingAabbs(
+            input.corridor, guess.nodes[node].disc_center, tolerance);
+        if (!candidates.empty()) {
+            first_discrete_node = node;
+            first_discrete_box = static_cast<int>(candidates.front());
+            break;
+        }
+    }
+    int dense_first_box = -1;
+    size_t dense_interval = guess.nodes.size();
+    double dense_ratio = 0.0;
+    constexpr size_t kAuditSamplesPerInterval = 100;
+    for (size_t node = 1; node < guess.nodes.size() && dense_first_box < 0; ++node) {
+        for (size_t sample = 1; sample <= kAuditSamplesPerInterval; ++sample) {
+            const double ratio = static_cast<double>(sample) / kAuditSamplesPerInterval;
+            const Pose2d rear = interpolatePose(guess.nodes[node - 1].rear_axle_pose,
+                                                guess.nodes[node].rear_axle_pose, ratio);
+            const std::vector<size_t> candidates = containingAabbs(
+                input.corridor, discCenter(rear, input.parameters), tolerance);
+            if (!candidates.empty()) {
+                dense_first_box = static_cast<int>(candidates.front());
+                dense_interval = node - 1;
+                dense_ratio = ratio;
+                break;
+            }
+        }
+    }
+    log << "  implementation_choice=";
+    if (guess.start_aabb_exempt) log << implementation_choice;
+    else log << "not_invoked(start already covered)";
+    log
+        << " first_covered_discrete_node=";
+    if (first_discrete_box >= 0) log << first_discrete_node << " box=" << first_discrete_box;
+    else log << "none";
+    log << " dense_guess_segment_first_entry=";
+    if (dense_first_box >= 0) {
+        log << "interval=" << dense_interval << "->" << dense_interval + 1
+            << " ratio=" << dense_ratio << " box=" << dense_first_box;
+    } else {
+        log << "none";
+    }
+    if (guess.start_aabb_exempt && implementation_choice >= 0 && dense_first_box >= 0 &&
+        implementation_choice != dense_first_box) {
+        log << " MISMATCH(seed-order choice is not the first forward entry in dense audit)";
+    }
+    log << '\n';
+
+    if (first_empty < guess.nodes.size()) {
+        log << "First unreachable node: k=" << first_empty << '\n';
+        const size_t begin = first_empty > 0 ? first_empty - 1 : 0;
+        const size_t end = std::min(first_empty + 1, guess.nodes.size() - 1);
+        for (size_t node = begin; node <= end; ++node) {
+            const Pose2d& center = guess.nodes[node].disc_center;
+            log << "  context k=" << node << " disc=(" << center.x << ',' << center.y
+                << ") candidates="
+                << indexList(containingAabbs(input.corridor, center, tolerance))
+                << " reachable=" << indexList(reachableAabbs(cost[node], unreachable)) << '\n';
+        }
+        if (first_empty == 0) {
+            log << "  rejection=START_LOGICAL_OWNERSHIP_UNRESOLVED candidates="
+                << indexList(containingAabbs(input.corridor,
+                                             guess.nodes.front().disc_center, tolerance))
+                << " selected=" << logical_start_box << '\n';
+        } else {
+            const std::vector<size_t> previous_reachable =
+                reachableAabbs(cost[first_empty - 1], unreachable);
+            const std::vector<size_t> current_candidates = containingAabbs(
+                input.corridor, guess.nodes[first_empty].disc_center, tolerance);
+            if (current_candidates.empty()) {
+                log << "  rejection=NODE_OUTSIDE_ALL_AABBS\n";
+            }
+            for (size_t previous : previous_reachable) {
+                for (size_t box : current_candidates) {
+                    log << "  transition " << previous << "->" << box << " rejected=";
+                    if (box < previous) {
+                        log << "AABB_NUMBER_BACKTRACK (current < previous)";
+                    } else if (box > previous + 1) {
+                        log << "AABB_NUMBER_SKIP (current > previous + 1)";
+                    } else if (box != previous) {
+                        const bool previous_node_in_current = contains(
+                            input.corridor[box], guess.nodes[first_empty - 1].disc_center,
+                            tolerance);
+                        const bool current_node_in_previous = contains(
+                            input.corridor[previous], guess.nodes[first_empty].disc_center,
+                            tolerance);
+                        if (!previous_node_in_current && !current_node_in_previous) {
+                            const Aabb intersection{
+                                std::max(input.corridor[previous].min_x,
+                                         input.corridor[box].min_x),
+                                std::min(input.corridor[previous].max_x,
+                                         input.corridor[box].max_x),
+                                std::max(input.corridor[previous].min_y,
+                                         input.corridor[box].min_y),
+                                std::min(input.corridor[previous].max_y,
+                                         input.corridor[box].max_y)};
+                            const bool boxes_overlap =
+                                intersection.min_x <= intersection.max_x + tolerance &&
+                                intersection.min_y <= intersection.max_y + tolerance;
+                            double entry_ratio = 0.0;
+                            double exit_ratio = 0.0;
+                            const bool segment_crosses_overlap = boxes_overlap &&
+                                segmentIntersectsAabb(
+                                    guess.nodes[first_empty - 1].disc_center,
+                                    guess.nodes[first_empty].disc_center,
+                                    intersection, tolerance, entry_ratio, exit_ratio);
+                            log << "ADJACENT_OVERLAP_TRANSITION_CONDITION"
+                                << " previous_node_in_current=false"
+                                << " current_node_in_previous=false"
+                                << " boxes_overlap=" << (boxes_overlap ? "true" : "false")
+                                << " node_segment_crosses_overlap="
+                                << (segment_crosses_overlap ? "true" : "false");
+                            if (segment_crosses_overlap) {
+                                log << " segment_ratio=[" << std::max(0.0, entry_ratio)
+                                    << ',' << std::min(1.0, exit_ratio) << ']';
+                            }
+                        } else {
+                            log << "none (transition should be reachable; inspect DP cost)";
+                        }
+                    } else {
+                        log << "none (same-box transition should be reachable; inspect DP cost)";
+                    }
+                    log << '\n';
+                }
+            }
+        }
+    }
+    ROS_ERROR_STREAM(log.str());
+}
+
 bool assignAabbs(VehicleInitialGuess& guess, const NlpVehicleInput& input,
                  double tolerance, std::string& reason) {
     if (input.corridor.empty()) {
@@ -270,10 +514,12 @@ bool assignAabbs(VehicleInitialGuess& guess, const NlpVehicleInput& input,
     const int unreachable = std::numeric_limits<int>::max() / 4;
     std::vector<std::vector<int>> cost(node_count, std::vector<int>(box_count, unreachable));
     std::vector<std::vector<int>> predecessor(node_count, std::vector<int>(box_count, -1));
+    int logical_start_box = -1;
 
     for (size_t box = 0; box < box_count; ++box) {
         if (contains(input.corridor[box], guess.nodes.front().disc_center, tolerance)) {
             cost[0][box] = static_cast<int>(box);
+            if (logical_start_box < 0) logical_start_box = static_cast<int>(box);
         }
     }
     const bool start_covered = std::any_of(cost.front().begin(), cost.front().end(),
@@ -282,9 +528,12 @@ bool assignAabbs(VehicleInitialGuess& guess, const NlpVehicleInput& input,
         const int first_forward_box = firstForwardAabb(guess, input, tolerance);
         if (first_forward_box < 0) {
             reason = "start disc center is outside every AABB and the forward reference path never enters one";
+            logAabbAssignmentFailure(guess, input, tolerance, cost, unreachable,
+                                     logical_start_box, reason);
             return false;
         }
         guess.start_aabb_exempt = true;
+        logical_start_box = first_forward_box;
         cost[0][static_cast<size_t>(first_forward_box)] = first_forward_box;
     }
     for (size_t node = 1; node < node_count; ++node) {
@@ -292,11 +541,6 @@ bool assignAabbs(VehicleInitialGuess& guess, const NlpVehicleInput& input,
             if (!contains(input.corridor[box], guess.nodes[node].disc_center, tolerance)) continue;
             for (size_t previous = 0; previous < box_count; ++previous) {
                 if (cost[node - 1][previous] == unreachable || box < previous || box > previous + 1) continue;
-                if (box != previous &&
-                    !contains(input.corridor[box], guess.nodes[node - 1].disc_center, tolerance) &&
-                    !contains(input.corridor[previous], guess.nodes[node].disc_center, tolerance)) {
-                    continue;
-                }
                 const int candidate = cost[node - 1][previous] + (box == previous ? 0 : 1);
                 if (candidate < cost[node][box]) {
                     cost[node][box] = candidate;
@@ -321,6 +565,8 @@ bool assignAabbs(VehicleInitialGuess& guess, const NlpVehicleInput& input,
         if (first_uncovered < node_count) text << "disc center at node " << first_uncovered << " is outside every AABB";
         else text << "no ordered assignment through adjacent AABB overlap";
         reason = text.str();
+        logAabbAssignmentFailure(guess, input, tolerance, cost, unreachable,
+                                 logical_start_box, reason);
         return false;
     }
 
