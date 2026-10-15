@@ -10,6 +10,7 @@ uint8 PHASE_ABORT=6
 uint8 PHASE_NLP_PREP=7
 
 uint8 recovery_phase
+uint64 recovery_id
 int32 retreat_vehicle_id
 int32 pass_vehicle_id
 int32 retreat_path_gen

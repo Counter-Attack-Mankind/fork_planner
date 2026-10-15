@@ -2,7 +2,7 @@
 <package format="2">
   <name>forklift_nlp_recovery</name>
   <version>0.1.0</version>
-  <description>Read-only N-vehicle deadlock recovery trajectory optimization and visualization.</description>
+  <description>N-vehicle deadlock recovery trajectory optimization, validation, visualization, and optional simulation execution.</description>
   <maintainer email="yssun@hnu.edu.cn">Yueshuo Sun</maintainer>
   <license>MIT</license>
 

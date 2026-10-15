@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,7 @@ enum class RecoveryMotion {
 //DeadlockManager 对外发布的“当前死锁恢复指令”
 struct RecoveryDirective {
     RecoveryPhase phase = RecoveryPhase::NONE;
+    uint64_t recovery_id = 0;
     int retreat_attempt = 0;   // 当前第几次固定退让，目前设定容忍退让三次
     int retreat_vehicle_id = -1;
     int pass_vehicle_id = -1;
@@ -75,6 +77,7 @@ public:
     //DeadlockManager 内部真正执行中的恢复事务状态。
     struct TransactionState {
         RecoveryPhase phase = RecoveryPhase::NONE;
+        uint64_t recovery_id = 0;
         int retreat_attempt = 0;   // 当前 recovery 已执行到第几次退让（真实操作）
         int retreat_vehicle_id = -1;
         int pass_vehicle_id = -1;
@@ -116,6 +119,7 @@ public:
 
     Snapshot snapshot() const;
     void restore(const Snapshot& snapshot);
+    bool completeNlpRecovery(uint64_t recovery_id);
 
 private:
 
@@ -140,6 +144,7 @@ private:
     CandidateState candidate_;
     TransactionState transaction_;
     RecoveryDirective directive_;
+    uint64_t next_recovery_id_ = 1;
     std::function<void(const std::string&)> log_sink_;
 };
 

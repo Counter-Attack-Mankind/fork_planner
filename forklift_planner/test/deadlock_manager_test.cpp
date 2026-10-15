@@ -314,6 +314,25 @@ int main() {
         return fail("15-second rollout advanced live RETREAT_HOLD time");
     }
 
+    DeadlockManager nlp_manager(map, config);
+    DeadlockManager::Snapshot nlp_state;
+    nlp_state.transaction.phase = RecoveryPhase::NLP_PREP;
+    nlp_state.transaction.recovery_id = 42;
+    nlp_state.transaction.nlp_vehicle_ids = {retreat.id, passer.id};
+    nlp_state.directive.phase = RecoveryPhase::NLP_PREP;
+    nlp_state.directive.recovery_id = 42;
+    nlp_state.directive.nlp_vehicle_ids = {retreat.id, passer.id};
+    nlp_manager.restore(nlp_state);
+    if (nlp_manager.completeNlpRecovery(41) ||
+        nlp_manager.directive().phase != RecoveryPhase::NLP_PREP) {
+        return fail("mismatched NLP recovery identity cleared the transaction");
+    }
+    if (!nlp_manager.completeNlpRecovery(42) ||
+        nlp_manager.directive().phase != RecoveryPhase::NONE ||
+        nlp_manager.directive().recovery_id != 0) {
+        return fail("valid NLP recovery completion did not clear the transaction");
+    }
+
     std::cout << "deadlock_manager_test: PASS\n";
     return 0;
 }

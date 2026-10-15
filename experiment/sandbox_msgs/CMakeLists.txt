@@ -19,6 +19,9 @@ add_message_files(
   ChassisCommand.msg
   RecoveryVehicleState.msg
   RecoverySnapshot.msg
+  NlpRecoveryVehicleTrajectory.msg
+  NlpRecoveryTrajectory.msg
+  NlpRecoveryPoint.msg
 )
 
 ## Generate added messages and services with any dependencies listed here

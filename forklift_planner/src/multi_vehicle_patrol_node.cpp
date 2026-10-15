@@ -41,6 +41,9 @@
 #include "sandbox_msgs/AprilObject.h"
 #include "sandbox_msgs/RecoverySnapshot.h"
 #include "sandbox_msgs/RecoveryVehicleState.h"
+#include "sandbox_msgs/NlpRecoveryTrajectory.h"
+#include "sandbox_msgs/NlpRecoveryPoint.h"
+#include "sandbox_msgs/NlpRecoveryVehicleTrajectory.h"
 #include "sandbox_msgs/Trajectory.h"
 #include "sandbox_msgs/TrajectoryPoint.h"
 #include "std_msgs/Float64.h"
@@ -56,6 +59,12 @@ std_msgs::ColorRGBA rgba(float r, float g, float b, float a = 1.0f) {
     c.b = b;
     c.a = a;
     return c;
+}
+
+double normalizeAngle(double angle) {
+    while (angle > M_PI) angle -= 2.0 * M_PI;
+    while (angle < -M_PI) angle += 2.0 * M_PI;
+    return angle;
 }
 
 }  // namespace
@@ -129,6 +138,9 @@ public:
             "/forklift_planner/markers", 10);
         recovery_snapshot_pub_ = nh_.advertise<sandbox_msgs::RecoverySnapshot>(
             "/forklift_planner/recovery_snapshot", 1, true);
+        nlp_trajectory_sub_ = nh_.subscribe(
+            "/forklift_planner/nlp_recovery_trajectory", 1,
+            &MultiVehiclePatrolNode::nlpTrajectoryCallback, this);
 
         if (stress_quiet_) {
             ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME,
@@ -2577,6 +2589,7 @@ private:
         snapshot.header.frame_id = pp_.frame_id;
         const auto& recovery = rule_engine_->recoveryDirective();
         snapshot.recovery_phase = static_cast<uint8_t>(recovery.phase);
+        snapshot.recovery_id = recovery.recovery_id;
         snapshot.retreat_vehicle_id = recovery.retreat_vehicle_id;
         snapshot.pass_vehicle_id = recovery.pass_vehicle_id;
         snapshot.retreat_path_gen = recovery.retreat_path_gen;
@@ -2610,6 +2623,295 @@ private:
             snapshot.vehicles.push_back(std::move(state));
         }
         recovery_snapshot_pub_.publish(snapshot);
+    }
+
+    VehicleAgent* agentById(int id) {
+        const auto found = std::find_if(agents_.begin(), agents_.end(),
+            [id](const VehicleAgent& vehicle) { return vehicle.id == id; });
+        return found == agents_.end() ? nullptr : &*found;
+    }
+
+    bool validateNlpTrajectory(const sandbox_msgs::NlpRecoveryTrajectory& message,
+                               std::string& reason) {
+        const auto& recovery = rule_engine_->recoveryDirective();
+        if (cfg_.real_mode || !nlp_recovery_frozen_ || !recovery.nlpTakeover()) {
+            reason = "planner is not in a simulation NLP_PREP freeze";
+            return false;
+        }
+        if (message.recovery_id == 0 || message.recovery_id != recovery.recovery_id) {
+            reason = "recovery transaction identity mismatch";
+            return false;
+        }
+        if (message.header.frame_id != pp_.frame_id) {
+            reason = "trajectory frame does not match the planner frame";
+            return false;
+        }
+        if (!message.solver_success || !message.validation_passed) {
+            reason = "solver or independent validation did not pass";
+            return false;
+        }
+        if (message.vehicles.size() != recovery.nlp_vehicle_ids.size() ||
+            message.vehicles.empty()) {
+            reason = "participant set size mismatch";
+            return false;
+        }
+        std::set<int> expected(recovery.nlp_vehicle_ids.begin(), recovery.nlp_vehicle_ids.end());
+        std::set<int> received;
+        size_t node_count = 0;
+        for (const auto& trajectory : message.vehicles) {
+            VehicleAgent* vehicle = agentById(trajectory.id);
+            if (vehicle == nullptr || expected.count(trajectory.id) == 0 ||
+                !received.insert(trajectory.id).second ||
+                vehicle->path_gen != trajectory.path_gen || vehicle->track.empty()) {
+                reason = "participant or frozen path identity mismatch";
+                return false;
+            }
+            if (trajectory.points.size() < 2 ||
+                (node_count != 0 && trajectory.points.size() != node_count)) {
+                reason = "trajectory dimensions are incomplete";
+                return false;
+            }
+            node_count = trajectory.points.size();
+            if (trajectory.terminal_path_s < vehicle->path_s - 1e-6 ||
+                trajectory.terminal_path_s > vehicle->track.length() + 1e-6) {
+                reason = "terminal path_s is outside the frozen path";
+                return false;
+            }
+            geometry_msgs::Pose2D start;
+            if (!recoveryPose(*vehicle, start)) {
+                reason = "frozen participant has no valid pose";
+                return false;
+            }
+            const auto& first = trajectory.points.front();
+            if (std::hypot(first.x - start.x, first.y - start.y) > 1e-4 ||
+                std::abs(normalizeAngle(first.yaw - start.theta)) > 1e-4 ||
+                std::abs(first.velocity) > 1e-4) {
+                reason = "trajectory start does not match the frozen vehicle state";
+                return false;
+            }
+            const RoughWp terminal = vehicle->track.poseAtS(trajectory.terminal_path_s);
+            const auto& last = trajectory.points.back();
+            if (std::hypot(last.x - terminal.x, last.y - terminal.y) > 1e-4 ||
+                std::abs(normalizeAngle(last.yaw - terminal.theta)) > 1e-4 ||
+                std::abs(last.velocity) > 1e-4) {
+                reason = "trajectory terminal does not match terminal.path_s";
+                return false;
+            }
+            double previous_time = -1.0;
+            for (size_t node = 0; node < trajectory.points.size(); ++node) {
+                const auto& point = trajectory.points[node];
+                if (!std::isfinite(point.time) || !std::isfinite(point.x) ||
+                    !std::isfinite(point.y) || !std::isfinite(point.yaw) ||
+                    !std::isfinite(point.velocity) ||
+                    !std::isfinite(point.acceleration) ||
+                    !std::isfinite(point.front_steer) ||
+                    !std::isfinite(point.steer_rate) ||
+                    (node > 0 && point.time <= previous_time)) {
+                    reason = "trajectory contains invalid values or time ordering";
+                    return false;
+                }
+                if (node == 0 && std::abs(point.time) > 1e-9) {
+                    reason = "trajectory time axis must start at zero";
+                    return false;
+                }
+                if (&trajectory != &message.vehicles.front() &&
+                    std::abs(point.time - message.vehicles.front().points[node].time) > 1e-9) {
+                    reason = "participant trajectories do not share one time axis";
+                    return false;
+                }
+                previous_time = point.time;
+            }
+        }
+        if (received != expected) {
+            reason = "participant set mismatch";
+            return false;
+        }
+        for (const VehicleAgent& vehicle : agents_) {
+            if (expected.count(vehicle.id) == 0 && std::abs(vehicle.current_speed) > 1e-9) {
+                reason = "non-participant is not frozen";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void nlpTrajectoryCallback(const sandbox_msgs::NlpRecoveryTrajectory::ConstPtr& message) {
+        if (nlp_execution_active_ && message->recovery_id == nlp_execution_.recovery_id) return;
+        std::string reason;
+        if (!validateNlpTrajectory(*message, reason)) {
+            ROS_ERROR("[NLP_EXEC_REJECT] %s", reason.c_str());
+            if (diagnostics_) diagnostics_->event("[NLP_EXEC_REJECT] " + reason);
+            return;
+        }
+        nlp_execution_ = *message;
+        nlp_execution_elapsed_ = 0.0;
+        nlp_execution_active_ = true;
+        sim_plan_frames_.clear();
+        sim_plan_cursor_ = 0;
+        sim_plan_valid_ = false;
+        ROS_WARN("[NLP_EXEC] recovery_id=%llu vehicles=%zu duration=%.3f",
+                 static_cast<unsigned long long>(message->recovery_id),
+                 message->vehicles.size(), message->vehicles.front().points.back().time);
+    }
+
+    bool sampleNlpTrajectory(const sandbox_msgs::NlpRecoveryVehicleTrajectory& trajectory,
+                             double time, RoughWp& pose, double& speed) const {
+        if (trajectory.points.empty()) return false;
+        auto upper = std::upper_bound(trajectory.points.begin(), trajectory.points.end(), time,
+            [](double value, const sandbox_msgs::NlpRecoveryPoint& point) {
+                return value < point.time;
+            });
+        if (upper == trajectory.points.begin()) upper = trajectory.points.begin() + 1;
+        if (upper == trajectory.points.end()) {
+            const auto& point = trajectory.points.back();
+            pose = {point.x, point.y, point.yaw, WpType::FORWARD};
+            speed = point.velocity;
+            return true;
+        }
+        const auto& second = *upper;
+        const auto& first = *(upper - 1);
+        const double duration = std::clamp(time - first.time, 0.0,
+                                           second.time - first.time);
+        struct State { double x, y, yaw, velocity, steer; };
+        const auto derivative = [&](const State& state) {
+            return State{state.velocity * std::cos(state.yaw),
+                         state.velocity * std::sin(state.yaw),
+                         state.velocity * std::tan(state.steer) / mp_.wheel_base,
+                         first.acceleration, first.steer_rate};
+        };
+        const auto add = [](const State& state, const State& delta, double scale) {
+            return State{state.x + scale * delta.x, state.y + scale * delta.y,
+                         state.yaw + scale * delta.yaw,
+                         state.velocity + scale * delta.velocity,
+                         state.steer + scale * delta.steer};
+        };
+        const State initial{first.x, first.y, first.yaw, first.velocity,
+                            first.front_steer};
+        const State k1 = derivative(initial);
+        const State k2 = derivative(add(initial, k1, 0.5 * duration));
+        const State k3 = derivative(add(initial, k2, 0.5 * duration));
+        const State k4 = derivative(add(initial, k3, duration));
+        pose.x = initial.x + duration * (k1.x + 2.0 * k2.x + 2.0 * k3.x + k4.x) / 6.0;
+        pose.y = initial.y + duration * (k1.y + 2.0 * k2.y + 2.0 * k3.y + k4.y) / 6.0;
+        pose.theta = initial.yaw + duration * (k1.yaw + 2.0 * k2.yaw + 2.0 * k3.yaw + k4.yaw) / 6.0;
+        speed = initial.velocity + duration * first.acceleration;
+        pose.type = speed >= 0.0 ? WpType::FORWARD : WpType::REVERSE;
+        return true;
+    }
+
+    bool nlpSamplesCollisionFree(const std::vector<RoughWp>& poses,
+                                 const std::vector<int>& ids) const {
+        for (size_t i = 0; i < poses.size(); ++i) {
+            const auto body = forklift_planner::multi_vehicle::makeBody(poses[i], mp_, 0.0);
+            for (size_t j = i + 1; j < poses.size(); ++j) {
+                if (forklift_planner::multi_vehicle::overlaps(
+                        body, forklift_planner::multi_vehicle::makeBody(poses[j], mp_, 0.0))) {
+                    return false;
+                }
+            }
+            for (const VehicleAgent& other : agents_) {
+                if (std::find(ids.begin(), ids.end(), other.id) != ids.end()) continue;
+                geometry_msgs::Pose2D other_pose;
+                if (!recoveryPose(other, other_pose)) continue;
+                RoughWp fixed{other_pose.x, other_pose.y, other_pose.theta, WpType::FORWARD};
+                if (forklift_planner::multi_vehicle::overlaps(
+                        body, forklift_planner::multi_vehicle::makeBody(fixed, mp_, 0.0))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    void executeNlpRecovery(double dt) {
+        if (!nlp_execution_active_) return;
+        const double duration = nlp_execution_.vehicles.front().points.back().time;
+        const double next_time = std::min(duration, nlp_execution_elapsed_ + dt);
+        std::vector<RoughWp> poses;
+        std::vector<double> speeds;
+        std::vector<int> ids;
+        for (const auto& trajectory : nlp_execution_.vehicles) {
+            RoughWp pose;
+            double speed = 0.0;
+            if (!sampleNlpTrajectory(trajectory, next_time, pose, speed)) return;
+            poses.push_back(pose);
+            speeds.push_back(speed);
+            ids.push_back(trajectory.id);
+        }
+        if (!nlpSamplesCollisionFree(poses, ids)) {
+            nlp_execution_active_ = false;
+            for (int id : ids) {
+                VehicleAgent* vehicle = agentById(id);
+                if (vehicle != nullptr) vehicle->current_speed = 0.0;
+            }
+            ROS_ERROR("[NLP_EXEC_ABORT] collision risk; global freeze retained");
+            if (diagnostics_) diagnostics_->event("[NLP_EXEC_ABORT] collision risk");
+            return;
+        }
+        for (size_t i = 0; i < ids.size(); ++i) {
+            VehicleAgent* vehicle = agentById(ids[i]);
+            if (vehicle == nullptr) return;
+            vehicle->real_pose_valid = true;
+            vehicle->real_x = poses[i].x;
+            vehicle->real_y = poses[i].y;
+            vehicle->real_yaw = poses[i].theta;
+            vehicle->current_speed = speeds[i];
+            vehicle->reason = "nlp_recovery_exec";
+        }
+        nlp_execution_elapsed_ = next_time;
+        if (!ids.empty()) {
+            ROS_INFO_THROTTLE(1.0,
+                "[NLP_EXEC_PROGRESS] recovery_id=%llu t=%.2f/%.2f first=V%d speed=%.3f",
+                static_cast<unsigned long long>(nlp_execution_.recovery_id),
+                next_time, duration, ids.front(), speeds.front());
+        }
+        ++tick_count_;
+        sim_time_ += dt;
+        if (next_time + 1e-9 < duration) return;
+
+        for (const auto& trajectory : nlp_execution_.vehicles) {
+            VehicleAgent* vehicle = agentById(trajectory.id);
+            if (vehicle == nullptr || vehicle->path_gen != trajectory.path_gen) {
+                nlp_execution_active_ = false;
+                ROS_ERROR("[NLP_FINISH] path identity changed; global freeze retained");
+                if (diagnostics_) diagnostics_->event(
+                    "[NLP_FINISH] path identity changed");
+                return;
+            }
+        }
+        for (const auto& trajectory : nlp_execution_.vehicles) {
+            VehicleAgent* vehicle = agentById(trajectory.id);
+            vehicle->path_s = trajectory.terminal_path_s;
+            vehicle->current_speed = 0.0;
+            vehicle->real_pose_valid = false;
+            vehicle->reason = "nlp_recovery_rejoined";
+        }
+        if (!rule_engine_->completeNlpRecovery(nlp_execution_.recovery_id)) {
+            ROS_ERROR("[NLP_FINISH] transaction completion rejected; global freeze retained");
+            return;
+        }
+        nlp_execution_active_ = false;
+        sim_plan_frames_.clear();
+        sim_plan_cursor_ = 0;
+        sim_plan_valid_ = false;
+        if (rb_one_shot_traj_) {
+            rule_engine_->decide(agents_, dt);
+            marker_pub_->setRollingDecision(rule_engine_->lastRollingDynamicDecision());
+        } else {
+            force_horizon_refresh_ = true;
+            publishHorizon();
+            force_horizon_refresh_ = false;
+            if (!sim_plan_valid_) {
+                ROS_ERROR("[NLP_FINISH] normal coordination produced no executable plan; "
+                          "global freeze retained");
+                if (diagnostics_) diagnostics_->event(
+                    "[NLP_FINISH] normal coordination plan unavailable");
+                return;
+            }
+        }
+        nlp_recovery_frozen_ = false;
+        ROS_WARN("[NLP_FINISH] recovery_id=%llu rejoined and normal coordination resumed",
+                 static_cast<unsigned long long>(nlp_execution_.recovery_id));
     }
 
     void tick(const ros::TimerEvent&) {
@@ -2716,12 +3018,14 @@ private:
         }
 
         latchNlpRecoveryFreeze();
-        if (!nlp_recovery_frozen_) {
-            simulation_step_credit_ += pp_.simulation_speed;
-            const int simulation_steps = static_cast<int>(
-                std::floor(simulation_step_credit_ + 1e-12));
-            simulation_step_credit_ -= simulation_steps;
-            for (int step = 0; step < simulation_steps; ++step) {
+        simulation_step_credit_ += pp_.simulation_speed;
+        const int simulation_steps = static_cast<int>(
+            std::floor(simulation_step_credit_ + 1e-12));
+        simulation_step_credit_ -= simulation_steps;
+        for (int step = 0; step < simulation_steps; ++step) {
+            if (nlp_recovery_frozen_) {
+                executeNlpRecovery(dt);
+            } else {
                 stepSimulation(dt);
             }
         }
@@ -3311,6 +3615,7 @@ private:
     std::vector<ros::Publisher> state_pubs_;            // /coord_state_i(只读调试:停车原因)
     ros::Publisher horizon_marker_pub_;                 // 推演 5s 轨迹的 RViz 可视化(LINE_STRIP/车)
     ros::Publisher recovery_snapshot_pub_;              // read-only rear-axle pose and raw offline path
+    ros::Subscriber nlp_trajectory_sub_;
     ros::Publisher snapshot_trigger_pub_;
     bool snapshot_debug_enabled_ = false;
     double debug_timeline_start_ = -1.0;
@@ -3335,6 +3640,9 @@ private:
     size_t sim_plan_cursor_ = 0;
     bool sim_plan_valid_ = false;
     bool nlp_recovery_frozen_ = false;
+    bool nlp_execution_active_ = false;
+    double nlp_execution_elapsed_ = 0.0;
+    sandbox_msgs::NlpRecoveryTrajectory nlp_execution_;
     uint64_t sim_plan_id_ = 0;
     double sim_plan_start_time_ = 0.0;
     std::string last_executed_a1_state_;

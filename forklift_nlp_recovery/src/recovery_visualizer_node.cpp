@@ -3,6 +3,7 @@
 #include <XmlRpcValue.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cctype>
 #include <cmath>
 #include <iomanip>
@@ -14,6 +15,9 @@
 
 #include <geometry_msgs/Point.h>
 #include <sandbox_msgs/RecoverySnapshot.h>
+#include <sandbox_msgs/NlpRecoveryTrajectory.h>
+#include <sandbox_msgs/NlpRecoveryPoint.h>
+#include <sandbox_msgs/NlpRecoveryVehicleTrajectory.h>
 #include <sandbox_msgs/RecoveryVehicleState.h>
 #include <std_msgs/ColorRGBA.h>
 #include <visualization_msgs/Marker.h>
@@ -111,6 +115,7 @@ public:
                                        "/tmp/forklift_nlp_recovery_input.yaml");
         private_nh_.param<std::string>("results_dir", results_directory_,
                                        "package://forklift_nlp_recovery/results");
+        private_nh_.param("execute_after_solve", execute_after_solve_, false);
         private_nh_.param("initial_guess_auto", initial_guess_config_.automatic,
                           initial_guess_config_.automatic);
         int initial_guess_nodes = static_cast<int>(initial_guess_config_.node_count);
@@ -223,6 +228,8 @@ public:
         }
         marker_pub_ = private_nh_.advertise<visualization_msgs::MarkerArray>(
             "/forklift_nlp_recovery/markers", 1, true);
+        trajectory_pub_ = private_nh_.advertise<sandbox_msgs::NlpRecoveryTrajectory>(
+            "/forklift_planner/nlp_recovery_trajectory", 1, true);
         snapshot_sub_ = private_nh_.subscribe(
             snapshot_topic_, 1, &RecoveryVisualizerNode::snapshotCallback, this);
         std::ostringstream selected_ids;
@@ -230,12 +237,12 @@ public:
             if (i != 0) selected_ids << ",";
             selected_ids << debug_vehicle_ids_[i];
         }
-        ROS_INFO("[nlp_recovery] read-only phase-1 visualizer: mode=%s debug_ids=[%s] "
+        ROS_INFO("[nlp_recovery] solver/validator: mode=%s execute_after_solve=%d debug_ids=[%s] "
                  "disc_radius=%.4f boundary_clearance=%.4f "
                  "shelf_inflation=%.4f topic=%s output=%s timing=%s "
                  "manual=(N=%zu,T=%.3f) auto=(dt=%.3f,N=[%zu,%zu],margin=%.2f) "
                  "solver_time_scale=[%.2f,%.2f] validation_substeps=%zu results=%s",
-                 mode_name_.c_str(), selected_ids.str().c_str(),
+                 mode_name_.c_str(), execute_after_solve_, selected_ids.str().c_str(),
                  builder_->vehicleRadius(),
                  builder_->boundaryClearance(), builder_->shelfInflation(),
                  snapshot_topic_.c_str(), debug_output_file_.c_str(),
@@ -512,7 +519,8 @@ private:
     bool snapshotMatchesLocked(
         const sandbox_msgs::RecoverySnapshot& snapshot) const {
         const auto& input = locked_.build.input;
-        if (!locked_.active || input.participant_ids != snapshot.nlp_vehicle_ids) {
+        if (!locked_.active || locked_.recovery_id != snapshot.recovery_id ||
+            input.participant_ids != snapshot.nlp_vehicle_ids) {
             return false;
         }
         for (const NlpVehicleInput& locked_vehicle : input.vehicles) {
@@ -522,6 +530,51 @@ private:
             }
         }
         return true;
+    }
+
+    void submitLockedTrajectory() {
+        if (!execute_after_solve_ || mode_ != OperatingMode::AUTO ||
+            locked_.submitted || locked_.recovery_id == 0 ||
+            !locked_.solver_result.solver_success ||
+            !locked_.solver_result.validation_passed) {
+            return;
+        }
+        sandbox_msgs::NlpRecoveryTrajectory message;
+        message.header.stamp = ros::Time::now();
+        message.header.frame_id = locked_.frame_id;
+        message.recovery_id = locked_.recovery_id;
+        message.solver_success = locked_.solver_result.solver_success;
+        message.validation_passed = locked_.solver_result.validation_passed;
+        for (size_t i = 0; i < locked_.solver_result.vehicles.size(); ++i) {
+            const auto& solved = locked_.solver_result.vehicles[i];
+            const auto found = std::find_if(
+                locked_.build.input.vehicles.begin(), locked_.build.input.vehicles.end(),
+                [&](const NlpVehicleInput& vehicle) { return vehicle.id == solved.id; });
+            if (found == locked_.build.input.vehicles.end()) return;
+            sandbox_msgs::NlpRecoveryVehicleTrajectory vehicle;
+            vehicle.id = solved.id;
+            vehicle.path_gen = found->path_gen;
+            vehicle.terminal_path_s = found->terminal.path_s;
+            vehicle.points.reserve(solved.nodes.size());
+            for (const auto& node : solved.nodes) {
+                sandbox_msgs::NlpRecoveryPoint point;
+                point.time = node.time;
+                point.x = node.rear_axle_pose.x;
+                point.y = node.rear_axle_pose.y;
+                point.yaw = node.rear_axle_pose.yaw;
+                point.velocity = node.signed_speed;
+                point.acceleration = node.acceleration;
+                point.front_steer = node.front_steer;
+                point.steer_rate = node.steer_rate;
+                vehicle.points.push_back(point);
+            }
+            message.vehicles.push_back(std::move(vehicle));
+        }
+        trajectory_pub_.publish(message);
+        locked_.submitted = true;
+        ROS_WARN("[nlp_recovery][auto] submitted recovery_id=%llu vehicles=%zu",
+                 static_cast<unsigned long long>(locked_.recovery_id),
+                 message.vehicles.size());
     }
 
     void writeDebugInput(const OptimizationInputBuildResult& build) {
@@ -736,6 +789,8 @@ private:
             writeDebugInput(build);
             if (build.complete) {
                 locked_.active = true;
+                locked_.recovery_id = snapshot.recovery_id;
+                locked_.frame_id = snapshot.header.frame_id;
                 locked_.build = std::move(build);
                 CaseSaveResult saved;
                 locked_.initial_guess = generateInitialGuess(
@@ -743,6 +798,7 @@ private:
                 if (saved.success) {
                     locked_.solver_result = solveAndSave(
                         locked_.build, locked_.initial_guess, saved);
+                    submitLockedTrajectory();
                 }
                 ROS_WARN("[nlp_recovery][auto] locked NLP_PREP input "
                          "participants=%zu valid=%d trigger=%s input=%s",
@@ -842,6 +898,9 @@ private:
 
     struct LockedTransaction {
         bool active = false;
+        bool submitted = false;
+        uint64_t recovery_id = 0;
+        std::string frame_id;
         OptimizationInputBuildResult build;
         NlpInitialGuess initial_guess;
         NlpSolveResult solver_result;
@@ -849,6 +908,7 @@ private:
 
     ros::NodeHandle private_nh_;
     ros::Publisher marker_pub_;
+    ros::Publisher trajectory_pub_;
     ros::Subscriber snapshot_sub_;
     MapParam map_param_;
     std::unique_ptr<ForkliftMap> map_;
@@ -866,6 +926,7 @@ private:
     std::string snapshot_topic_;
     std::string debug_output_file_;
     std::string results_directory_;
+    bool execute_after_solve_ = false;
     std::string last_debug_case_identity_;
     NlpInitialGuess latest_debug_initial_guess_;
     NlpSolveResult latest_debug_solver_result_;

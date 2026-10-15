@@ -194,6 +194,7 @@ bool DeadlockManager::retreatSweepClear(
 void DeadlockManager::refreshDirective() {
     directive_ = {};
     directive_.phase = transaction_.phase;
+    directive_.recovery_id = transaction_.recovery_id;
     directive_.retreat_attempt = transaction_.retreat_attempt;   //死锁最多回退次数
     directive_.retreat_vehicle_id = transaction_.retreat_vehicle_id;
     directive_.pass_vehicle_id = transaction_.pass_vehicle_id;
@@ -252,11 +253,24 @@ void DeadlockManager::enterNlpRecovery(const std::vector<int>& vehicle_ids,
                                        bool emit_logs) {
     candidate_ = {};
     transaction_.phase = RecoveryPhase::NLP_PREP;
+    transaction_.recovery_id = next_recovery_id_++;
     transaction_.nlp_vehicle_ids = vehicle_ids;
     transaction_.reason = reason;
     refreshDirective();
     emit("NLP_PREP", "cycle=" + vehicleListText(vehicle_ids) +
                          " reason=" + reason, emit_logs);
+}
+
+bool DeadlockManager::completeNlpRecovery(uint64_t recovery_id) {
+    if (transaction_.phase != RecoveryPhase::NLP_PREP || recovery_id == 0 ||
+        transaction_.recovery_id != recovery_id) {
+        return false;
+    }
+    emit("NLP_FINISH", "recovery_id=" + std::to_string(recovery_id), true);
+    candidate_ = {};
+    transaction_ = {};
+    refreshDirective();
+    return true;
 }
 
 void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const std::vector<DeadlockPairGeometry>& pair_geometry,double dt, bool emit_logs) 
