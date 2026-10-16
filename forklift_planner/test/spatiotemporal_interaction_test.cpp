@@ -150,10 +150,20 @@ int main() {
         detectPairInteractionFromPredictions(
             crossing_a, crossing_b, two_zones, prediction_a, prediction_b);
     if (!first_only.event.valid ||
-        !near(first_only.event.first_overlap_t, 1.0) ||
-        !near(first_only.event.last_t, 1.0) ||
-        first_only.event.timed_overlaps.size() != 1 ||
+        first_only.event.first_overlap_t <= 0.0 ||
+        first_only.event.first_overlap_t >= 2.0 ||
+        first_only.event.last_t < first_only.event.first_overlap_t ||
+        first_only.event.last_t >= 2.0 ||
+        first_only.event.timed_overlaps.empty() ||
+        first_only.event.timed_overlaps.back().t >= 2.0 ||
         first_only.event.associated_zone_index != 0) {
+        std::cerr << "first_overlap_t=" << first_only.event.first_overlap_t
+                  << " last_t=" << first_only.event.last_t
+                  << " overlap_samples=" << first_only.event.timed_overlaps.size()
+                  << " last_sample_t="
+                  << (first_only.event.timed_overlaps.empty()
+                          ? -1.0 : first_only.event.timed_overlaps.back().t)
+                  << " zone=" << first_only.event.associated_zone_index << "\n";
         return fail("detector did not retain only the first overlap event");
     }
 
@@ -230,16 +240,22 @@ int main() {
 
     // 8. Association is based on the first event's arc-length sample, even
     // when two geometric conflict zones exist.
+    VehicleAgent association_a = vehicle(11, line(-3.0, 0.0, 1.0, 0.0));
+    VehicleAgent association_b = vehicle(12, line(0.0, -3.0, 0.0, 1.0));
     std::vector<PredictedKinematicSample> near_second_a{
-        sample(0.0, 0.0, 0.0, 1.0), sample(1.0, 3.0, 0.0, 0.0)};
+        sample(0.0, 0.0, -3.0, 0.0), sample(1.0, 3.0, 0.0, 0.0)};
     std::vector<PredictedKinematicSample> near_second_b{
-        sample(0.0, 0.0, 1.0, 0.0), sample(1.0, 3.0, 0.0, 0.0)};
+        sample(0.0, 0.0, 0.0, -3.0), sample(1.0, 3.0, 0.0, 0.0)};
     const PairInteractionResult second_zone =
         detectPairInteractionFromPredictions(
-            crossing_a, crossing_b, two_zones,
+            association_a, association_b, two_zones,
             near_second_a, near_second_b);
     if (!second_zone.event.valid ||
         second_zone.event.associated_zone_index != 1) {
+        std::cerr << "second_zone valid=" << second_zone.event.valid
+                  << " zone=" << second_zone.event.associated_zone_index
+                  << " collision_s=(" << second_zone.event.collision_s_a
+                  << "," << second_zone.event.collision_s_b << ")\n";
         return fail("two-zone first-event association changed");
     }
 

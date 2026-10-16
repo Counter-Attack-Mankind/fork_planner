@@ -2625,12 +2625,6 @@ private:
         recovery_snapshot_pub_.publish(snapshot);
     }
 
-    VehicleAgent* agentById(int id) {
-        const auto found = std::find_if(agents_.begin(), agents_.end(),
-            [id](const VehicleAgent& vehicle) { return vehicle.id == id; });
-        return found == agents_.end() ? nullptr : &*found;
-    }
-
     bool validateNlpTrajectory(const sandbox_msgs::NlpRecoveryTrajectory& message,
                                std::string& reason) {
         const auto& recovery = rule_engine_->recoveryDirective();

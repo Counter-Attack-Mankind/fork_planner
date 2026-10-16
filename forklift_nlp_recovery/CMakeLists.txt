@@ -12,6 +12,7 @@ find_package(catkin REQUIRED COMPONENTS
   std_srvs
   visualization_msgs
   forklift_map
+  forklift_planner
   sandbox_msgs
 )
 find_package(casadi CONFIG REQUIRED)
@@ -20,37 +21,40 @@ find_package(yaml-cpp REQUIRED)
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_initial_guess forklift_nlp_recovery_validator forklift_nlp_recovery_solver forklift_nlp_recovery_replay
-  CATKIN_DEPENDS roscpp roslib geometry_msgs std_msgs std_srvs visualization_msgs forklift_map sandbox_msgs
+  CATKIN_DEPENDS roscpp roslib geometry_msgs std_msgs std_srvs visualization_msgs forklift_map forklift_planner sandbox_msgs
 )
 
-include_directories(include ${catkin_INCLUDE_DIRS})
+include_directories(include ../forklift_planner/include ${catkin_INCLUDE_DIRS})
 
-add_library(forklift_nlp_recovery_geometry src/corridor_builder.cpp)
+add_library(forklift_nlp_recovery_geometry
+  src/optimization/corridor_builder.cpp
+  src/geometry/coordinate_mapper.cpp
+)
 add_dependencies(forklift_nlp_recovery_geometry ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_geometry ${catkin_LIBRARIES})
 
-add_library(forklift_nlp_recovery_input src/optimization_input.cpp)
+add_library(forklift_nlp_recovery_input src/optimization/optimization_input.cpp)
 add_dependencies(forklift_nlp_recovery_input ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_input
   forklift_nlp_recovery_geometry
   ${catkin_LIBRARIES}
 )
 
-add_library(forklift_nlp_recovery_initial_guess src/initial_guess.cpp)
+add_library(forklift_nlp_recovery_initial_guess src/optimization/initial_guess.cpp)
 add_dependencies(forklift_nlp_recovery_initial_guess ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_initial_guess
   forklift_nlp_recovery_input
   ${catkin_LIBRARIES}
 )
 
-add_library(forklift_nlp_recovery_validator src/nlp_validator.cpp)
+add_library(forklift_nlp_recovery_validator src/optimization/nlp_validator.cpp)
 add_dependencies(forklift_nlp_recovery_validator ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_validator
   forklift_nlp_recovery_initial_guess
   ${catkin_LIBRARIES}
 )
 
-add_library(forklift_nlp_recovery_solver src/nlp_solver.cpp)
+add_library(forklift_nlp_recovery_solver src/optimization/nlp_solver.cpp)
 add_dependencies(forklift_nlp_recovery_solver ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_solver
   forklift_nlp_recovery_initial_guess
@@ -59,11 +63,11 @@ target_link_libraries(forklift_nlp_recovery_solver
   ${catkin_LIBRARIES}
 )
 
-add_library(forklift_nlp_recovery_replay src/replay_data.cpp)
+add_library(forklift_nlp_recovery_replay src/visualization/replay_data.cpp)
 add_dependencies(forklift_nlp_recovery_replay ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_replay yaml-cpp ${catkin_LIBRARIES})
 
-add_executable(nlp_trajectory_replay_node src/nlp_trajectory_replay_node.cpp)
+add_executable(nlp_trajectory_replay_node src/visualization/nlp_trajectory_replay_node.cpp)
 add_dependencies(nlp_trajectory_replay_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(nlp_trajectory_replay_node
   forklift_nlp_recovery_replay
@@ -71,7 +75,7 @@ target_link_libraries(nlp_trajectory_replay_node
   ${catkin_LIBRARIES}
 )
 
-add_executable(recovery_visualizer_node src/recovery_visualizer_node.cpp)
+add_executable(recovery_visualizer_node src/visualization/recovery_visualizer_node.cpp)
 add_dependencies(recovery_visualizer_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(recovery_visualizer_node
   forklift_nlp_recovery_solver
@@ -82,7 +86,37 @@ target_link_libraries(recovery_visualizer_node
   ${catkin_LIBRARIES}
 )
 
+set(COORDINATE_MAPPING_PATH_GENERATOR_SOURCES
+  ../forklift_planner/src/path_generator.cpp
+  ../forklift_planner/src/path_generator_internal.cpp
+  ../forklift_planner/src/path_generator_route.cpp
+  ../forklift_planner/src/path_generator_routes/path_generator_route_dispatch.cpp
+  ../forklift_planner/src/path_generator_routes/a1_to_b/path_generator_route.cpp
+  ../forklift_planner/src/path_generator_routes/b_to_a1/path_generator_route.cpp
+  ../forklift_planner/src/path_generator_routes/a2_to_b/path_generator_route.cpp
+  ../forklift_planner/src/path_generator_routes/b_to_a2/path_generator_route.cpp
+)
+add_executable(coordinate_mapping_visualizer_node
+  src/visualization/coordinate_mapping_visualizer_node.cpp
+  ${COORDINATE_MAPPING_PATH_GENERATOR_SOURCES}
+)
+add_dependencies(coordinate_mapping_visualizer_node ${catkin_EXPORTED_TARGETS})
+target_link_libraries(coordinate_mapping_visualizer_node
+  forklift_nlp_recovery_geometry
+  forklift_map_lib
+  ${catkin_LIBRARIES}
+)
+
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(coordinate_mapper_test test/coordinate_mapper_test.cpp)
+  if(TARGET coordinate_mapper_test)
+    add_dependencies(coordinate_mapper_test ${catkin_EXPORTED_TARGETS})
+    target_link_libraries(coordinate_mapper_test
+      forklift_nlp_recovery_geometry
+      ${catkin_LIBRARIES}
+    )
+  endif()
+
   catkin_add_gtest(corridor_builder_test test/corridor_builder_test.cpp)
   if(TARGET corridor_builder_test)
     add_dependencies(corridor_builder_test ${catkin_EXPORTED_TARGETS})
@@ -142,6 +176,7 @@ install(TARGETS forklift_nlp_recovery_geometry forklift_nlp_recovery_input
                 forklift_nlp_recovery_replay
                 recovery_visualizer_node
                 nlp_trajectory_replay_node
+                coordinate_mapping_visualizer_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

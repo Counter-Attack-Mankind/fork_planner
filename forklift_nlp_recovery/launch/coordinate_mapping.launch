@@ -1,0 +1,37 @@
+<launch>
+  <arg name="route" default="a1_to_b"/>
+  <arg name="slot_id" default="0"/>
+  <arg name="catalog_file" default=""/>
+  <!-- Negative current_s selects the first point legal under the current
+       CorridorBuilder single-disc model. Set an explicit value to inspect a
+       captured recovery progress. -->
+  <arg name="current_s" default="-1.0"/>
+  <arg name="sweep_sample_step" default="0.01"/>
+  <arg name="start_map" default="true"/>
+  <arg name="start_rviz" default="true"/>
+
+  <param name="/use_sim_time" value="false"/>
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml"/>
+
+  <node if="$(arg start_map)" pkg="forklift_map" type="map_node"
+        name="coordinate_mapping_map" output="screen"/>
+
+  <node pkg="forklift_nlp_recovery" type="coordinate_mapping_visualizer_node"
+        name="coordinate_mapping_visualizer" output="screen" required="true">
+    <rosparam command="load" file="$(find forklift_nlp_recovery)/config/recovery.yaml"/>
+    <param name="route" value="$(arg route)"/>
+    <param name="slot_id" value="$(arg slot_id)"/>
+    <param name="catalog_file" value="$(arg catalog_file)"/>
+    <param name="current_s" value="$(arg current_s)"/>
+    <param name="sweep_sample_step" value="$(arg sweep_sample_step)"/>
+  </node>
+
+  <node if="$(arg start_rviz)" pkg="rviz" type="rviz"
+        name="coordinate_mapping_rviz"
+        args="-d $(find forklift_nlp_recovery)/rviz/coordinate_mapping.rviz"
+        required="false">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

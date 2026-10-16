@@ -14,6 +14,7 @@
   <depend>std_srvs</depend>
   <depend>visualization_msgs</depend>
   <depend>forklift_map</depend>
+  <depend>forklift_planner</depend>
   <depend>sandbox_msgs</depend>
   <depend>casadi</depend>
   <depend>yaml-cpp</depend>
