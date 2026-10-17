@@ -122,6 +122,13 @@ private:
     InitialGuessConfig config_;
 };
 
+// Applies the same ordered, adjacent-box assignment used by the generator.
+// This is exposed for the geometry repair stage so repaired samples are not
+// accepted through a weaker assignment rule.
+bool assignInitialGuessAabbs(VehicleInitialGuess& guess,
+                             const NlpVehicleInput& input,
+                             double tolerance, std::string& reason);
+
 struct CaseSaveResult {
     bool success = false;
     std::string case_id;
@@ -132,5 +139,11 @@ struct CaseSaveResult {
 CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
                                     const NlpInitialGuess& guess,
                                     const std::string& results_directory);
+
+CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
+                                    const NlpInitialGuess& original_guess,
+                                    const NlpInitialGuess& repaired_guess,
+                                    const std::string& results_directory,
+                                    const std::string& case_prefix);
 
 }  // namespace forklift_nlp_recovery

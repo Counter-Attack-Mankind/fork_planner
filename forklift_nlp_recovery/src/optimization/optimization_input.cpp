@@ -137,6 +137,7 @@ OptimizationInputBuildResult OptimizationInputBuilder::build(
     result.input.frame_id = snapshot.header.frame_id;
     result.input.stamp_sec = snapshot.header.stamp.sec;
     result.input.stamp_nsec = snapshot.header.stamp.nsec;
+    result.input.recovery_id = snapshot.recovery_id;
     result.input.participant_ids = participant_ids;
 
     if (participant_ids.empty()) {
@@ -244,6 +245,7 @@ bool writeOptimizationInputDebugFile(const OptimizationInputBuildResult& result,
     out << "frame_id: " << quoted(input.frame_id) << "\n";
     out << "stamp: {sec: " << input.stamp_sec << ", nsec: "
         << input.stamp_nsec << "}\n";
+    out << "recovery_id: " << input.recovery_id << "\n";
     out << "reason: " << quoted(result.reason) << "\n";
     out << "trigger_reason: " << quoted(input.trigger_reason) << "\n";
     out << "participant_ids: ";

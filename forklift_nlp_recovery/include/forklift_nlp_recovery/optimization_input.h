@@ -67,6 +67,7 @@ struct NlpOptimizationInput {
     std::string frame_id;
     uint32_t stamp_sec = 0;
     uint32_t stamp_nsec = 0;
+    uint64_t recovery_id = 0;
     std::vector<int> participant_ids;
     std::vector<NlpVehicleInput> vehicles;
     std::vector<StaticVehicleObstacle> static_vehicles;

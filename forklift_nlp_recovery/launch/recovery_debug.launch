@@ -2,11 +2,16 @@
   <arg name="start_planner" default="true"/>
   <arg name="real_mode" default="false"/>
   <arg name="start_rviz" default="true"/>
+  <arg name="vehicle_count" default="4"/>
+  <arg name="random_seed" default="2026"/>
+  <arg name="execute_after_solve" default="false"/>
 
   <param name="/use_sim_time" value="false"/>
   <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
   <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml"/>
   <param name="/forklift_planner/multi_vehicle/real_mode" value="$(arg real_mode)"/>
+  <param name="/forklift_planner/multi_vehicle/vehicle_count" value="$(arg vehicle_count)"/>
+  <param name="/forklift_planner/multi_vehicle/random_seed" value="$(arg random_seed)"/>
 
   <node if="$(arg start_planner)" pkg="forklift_planner"
         type="multi_vehicle_patrol_node" name="multi_vehicle_patrol_node"
@@ -15,6 +20,7 @@
   <node pkg="forklift_nlp_recovery" type="recovery_visualizer_node"
         name="forklift_nlp_recovery" output="screen">
     <rosparam command="load" file="$(find forklift_nlp_recovery)/config/recovery.yaml"/>
+    <param name="execute_after_solve" value="$(arg execute_after_solve)"/>
   </node>
 
   <node if="$(arg start_rviz)" pkg="rviz" type="rviz" name="recovery_debug_rviz"

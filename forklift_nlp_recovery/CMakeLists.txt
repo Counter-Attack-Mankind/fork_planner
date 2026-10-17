@@ -40,7 +40,10 @@ target_link_libraries(forklift_nlp_recovery_input
   ${catkin_LIBRARIES}
 )
 
-add_library(forklift_nlp_recovery_initial_guess src/optimization/initial_guess.cpp)
+add_library(forklift_nlp_recovery_initial_guess
+  src/optimization/initial_guess.cpp
+  src/optimization/initial_guess_geometry_repair.cpp
+)
 add_dependencies(forklift_nlp_recovery_initial_guess ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_initial_guess
   forklift_nlp_recovery_input
@@ -75,7 +78,10 @@ target_link_libraries(nlp_trajectory_replay_node
   ${catkin_LIBRARIES}
 )
 
-add_executable(recovery_visualizer_node src/visualization/recovery_visualizer_node.cpp)
+add_executable(recovery_visualizer_node
+  src/visualization/recovery_visualizer_node.cpp
+  src/visualization/recovery_stage_visualization.cpp
+)
 add_dependencies(recovery_visualizer_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(recovery_visualizer_node
   forklift_nlp_recovery_solver

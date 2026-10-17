@@ -12,6 +12,16 @@ initial_guess_min_nodes: 11
 initial_guess_max_nodes: 101
 initial_guess_time_margin: 1.2
 
+# Local repair only touches the frozen NLP initial-guess samples. It does not
+# alter offline paths, corridor construction, or formal NLP constraints.
+geometry_repair_enabled: true
+geometry_repair_transition_nodes: 2
+geometry_repair_smoothing_iterations: 12
+geometry_repair_interval_samples: 10
+geometry_repair_max_node_displacement: 0.15
+geometry_repair_aabb_inset: 0.002
+geometry_repair_max_heading_adjustment: 0.35
+
 # Used only when initial_guess_auto is false.（手动配置点个数与时间，通常应该需要自己生成）
 initial_guess_nodes: 31
 initial_guess_total_time: 10.0

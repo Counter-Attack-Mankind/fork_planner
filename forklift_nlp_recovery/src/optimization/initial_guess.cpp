@@ -503,8 +503,8 @@ void logAabbAssignmentFailure(const VehicleInitialGuess& guess,
     ROS_ERROR_STREAM(log.str());
 }
 
-bool assignAabbs(VehicleInitialGuess& guess, const NlpVehicleInput& input,
-                 double tolerance, std::string& reason) {
+bool assignAabbsImpl(VehicleInitialGuess& guess, const NlpVehicleInput& input,
+                     double tolerance, std::string& reason) {
     if (input.corridor.empty()) {
         reason = "corridor has no AABB";
         return false;
@@ -600,6 +600,51 @@ std::string isoTimestamp() {
     return value.str();
 }
 
+bool writeInitialGuessCsv(const NlpInitialGuess& guess,
+                          const std::filesystem::path& path,
+                          const std::string& case_id,
+                          const std::string& generated_at,
+                          std::string& error) {
+    std::ofstream csv(path, std::ios::trunc);
+    if (!csv) {
+        error = "cannot open " + path.filename().string();
+        return false;
+    }
+    csv << "case_id,generated_at,vehicle_id,node_index,time,path_s,path_type,"
+           "rear_x,rear_y,heading,signed_speed,front_steer,acceleration,steer_rate,"
+           "aabb_index,disc_center_x,disc_center_y,speed_source,steer_source,"
+           "acceleration_source,steer_rate_source,kinematic_position_residual,"
+           "kinematic_heading_residual,grid_node_count,grid_total_time,"
+           "grid_average_dt,reference_length,estimated_travel_time,direction_changes\n";
+    csv << std::fixed << std::setprecision(9);
+    for (const VehicleInitialGuess& vehicle : guess.vehicles) {
+        for (const InitialGuessNode& node : vehicle.nodes) {
+            csv << case_id << ',' << generated_at << ',' << vehicle.id << ','
+                << node.index << ',' << node.time << ',' << node.path_s << ','
+                << static_cast<int>(node.path_type) << ',' << node.rear_axle_pose.x << ','
+                << node.rear_axle_pose.y << ',' << node.rear_axle_pose.yaw << ','
+                << node.signed_speed << ',' << node.front_steer << ','
+                << node.acceleration << ',' << node.steer_rate << ','
+                << node.aabb_index << ',' << node.disc_center.x << ','
+                << node.disc_center.y << ',' << guessValueSourceName(node.speed_source) << ','
+                << guessValueSourceName(node.steer_source) << ','
+                << guessValueSourceName(node.acceleration_source) << ','
+                << guessValueSourceName(node.steer_rate_source) << ','
+                << node.kinematic_position_residual << ','
+                << node.kinematic_heading_residual << ',' << guess.node_count << ','
+                << guess.total_time << ',' << guess.average_dt << ','
+                << vehicle.diagnostics.reference_length << ','
+                << vehicle.diagnostics.estimated_travel_time << ','
+                << vehicle.diagnostics.direction_changes << '\n';
+        }
+    }
+    if (!csv) {
+        error = "failed while writing " + path.filename().string();
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 const char* guessValueSourceName(GuessValueSource source) {
@@ -621,8 +666,18 @@ const char* guessValueSourceName(GuessValueSource source) {
 InitialGuessGenerator::InitialGuessGenerator(const InitialGuessConfig& config)
     : config_(config) {}
 
+bool assignInitialGuessAabbs(VehicleInitialGuess& guess,
+                             const NlpVehicleInput& input,
+                             double tolerance, std::string& reason) {
+    guess.start_aabb_exempt = false;
+    for (InitialGuessNode& node : guess.nodes) node.aabb_index = -1;
+    return assignAabbsImpl(guess, input, tolerance, reason);
+}
+
 NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& input) const {
     NlpInitialGuess result;
+    bool all_assignments_valid = true;
+    std::vector<std::string> assignment_failures;
     result.automatic_timing = config_.automatic;
     if (!input.valid) {
         result.reason = "optimization input is invalid: " + input.reason;
@@ -811,13 +866,14 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
         }
 
         std::string assignment_reason;
-        vehicle.aabb_assignment_valid = assignAabbs(
+        vehicle.aabb_assignment_valid = assignInitialGuessAabbs(
             vehicle, input_vehicle, config_.containment_tolerance, assignment_reason);
         if (!vehicle.aabb_assignment_valid) {
             vehicle.reason = assignment_reason;
-            result.vehicles.push_back(std::move(vehicle));
-            result.reason = "V" + std::to_string(input_vehicle.id) + " AABB assignment failed: " + assignment_reason;
-            return result;
+            vehicle.valid = false;
+            all_assignments_valid = false;
+            assignment_failures.push_back("V" + std::to_string(input_vehicle.id) +
+                " AABB assignment failed: " + assignment_reason);
         }
 
         auto& diagnostics = vehicle.diagnostics;
@@ -863,8 +919,8 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
                     diagnostics.max_kinematic_heading_residual, state.kinematic_heading_residual);
             }
         }
-        vehicle.valid = true;
-        vehicle.reason = "ok";
+        vehicle.valid = vehicle.aabb_assignment_valid;
+        if (vehicle.valid) vehicle.reason = "ok";
         result.diagnostics.max_kinematic_position_residual = std::max(
             result.diagnostics.max_kinematic_position_residual,
             diagnostics.max_kinematic_position_residual);
@@ -915,23 +971,35 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
         }
     }
 
-    result.generated = true;
+    result.generated = all_assignments_valid;
     const bool dynamics_close = result.diagnostics.max_kinematic_position_residual <= 1e-3 &&
                                 result.diagnostics.max_kinematic_heading_residual <= 1e-3;
     result.constraints_satisfied = result.diagnostics.bound_violation_nodes == 0 &&
         result.diagnostics.participant_collision_nodes == 0 &&
         result.diagnostics.static_collision_nodes == 0 && dynamics_close;
-    result.reason = result.constraints_satisfied ? "generated and constraint checks passed" :
-        "generated with constraint violations; retained for NLP initialization";
+    if (!all_assignments_valid) {
+        std::ostringstream reason;
+        for (size_t i = 0; i < assignment_failures.size(); ++i) {
+            if (i != 0) reason << "; ";
+            reason << assignment_failures[i];
+        }
+        result.reason = reason.str();
+    } else {
+        result.reason = result.constraints_satisfied ?
+            "generated and constraint checks passed" :
+            "generated with constraint violations; retained for NLP initialization";
+    }
     return result;
 }
 
 CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
-                                    const NlpInitialGuess& guess,
-                                    const std::string& results_directory) {
+                                    const NlpInitialGuess& original_guess,
+                                    const NlpInitialGuess& repaired_guess,
+                                    const std::string& results_directory,
+                                    const std::string& case_prefix) {
     CaseSaveResult result;
-    if (!guess.generated) {
-        result.reason = "initial guess was not generated";
+    if (original_guess.vehicles.empty() || repaired_guess.vehicles.empty()) {
+        result.reason = "original or repaired initial guess has no vehicle data";
         return result;
     }
     if (results_directory.empty()) {
@@ -949,7 +1017,11 @@ CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
     std::filesystem::path case_path;
     for (unsigned int number = 1; number < 1000000; ++number) {
         std::ostringstream name;
-        name << "case_" << std::setw(4) << std::setfill('0') << number;
+        if (case_prefix.empty()) {
+            name << "case_" << std::setw(4) << std::setfill('0') << number;
+        } else {
+            name << case_prefix << '_' << number;
+        }
         const std::filesystem::path candidate = root / name.str();
         error.clear();
         if (std::filesystem::create_directory(candidate, error)) {
@@ -979,58 +1051,34 @@ CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
         return result;
     }
     yaml << std::boolalpha << std::fixed << std::setprecision(9)
-         << "initial_guess_grid: {automatic: " << guess.automatic_timing
-         << ", node_count: " << guess.node_count
-         << ", total_time: " << guess.total_time
-         << ", average_dt: " << guess.average_dt << "}\n";
+         << "initial_guess_grid: {automatic: " << repaired_guess.automatic_timing
+         << ", node_count: " << repaired_guess.node_count
+         << ", total_time: " << repaired_guess.total_time
+         << ", average_dt: " << repaired_guess.average_dt << "}\n";
     yaml.close();
     if (!yaml) {
         result.reason = "failed while appending initial guess timing";
         return result;
     }
-    std::ofstream csv(case_path / "initial_guess.csv", std::ios::trunc);
-    if (!csv) {
-        result.reason = "cannot open initial_guess.csv";
-        return result;
-    }
     const std::string generated_at = isoTimestamp();
-    csv << "case_id,generated_at,vehicle_id,node_index,time,path_s,path_type,"
-           "rear_x,rear_y,heading,signed_speed,front_steer,acceleration,steer_rate,"
-           "aabb_index,disc_center_x,disc_center_y,speed_source,steer_source,"
-           "acceleration_source,steer_rate_source,kinematic_position_residual,"
-           "kinematic_heading_residual,grid_node_count,grid_total_time,"
-           "grid_average_dt,reference_length,estimated_travel_time,"
-           "direction_changes\n";
-    csv << std::fixed << std::setprecision(9);
-    for (const VehicleInitialGuess& vehicle : guess.vehicles) {
-        for (const InitialGuessNode& node : vehicle.nodes) {
-            csv << result.case_id << ',' << generated_at << ',' << vehicle.id << ','
-                << node.index << ',' << node.time << ',' << node.path_s << ','
-                << static_cast<int>(node.path_type) << ',' << node.rear_axle_pose.x << ','
-                << node.rear_axle_pose.y << ',' << node.rear_axle_pose.yaw << ','
-                << node.signed_speed << ',' << node.front_steer << ','
-                << node.acceleration << ',' << node.steer_rate << ','
-                << node.aabb_index << ',' << node.disc_center.x << ','
-                << node.disc_center.y << ',' << guessValueSourceName(node.speed_source) << ','
-                << guessValueSourceName(node.steer_source) << ','
-                << guessValueSourceName(node.acceleration_source) << ','
-                << guessValueSourceName(node.steer_rate_source) << ','
-                << node.kinematic_position_residual << ','
-                << node.kinematic_heading_residual << ',' << guess.node_count << ','
-                << guess.total_time << ',' << guess.average_dt << ','
-                << vehicle.diagnostics.reference_length << ','
-                << vehicle.diagnostics.estimated_travel_time << ','
-                << vehicle.diagnostics.direction_changes << '\n';
-        }
-    }
-    if (!csv) {
-        result.reason = "failed while writing initial_guess.csv";
+    if (!writeInitialGuessCsv(original_guess, case_path / "original_initial_guess.csv",
+                              result.case_id, generated_at, result.reason) ||
+        !writeInitialGuessCsv(repaired_guess, case_path / "repaired_initial_guess.csv",
+                              result.case_id, generated_at, result.reason) ||
+        !writeInitialGuessCsv(repaired_guess, case_path / "initial_guess.csv",
+                              result.case_id, generated_at, result.reason)) {
         return result;
     }
     result.success = true;
     result.case_directory = case_path.string();
     result.reason = "ok";
     return result;
+}
+
+CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
+                                    const NlpInitialGuess& guess,
+                                    const std::string& results_directory) {
+    return saveInitialGuessCase(input, guess, guess, results_directory, "");
 }
 
 }  // namespace forklift_nlp_recovery

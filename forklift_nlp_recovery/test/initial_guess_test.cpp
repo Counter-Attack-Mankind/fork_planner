@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "forklift_nlp_recovery/initial_guess.h"
+#include "forklift_nlp_recovery/initial_guess_geometry_repair.h"
 
 namespace fnr = forklift_nlp_recovery;
 
@@ -405,6 +406,69 @@ TEST(InitialGuessTest, RejectsInvalidInputAndIllegalAabbAssignment) {
     EXPECT_NE(late_guess.reason.find("node 1"), std::string::npos);
 }
 
+TEST(InitialGuessTest, RepairsOnlyLocalUncoveredWindowAndPreservesEndpoints) {
+    fnr::NlpOptimizationInput input = makeInput({4});
+    auto& source = input.vehicles.front();
+    source.initial_state.rear_axle_pose = {0.3 - source.parameters.rear_axle_to_center,
+                                           1.0, 0.0};
+    source.terminal.pose = {1.1 - source.parameters.rear_axle_to_center, 1.0, 0.0};
+    source.corridor = {{0.2, 1.4, 0.8, 1.2}};
+
+    fnr::NlpInitialGuess original;
+    original.node_count = 5;
+    original.total_time = 4.0;
+    original.average_dt = 1.0;
+    original.time_grid = {0.0, 1.0, 2.0, 3.0, 4.0};
+    fnr::VehicleInitialGuess vehicle;
+    vehicle.id = 4;
+    const std::vector<fnr::Pose2d> centers{{0.3, 1.0, 0.0}, {0.5, 1.0, 0.0},
+                                           {0.7, 1.24, 0.0}, {0.9, 1.0, 0.0},
+                                           {1.1, 1.0, 0.0}};
+    for (size_t node = 0; node < centers.size(); ++node) {
+        fnr::InitialGuessNode state;
+        state.index = node;
+        state.time = static_cast<double>(node);
+        state.path_s = 0.2 * static_cast<double>(node);
+        state.path_type = 0;
+        state.disc_center = centers[node];
+        state.rear_axle_pose = {centers[node].x - source.parameters.rear_axle_to_center,
+                                centers[node].y, 0.0};
+        vehicle.nodes.push_back(state);
+    }
+    vehicle.reason = "disc center at node 2 is outside every AABB";
+    original.vehicles.push_back(vehicle);
+    original.reason = "V4 AABB assignment failed";
+
+    MapParam map_param;
+    fnr::CorridorConfig corridor_config;
+    corridor_config.vehicle_radius = source.parameters.disc_radius;
+    fnr::CorridorBuilder builder(map_param, {}, corridor_config);
+    fnr::InitialGuessGeometryRepairConfig repair_config;
+    repair_config.max_node_displacement = 0.15;
+    fnr::InitialGuessGeometryRepair repair(repair_config, builder);
+    const auto result = repair.repair(input, original);
+
+    ASSERT_TRUE(result.success) << result.reason << ": " << result.vehicles.front().reason;
+    ASSERT_TRUE(result.repaired_guess.generated);
+    ASSERT_EQ(result.vehicles.front().original_uncovered_nodes, 1U);
+    EXPECT_GT(result.vehicles.front().moved_nodes, 0U);
+    EXPECT_LE(result.vehicles.front().max_displacement, 0.15 + 1e-9);
+    const auto& repaired = result.repaired_guess.vehicles.front();
+    EXPECT_NEAR(repaired.nodes.front().rear_axle_pose.x,
+                vehicle.nodes.front().rear_axle_pose.x, 1e-12);
+    EXPECT_NEAR(repaired.nodes.front().rear_axle_pose.y,
+                vehicle.nodes.front().rear_axle_pose.y, 1e-12);
+    EXPECT_NEAR(repaired.nodes.back().rear_axle_pose.x,
+                vehicle.nodes.back().rear_axle_pose.x, 1e-12);
+    EXPECT_NEAR(repaired.nodes.back().rear_axle_pose.y,
+                vehicle.nodes.back().rear_axle_pose.y, 1e-12);
+    for (const auto& node : repaired.nodes) {
+        EXPECT_EQ(node.aabb_index, 0);
+        EXPECT_GE(node.disc_center.y, source.corridor.front().min_y - 1e-8);
+        EXPECT_LE(node.disc_center.y, source.corridor.front().max_y + 1e-8);
+    }
+}
+
 TEST(InitialGuessTest, ReportsParticipantAndSelectedStaticCollisions) {
     fnr::NlpOptimizationInput input = makeInput({2, 8});
     input.vehicles[1] = makeVehicle(8, 0.10, {0, 0, 0, 0});
@@ -442,6 +506,10 @@ TEST(InitialGuessTest, SavesConsecutiveCasesWithoutOverwriteAndMatchesMemory) {
     EXPECT_NE(first.case_directory, second.case_directory);
     EXPECT_TRUE(std::filesystem::exists(std::filesystem::path(first.case_directory) /
                                         "optimization_input.yaml"));
+    EXPECT_TRUE(std::filesystem::exists(std::filesystem::path(first.case_directory) /
+                                        "original_initial_guess.csv"));
+    EXPECT_TRUE(std::filesystem::exists(std::filesystem::path(first.case_directory) /
+                                        "repaired_initial_guess.csv"));
     std::ifstream yaml(std::filesystem::path(first.case_directory) /
                        "optimization_input.yaml");
     ASSERT_TRUE(yaml.good());
