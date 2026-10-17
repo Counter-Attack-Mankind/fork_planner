@@ -159,18 +159,6 @@ bool buildReferenceMotion(const NlpVehicleInput& vehicle,
     reference.direction_changes = reference.segments.empty() ? 0 :
                                   reference.segments.size() - 1;
 
-    if (reference.total_length <= 1e-6) {
-        const double heading_change = angleDistance(
-            vehicle.initial_state.rear_axle_pose.yaw, vehicle.terminal.pose.yaw);
-        if (heading_change > M_PI / 180.0) {
-            error = "zero-length reference requires a heading change that the kinematic bicycle cannot perform";
-            return false;
-        }
-        if (std::abs(vehicle.initial_state.longitudinal_speed) > 1e-6) {
-            error = "zero-length reference cannot stop the nonzero initial speed within the endpoint";
-            return false;
-        }
-    }
     return true;
 }
 
@@ -190,12 +178,9 @@ bool estimateTravelTime(const NlpVehicleInput& vehicle,
         const double stopping_distance = start_speed * start_speed /
                                          (2.0 * parameters.max_decel);
         if (segment.length + 1e-8 < stopping_distance) {
-            std::ostringstream reason;
-            reason << "reference segment length " << segment.length
-                   << " is shorter than the required stopping distance "
-                   << stopping_distance;
-            error = reason.str();
-            return false;
+            estimated_time += start_speed / parameters.max_decel;
+            start_speed = 0.0;
+            continue;
         }
         const double speed_cap = std::max(parameters.max_speed, start_speed);
         const double peak_squared =
@@ -505,8 +490,8 @@ void logAabbAssignmentFailure(const VehicleInitialGuess& guess,
 
 bool assignAabbsImpl(VehicleInitialGuess& guess, const NlpVehicleInput& input,
                      double tolerance, std::string& reason) {
-    if (input.corridor.empty()) {
-        reason = "corridor has no AABB";
+    if (input.corridor.empty() || guess.nodes.empty()) {
+        reason = "corridor or initial-guess node sequence is empty";
         return false;
     }
     const size_t node_count = guess.nodes.size();
@@ -516,6 +501,20 @@ bool assignAabbsImpl(VehicleInitialGuess& guess, const NlpVehicleInput& input,
     std::vector<std::vector<int>> predecessor(node_count, std::vector<int>(box_count, -1));
     int logical_start_box = -1;
 
+    const auto assignmentCost = [&](const Pose2d& point, size_t box) {
+        const Aabb& bounds = input.corridor[box];
+        const double dx = std::max({bounds.min_x - point.x,
+                                    point.x - bounds.max_x, 0.0});
+        const double dy = std::max({bounds.min_y - point.y,
+                                    point.y - bounds.max_y, 0.0});
+        return dx * dx + dy * dy;
+    };
+    const auto boxesOverlap = [&](size_t first, size_t second) {
+        const Aabb& a = input.corridor[first];
+        const Aabb& b = input.corridor[second];
+        return std::max(a.min_x, b.min_x) <= std::min(a.max_x, b.max_x) + tolerance &&
+               std::max(a.min_y, b.min_y) <= std::min(a.max_y, b.max_y) + tolerance;
+    };
     for (size_t box = 0; box < box_count; ++box) {
         if (contains(input.corridor[box], guess.nodes.front().disc_center, tolerance)) {
             cost[0][box] = static_cast<int>(box);
@@ -525,23 +524,35 @@ bool assignAabbsImpl(VehicleInitialGuess& guess, const NlpVehicleInput& input,
     const bool start_covered = std::any_of(cost.front().begin(), cost.front().end(),
         [&](int value) { return value != unreachable; });
     if (!start_covered) {
-        const int first_forward_box = firstForwardAabb(guess, input, tolerance);
-        if (first_forward_box < 0) {
-            reason = "start disc center is outside every AABB and the forward reference path never enters one";
-            logAabbAssignmentFailure(guess, input, tolerance, cost, unreachable,
-                                     logical_start_box, reason);
-            return false;
+        logical_start_box = firstForwardAabb(guess, input, tolerance);
+        if (logical_start_box >= 0) {
+            guess.start_aabb_exempt = true;
+        } else {
+            double best_cost = std::numeric_limits<double>::infinity();
+            for (size_t box = 0; box < box_count; ++box) {
+                const double candidate = assignmentCost(
+                    guess.nodes.front().disc_center, box);
+                if (candidate < best_cost) {
+                    best_cost = candidate;
+                    logical_start_box = static_cast<int>(box);
+                }
+            }
         }
-        guess.start_aabb_exempt = true;
-        logical_start_box = first_forward_box;
-        cost[0][static_cast<size_t>(first_forward_box)] = first_forward_box;
+        cost[0][static_cast<size_t>(logical_start_box)] = logical_start_box;
     }
     for (size_t node = 1; node < node_count; ++node) {
         for (size_t box = 0; box < box_count; ++box) {
-            if (!contains(input.corridor[box], guess.nodes[node].disc_center, tolerance)) continue;
             for (size_t previous = 0; previous < box_count; ++previous) {
                 if (cost[node - 1][previous] == unreachable || box < previous || box > previous + 1) continue;
-                const int candidate = cost[node - 1][previous] + (box == previous ? 0 : 1);
+                if (box != previous && !boxesOverlap(previous, box)) continue;
+                const double scale = 1000000.0;
+                const int max_step_cost = unreachable /
+                    static_cast<int>(std::max<size_t>(2, node_count + 1));
+                const int outside_cost = static_cast<int>(std::min(
+                    scale * assignmentCost(guess.nodes[node].disc_center, box),
+                    static_cast<double>(max_step_cost)));
+                const int candidate = cost[node - 1][previous] + outside_cost +
+                                      (box == previous ? 0 : 1);
                 if (candidate < cost[node][box]) {
                     cost[node][box] = candidate;
                     predecessor[node][box] = static_cast<int>(previous);
@@ -552,19 +563,7 @@ bool assignAabbsImpl(VehicleInitialGuess& guess, const NlpVehicleInput& input,
 
     const auto best = std::min_element(cost.back().begin(), cost.back().end());
     if (best == cost.back().end() || *best == unreachable) {
-        size_t first_uncovered = node_count;
-        for (size_t node = guess.start_aabb_exempt ? 1 : 0; node < node_count; ++node) {
-            const bool covered = std::any_of(input.corridor.begin(), input.corridor.end(),
-                [&](const Aabb& box) { return contains(box, guess.nodes[node].disc_center, tolerance); });
-            if (!covered) {
-                first_uncovered = node;
-                break;
-            }
-        }
-        std::ostringstream text;
-        if (first_uncovered < node_count) text << "disc center at node " << first_uncovered << " is outside every AABB";
-        else text << "no ordered assignment through adjacent AABB overlap";
-        reason = text.str();
+        reason = "no complete monotonic same-or-next AABB assignment";
         logAabbAssignmentFailure(guess, input, tolerance, cost, unreachable,
                                  logical_start_box, reason);
         return false;
@@ -576,7 +575,7 @@ bool assignAabbsImpl(VehicleInitialGuess& guess, const NlpVehicleInput& input,
         if (reverse > 0) box = predecessor[reverse][static_cast<size_t>(box)];
     }
     if (guess.start_aabb_exempt) {
-        ROS_WARN("[nlp_recovery][AABB_START_EXEMPT] V%d start outside all AABBs; assign first forward AABB=%d; skip start AABB constraint and required entry-interval check.",
+        ROS_WARN("[nlp_recovery][AABB_START_EXEMPT] V%d start outside all AABBs; assign logical AABB=%d; skip start AABB constraint and required entry-interval check.",
                  input.id, guess.nodes.front().aabb_index);
     }
     return true;
@@ -903,6 +902,18 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
             bounds_violated = speed_violation > kEpsilon || steer_violation > kEpsilon ||
                               accel_violation > kEpsilon || rate_violation > kEpsilon;
             if (bounds_violated) ++diagnostics.bound_violation_nodes;
+            if (!(node == 0 && vehicle.start_aabb_exempt) && state.aabb_index >= 0 &&
+                static_cast<size_t>(state.aabb_index) < input_vehicle.corridor.size()) {
+                const Aabb& box = input_vehicle.corridor[static_cast<size_t>(state.aabb_index)];
+                const double aabb_violation = std::max({box.min_x - state.disc_center.x,
+                    state.disc_center.x - box.max_x, box.min_y - state.disc_center.y,
+                    state.disc_center.y - box.max_y, 0.0});
+                diagnostics.max_aabb_violation = std::max(
+                    diagnostics.max_aabb_violation, aabb_violation);
+                if (aabb_violation > config_.containment_tolerance) {
+                    ++diagnostics.aabb_violation_nodes;
+                }
+            }
 
             if (node + 1 < result.node_count) {
                 const InitialGuessNode& next = vehicle.nodes[node + 1];
@@ -928,6 +939,9 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
             result.diagnostics.max_kinematic_heading_residual,
             diagnostics.max_kinematic_heading_residual);
         result.diagnostics.bound_violation_nodes += diagnostics.bound_violation_nodes;
+        result.diagnostics.aabb_violation_nodes += diagnostics.aabb_violation_nodes;
+        result.diagnostics.max_aabb_violation = std::max(
+            result.diagnostics.max_aabb_violation, diagnostics.max_aabb_violation);
         result.vehicles.push_back(std::move(vehicle));
     }
 
@@ -975,6 +989,7 @@ NlpInitialGuess InitialGuessGenerator::generate(const NlpOptimizationInput& inpu
     const bool dynamics_close = result.diagnostics.max_kinematic_position_residual <= 1e-3 &&
                                 result.diagnostics.max_kinematic_heading_residual <= 1e-3;
     result.constraints_satisfied = result.diagnostics.bound_violation_nodes == 0 &&
+        result.diagnostics.aabb_violation_nodes == 0 &&
         result.diagnostics.participant_collision_nodes == 0 &&
         result.diagnostics.static_collision_nodes == 0 && dynamics_close;
     if (!all_assignments_valid) {

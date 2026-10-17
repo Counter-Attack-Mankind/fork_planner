@@ -683,15 +683,19 @@ private:
     }
 
     void logGeometryRepair(const InitialGuessGeometryRepairResult& repair) const {
-        ROS_INFO("[nlp_recovery][geometry_repair] attempted=%d success=%d reason=%s",
-                 repair.attempted, repair.success, repair.reason.c_str());
+        ROS_INFO("[nlp_recovery][geometry_repair] generated=%d repaired=%d "
+                 "aabb_assignment=%d reason=%s",
+                 repair.generated, repair.repaired, repair.aabb_assignment_valid,
+                 repair.reason.c_str());
         for (const auto& vehicle : repair.vehicles) {
-            ROS_INFO("[nlp_recovery][geometry_repair] V%d attempted=%d success=%d "
+            ROS_INFO("[nlp_recovery][geometry_repair] V%d attempted=%d repaired=%d "
+                     "aabb_assignment=%d "
                      "uncovered=%zu moved=%zu max_move=%.6f aabb_before=%.6f "
                      "aabb_after=%.6f interval=%.6f curvature=%.6f "
                      "kinematic=(%.6f,%.6f) disc=%zu static_obb=%zu "
                      "participant=(disc %zu,obb %zu) reason=%s",
-                     vehicle.id, vehicle.attempted, vehicle.success,
+                     vehicle.id, vehicle.repair_attempted, vehicle.repaired,
+                     vehicle.aabb_assignment_valid,
                      vehicle.original_uncovered_nodes, vehicle.moved_nodes,
                      vehicle.max_displacement, vehicle.max_aabb_violation_before,
                      vehicle.max_aabb_violation_after,
@@ -747,6 +751,11 @@ private:
                                 const CaseSaveResult& saved) {
         NlpSolveResult result = nlp_solver_->solve(build.input, guess);
         logSolveResult(result, saved.case_id);
+        if (!saved.success) {
+            ROS_ERROR("[nlp_recovery][solver] case files unavailable; solve result not saved: %s",
+                      saved.reason.c_str());
+            return result;
+        }
         std::string error;
         if (!saveNlpSolveResult(result, saved.case_directory, error)) {
             ROS_ERROR("[nlp_recovery][solver] result save failed: %s",
@@ -771,7 +780,7 @@ private:
             const auto& vehicle = result.vehicles[vehicle_index];
             auto path = baseMarker(prefix + "_optimized_path", vehicle.id,
                                    visualization_msgs::Marker::LINE_STRIP);
-            path.scale.x = 0.028;
+            path.scale.x = 0.012;
             path.color = trajectory_color;
             auto centers = baseMarker(prefix + "_optimized_centers", vehicle.id,
                                       visualization_msgs::Marker::SPHERE_LIST);
@@ -879,7 +888,8 @@ private:
                 locked_.original_initial_guess = prepared.original;
                 locked_.geometry_repair = prepared.repair;
                 locked_.repaired_initial_guess = prepared.repair.repaired_guess;
-                if (saved.success && locked_.geometry_repair.success) {
+                if (locked_.geometry_repair.generated &&
+                    locked_.geometry_repair.aabb_assignment_valid) {
                     locked_.solver_result = solveAndSave(
                         locked_.build, locked_.repaired_initial_guess, saved);
                     submitLockedTrajectory();
@@ -955,7 +965,8 @@ private:
             latest_debug_original_guess_ = prepared.original;
             latest_debug_geometry_repair_ = prepared.repair;
             latest_debug_repaired_guess_ = prepared.repair.repaired_guess;
-            if (saved.success && latest_debug_geometry_repair_.success) {
+            if (latest_debug_geometry_repair_.generated &&
+                latest_debug_geometry_repair_.aabb_assignment_valid) {
                 latest_debug_solver_result_ = solveAndSave(
                     build, latest_debug_repaired_guess_, saved);
             }

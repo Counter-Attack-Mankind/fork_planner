@@ -384,7 +384,7 @@ TEST(InitialGuessTest, ExemptsOnlyOutsideStartAndUsesFirstForwardAabb) {
     }
 }
 
-TEST(InitialGuessTest, RejectsInvalidInputAndIllegalAabbAssignment) {
+TEST(InitialGuessTest, RetainsInfeasibleValuesWhenLogicalAabbAssignmentExists) {
     fnr::NlpOptimizationInput invalid = makeInput({1});
     invalid.valid = false;
     EXPECT_FALSE(generator().generate(invalid).generated);
@@ -392,8 +392,10 @@ TEST(InitialGuessTest, RejectsInvalidInputAndIllegalAabbAssignment) {
     fnr::NlpOptimizationInput uncovered = makeInput({1});
     uncovered.vehicles.front().corridor = {{5.0, 6.0, 5.0, 6.0}};
     const fnr::NlpInitialGuess guess = generator().generate(uncovered);
-    EXPECT_FALSE(guess.generated);
-    EXPECT_NE(guess.reason.find("AABB assignment failed"), std::string::npos);
+    ASSERT_TRUE(guess.generated) << guess.reason;
+    EXPECT_TRUE(guess.vehicles.front().aabb_assignment_valid);
+    EXPECT_FALSE(guess.constraints_satisfied);
+    EXPECT_GT(guess.diagnostics.aabb_violation_nodes, 0U);
 
     fnr::NlpOptimizationInput late_entry = makeInput({2});
     auto& vehicle = late_entry.vehicles.front();
@@ -402,8 +404,9 @@ TEST(InitialGuessTest, RejectsInvalidInputAndIllegalAabbAssignment) {
     vehicle.corridor = {{-0.10, 1.40, -0.30, 0.30}};
     vehicle.corridor_seeds = {{-0.05, 0.0, 0.0}};
     const fnr::NlpInitialGuess late_guess = generator(11, 4.0).generate(late_entry);
-    EXPECT_FALSE(late_guess.generated);
-    EXPECT_NE(late_guess.reason.find("node 1"), std::string::npos);
+    ASSERT_TRUE(late_guess.generated) << late_guess.reason;
+    EXPECT_TRUE(late_guess.vehicles.front().aabb_assignment_valid);
+    EXPECT_FALSE(late_guess.constraints_satisfied);
 }
 
 TEST(InitialGuessTest, RepairsOnlyLocalUncoveredWindowAndPreservesEndpoints) {
@@ -448,7 +451,8 @@ TEST(InitialGuessTest, RepairsOnlyLocalUncoveredWindowAndPreservesEndpoints) {
     fnr::InitialGuessGeometryRepair repair(repair_config, builder);
     const auto result = repair.repair(input, original);
 
-    ASSERT_TRUE(result.success) << result.reason << ": " << result.vehicles.front().reason;
+    ASSERT_TRUE(result.generated) << result.reason << ": " << result.vehicles.front().reason;
+    ASSERT_TRUE(result.aabb_assignment_valid);
     ASSERT_TRUE(result.repaired_guess.generated);
     ASSERT_EQ(result.vehicles.front().original_uncovered_nodes, 1U);
     EXPECT_GT(result.vehicles.front().moved_nodes, 0U);
@@ -467,6 +471,35 @@ TEST(InitialGuessTest, RepairsOnlyLocalUncoveredWindowAndPreservesEndpoints) {
         EXPECT_GE(node.disc_center.y, source.corridor.front().min_y - 1e-8);
         EXPECT_LE(node.disc_center.y, source.corridor.front().max_y + 1e-8);
     }
+}
+
+TEST(InitialGuessTest, KeepsUnrepairedViolationSolverReadyWhenMoveLimitIsInsufficient) {
+    fnr::NlpOptimizationInput input = makeInput({4});
+    auto& source = input.vehicles.front();
+    source.corridor = {{-0.2, 1.4, -0.2, 0.2}};
+
+    fnr::NlpInitialGuess original = generator(5, 4.0).generate(input);
+    ASSERT_TRUE(original.generated) << original.reason;
+    auto& middle = original.vehicles.front().nodes[2];
+    middle.rear_axle_pose.y = 0.5;
+    middle.disc_center.y = 0.5;
+
+    MapParam map_param;
+    fnr::CorridorConfig corridor_config;
+    corridor_config.vehicle_radius = source.parameters.disc_radius;
+    fnr::CorridorBuilder builder(map_param, {}, corridor_config);
+    fnr::InitialGuessGeometryRepairConfig repair_config;
+    repair_config.max_node_displacement = 0.05;
+    fnr::InitialGuessGeometryRepair repair(repair_config, builder);
+    const auto result = repair.repair(input, original);
+
+    ASSERT_TRUE(result.generated) << result.reason;
+    EXPECT_TRUE(result.aabb_assignment_valid);
+    EXPECT_TRUE(result.vehicles.front().repair_attempted);
+    EXPECT_FALSE(result.vehicles.front().repaired);
+    EXPECT_EQ(result.vehicles.front().moved_nodes, 0U);
+    EXPECT_GT(result.vehicles.front().max_aabb_violation_after, 0.0);
+    EXPECT_DOUBLE_EQ(result.repaired_guess.vehicles.front().nodes[2].rear_axle_pose.y, 0.5);
 }
 
 TEST(InitialGuessTest, ReportsParticipantAndSelectedStaticCollisions) {

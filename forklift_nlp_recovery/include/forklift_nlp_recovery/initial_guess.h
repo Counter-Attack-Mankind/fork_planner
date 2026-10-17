@@ -64,7 +64,9 @@ struct VehicleInitialGuessDiagnostics {
     double max_steer_violation = 0.0;
     double max_acceleration_violation = 0.0;
     double max_steer_rate_violation = 0.0;
+    double max_aabb_violation = 0.0;
     size_t bound_violation_nodes = 0;
+    size_t aabb_violation_nodes = 0;
 };
 
 struct VehicleInitialGuess {
@@ -92,6 +94,8 @@ struct NlpInitialGuessDiagnostics {
     double max_kinematic_position_residual = 0.0;
     double max_kinematic_heading_residual = 0.0;
     size_t bound_violation_nodes = 0;
+    size_t aabb_violation_nodes = 0;
+    double max_aabb_violation = 0.0;
     size_t participant_collision_nodes = 0;
     size_t static_collision_nodes = 0;
     double minimum_participant_clearance = 0.0;

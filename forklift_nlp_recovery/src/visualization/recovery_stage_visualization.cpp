@@ -60,6 +60,8 @@ void appendRecoveryStageMarkers(
         const VehicleInitialGuess& original_vehicle = original.vehicles[vehicle_index];
         const VehicleInitialGuess& repaired_vehicle = repair.repaired_guess.vehicles[vehicle_index];
         const std::string vehicle_ns = prefix + "/V" + std::to_string(source.id);
+        const bool show_comparison = vehicle_index < repair.vehicles.size() &&
+                                     repair.vehicles[vehicle_index].moved_nodes > 0;
 
         for (size_t box_index = 0; box_index < source.corridor.size(); ++box_index) {
             const Aabb& box = source.corridor[box_index];
@@ -76,15 +78,17 @@ void appendRecoveryStageMarkers(
 
         auto original_path = marker(frame_id, vehicle_ns + "/original_initial_guess",
             source.id, visualization_msgs::Marker::LINE_STRIP);
-        original_path.scale.x = 0.022;
+        original_path.scale.x = 0.010;
         original_path.color = color(0.05f, 0.35f, 1.0f, 1.0f);
         auto uncovered = marker(frame_id, vehicle_ns + "/original_uncovered_nodes",
             source.id, visualization_msgs::Marker::SPHERE_LIST);
         uncovered.scale.x = uncovered.scale.y = uncovered.scale.z = 0.065;
         uncovered.color = color(1.0f, 0.0f, 0.0f, 1.0f);
         for (const InitialGuessNode& node : original_vehicle.nodes) {
-            original_path.points.push_back(point(node.rear_axle_pose.x,
-                                                 node.rear_axle_pose.y, 0.23));
+            if (show_comparison) {
+                original_path.points.push_back(point(node.rear_axle_pose.x,
+                                                     node.rear_axle_pose.y, 0.23));
+            }
             const bool covered = std::any_of(source.corridor.begin(),
                 source.corridor.end(), [&](const Aabb& box) {
                     return node.disc_center.x >= box.min_x - containment_tolerance &&
@@ -95,20 +99,22 @@ void appendRecoveryStageMarkers(
             if (!covered) uncovered.points.push_back(point(
                 node.disc_center.x, node.disc_center.y, 0.28));
         }
-        markers.markers.push_back(original_path);
+        if (show_comparison) markers.markers.push_back(original_path);
         if (!uncovered.points.empty()) markers.markers.push_back(uncovered);
 
-        auto repaired_path = marker(frame_id, vehicle_ns + "/repaired_initial_guess",
-            source.id, visualization_msgs::Marker::LINE_LIST);
-        repaired_path.scale.x = 0.025;
-        repaired_path.color = color(0.05f, 0.95f, 0.25f, 1.0f);
-        for (size_t node = 0; node + 1 < repaired_vehicle.nodes.size(); node += 2) {
-            repaired_path.points.push_back(point(repaired_vehicle.nodes[node].rear_axle_pose.x,
-                repaired_vehicle.nodes[node].rear_axle_pose.y, 0.25));
-            repaired_path.points.push_back(point(repaired_vehicle.nodes[node + 1].rear_axle_pose.x,
-                repaired_vehicle.nodes[node + 1].rear_axle_pose.y, 0.25));
+        if (show_comparison) {
+            auto repaired_path = marker(frame_id, vehicle_ns + "/repaired_initial_guess",
+                source.id, visualization_msgs::Marker::LINE_LIST);
+            repaired_path.scale.x = 0.010;
+            repaired_path.color = color(0.05f, 0.95f, 0.25f, 1.0f);
+            for (size_t node = 0; node + 1 < repaired_vehicle.nodes.size(); node += 2) {
+                repaired_path.points.push_back(point(repaired_vehicle.nodes[node].rear_axle_pose.x,
+                    repaired_vehicle.nodes[node].rear_axle_pose.y, 0.25));
+                repaired_path.points.push_back(point(repaired_vehicle.nodes[node + 1].rear_axle_pose.x,
+                    repaired_vehicle.nodes[node + 1].rear_axle_pose.y, 0.25));
+            }
+            if (!repaired_path.points.empty()) markers.markers.push_back(repaired_path);
         }
-        if (!repaired_path.points.empty()) markers.markers.push_back(repaired_path);
 
         auto moved = marker(frame_id, vehicle_ns + "/repaired_moved_nodes",
             source.id, visualization_msgs::Marker::SPHERE_LIST);
@@ -122,15 +128,29 @@ void appendRecoveryStageMarkers(
             }
         }
         if (!moved.points.empty()) markers.markers.push_back(moved);
+
+        if (vehicle_index < repair.vehicles.size() &&
+            repair.vehicles[vehicle_index].repair_attempted && !show_comparison &&
+            !original_vehicle.nodes.empty()) {
+            auto diagnostic = marker(frame_id, vehicle_ns + "/repair_diagnostic",
+                source.id, visualization_msgs::Marker::TEXT_VIEW_FACING);
+            diagnostic.pose.position = point(original_vehicle.nodes.front().rear_axle_pose.x,
+                original_vehicle.nodes.front().rear_axle_pose.y, 0.34);
+            diagnostic.scale.z = 0.045;
+            diagnostic.color = color(1.0f, 0.48f, 0.0f, 1.0f);
+            diagnostic.text = "V" + std::to_string(source.id) +
+                              " repair attempted, no displacement";
+            markers.markers.push_back(diagnostic);
+        }
     }
 
     auto status = marker(frame_id, prefix + "/geometry_repair_status", 0,
                          visualization_msgs::Marker::TEXT_VIEW_FACING);
     status.pose.position = point(field_width * 0.5, field_height - 0.32, 0.34);
     status.scale.z = 0.06;
-    status.color = repair.success ? color(0.05f, 0.95f, 0.25f, 1.0f) :
-                                    color(1.0f, 0.15f, 0.05f, 1.0f);
-    status.text = "geometry repair: " + repair.reason;
+    status.color = repair.generated && repair.aabb_assignment_valid ?
+        color(0.05f, 0.95f, 0.25f, 1.0f) : color(1.0f, 0.15f, 0.05f, 1.0f);
+    status.text = "initial guess: " + repair.reason;
     markers.markers.push_back(status);
 }
 

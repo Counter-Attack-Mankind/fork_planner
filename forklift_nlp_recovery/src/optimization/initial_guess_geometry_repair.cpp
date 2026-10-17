@@ -22,11 +22,6 @@ double pointDistance(const Pose2d& first, const Pose2d& second) {
     return std::hypot(first.x - second.x, first.y - second.y);
 }
 
-bool contains(const Aabb& box, const Pose2d& point, double tolerance) {
-    return point.x >= box.min_x - tolerance && point.x <= box.max_x + tolerance &&
-           point.y >= box.min_y - tolerance && point.y <= box.max_y + tolerance;
-}
-
 double aabbViolation(const Aabb& box, const Pose2d& point) {
     return std::max({box.min_x - point.x, point.x - box.max_x,
                      box.min_y - point.y, point.y - box.max_y, 0.0});
@@ -54,96 +49,6 @@ bool isCusp(const VehicleInitialGuess& vehicle, size_t node) {
     return (node > 0 && vehicle.nodes[node - 1].path_type != vehicle.nodes[node].path_type) ||
            (node + 1 < vehicle.nodes.size() &&
             vehicle.nodes[node].path_type != vehicle.nodes[node + 1].path_type);
-}
-
-std::vector<size_t> containingBoxes(const std::vector<Aabb>& corridor,
-                                    const Pose2d& point, double tolerance) {
-    std::vector<size_t> result;
-    for (size_t box = 0; box < corridor.size(); ++box) {
-        if (contains(corridor[box], point, tolerance)) result.push_back(box);
-    }
-    return result;
-}
-
-bool orderedAssignment(const VehicleInitialGuess& vehicle,
-                       const NlpVehicleInput& input,
-                       const InitialGuessGeometryRepairConfig& config,
-                       std::vector<int>& assignment, std::string& reason) {
-    const size_t node_count = vehicle.nodes.size();
-    const size_t box_count = input.corridor.size();
-    if (node_count < 2 || box_count == 0) {
-        reason = "empty node sequence or corridor";
-        return false;
-    }
-    const double unreachable = kInfinity;
-    std::vector<std::vector<double>> cost(node_count,
-        std::vector<double>(box_count, unreachable));
-    std::vector<std::vector<int>> predecessor(node_count,
-        std::vector<int>(box_count, -1));
-
-    const auto start_candidates = containingBoxes(
-        input.corridor, vehicle.nodes.front().disc_center, config.containment_tolerance);
-    if (!start_candidates.empty()) {
-        for (size_t box : start_candidates) cost[0][box] = static_cast<double>(box) * 1e-9;
-    } else {
-        size_t first_covered = node_count;
-        std::vector<size_t> candidates;
-        for (size_t node = 1; node < node_count; ++node) {
-            candidates = containingBoxes(input.corridor, vehicle.nodes[node].disc_center,
-                                         config.containment_tolerance);
-            if (!candidates.empty()) {
-                first_covered = node;
-                break;
-            }
-        }
-        if (first_covered == node_count) {
-            reason = "outside start has no covered forward sample";
-            return false;
-        }
-        for (size_t box : candidates) cost[0][box] = static_cast<double>(box) * 1e-9;
-    }
-
-    for (size_t node = 1; node < node_count; ++node) {
-        const Pose2d& center = vehicle.nodes[node].disc_center;
-        const auto covered = containingBoxes(input.corridor, center,
-                                              config.containment_tolerance);
-        if (covered.empty() && (node + 1 == node_count || isCusp(vehicle, node))) {
-            reason = node + 1 == node_count ? "terminal node is outside every AABB" :
-                "an uncovered node coincides with a direction-change boundary";
-            return false;
-        }
-        for (size_t box = 0; box < box_count; ++box) {
-            if (!covered.empty() &&
-                std::find(covered.begin(), covered.end(), box) == covered.end()) continue;
-            const Pose2d projected = projectInside(center, input.corridor[box], config.aabb_inset);
-            const double displacement = pointDistance(center, projected);
-            if (covered.empty() && displacement > config.max_node_displacement + kEpsilon) continue;
-            const double node_cost = covered.empty() ? displacement * displacement : 0.0;
-            for (size_t previous = box > 0 ? box - 1 : 0; previous <= box; ++previous) {
-                if (!std::isfinite(cost[node - 1][previous])) continue;
-                const double candidate = cost[node - 1][previous] + node_cost +
-                    (previous == box ? 0.0 : 1e-10);
-                if (candidate < cost[node][box]) {
-                    cost[node][box] = candidate;
-                    predecessor[node][box] = static_cast<int>(previous);
-                }
-                if (previous == box) break;
-            }
-        }
-    }
-
-    const auto best = std::min_element(cost.back().begin(), cost.back().end());
-    if (best == cost.back().end() || !std::isfinite(*best)) {
-        reason = "no monotonic same-or-next AABB assignment exists within displacement limit";
-        return false;
-    }
-    assignment.assign(node_count, -1);
-    int box = static_cast<int>(std::distance(cost.back().begin(), best));
-    for (size_t reverse = node_count; reverse-- > 0;) {
-        assignment[reverse] = box;
-        if (reverse > 0) box = predecessor[reverse][static_cast<size_t>(box)];
-    }
-    return true;
 }
 
 struct Vec2 { double x = 0.0; double y = 0.0; };
@@ -278,19 +183,17 @@ InitialGuessGeometryRepairResult InitialGuessGeometryRepair::repair(
     const NlpInitialGuess& original_guess) const {
     InitialGuessGeometryRepairResult result;
     result.repaired_guess = original_guess;
-    if (!config_.enabled) {
-        result.success = original_guess.generated;
-        result.reason = result.success ? "geometry repair disabled; original assignment valid" :
-                                        "geometry repair disabled";
-        return result;
-    }
-    if (!input.valid || original_guess.vehicles.size() != input.vehicles.size() ||
-        original_guess.node_count < 2 || original_guess.average_dt <= 0.0) {
+    if (!input.valid || input.vehicles.empty() ||
+        original_guess.vehicles.size() != input.vehicles.size() ||
+        original_guess.node_count < 2 ||
+        original_guess.time_grid.size() != original_guess.node_count ||
+        original_guess.average_dt <= 0.0) {
         result.reason = "incomplete input or original discrete guess";
+        result.repaired_guess.generated = false;
         return result;
     }
 
-    bool all_valid = true;
+    bool all_assignments_valid = true;
     result.vehicles.resize(input.vehicles.size());
     for (size_t vehicle_index = 0; vehicle_index < input.vehicles.size(); ++vehicle_index) {
         const NlpVehicleInput& source = input.vehicles[vehicle_index];
@@ -300,33 +203,52 @@ InitialGuessGeometryRepairResult InitialGuessGeometryRepair::repair(
         diagnostics.id = source.id;
         if (source.id != original.id || original.nodes.size() != original_guess.node_count) {
             diagnostics.reason = "vehicle ordering or node count mismatch";
-            all_valid = false;
-            continue;
-        }
-        std::vector<bool> uncovered(original.nodes.size(), false);
-        for (size_t node = 0; node < original.nodes.size(); ++node) {
-            const double violation = corridorViolation(source.corridor,
-                original.nodes[node].disc_center);
-            diagnostics.max_aabb_violation_before = std::max(
-                diagnostics.max_aabb_violation_before, violation);
-            uncovered[node] = violation > config_.containment_tolerance &&
-                !(node == 0 && original.start_aabb_exempt);
-            if (uncovered[node]) ++diagnostics.original_uncovered_nodes;
-        }
-        if (original.aabb_assignment_valid && diagnostics.original_uncovered_nodes == 0) {
-            diagnostics.success = true;
-            diagnostics.reason = "already covered; original guess retained";
+            repaired.valid = false;
+            repaired.aabb_assignment_valid = false;
+            all_assignments_valid = false;
             continue;
         }
 
-        diagnostics.attempted = true;
-        result.attempted = true;
-        std::vector<int> assignment;
-        if (!orderedAssignment(original, source, config_, assignment,
-                               diagnostics.reason)) {
-            all_valid = false;
+        std::string assignment_reason;
+        repaired.aabb_assignment_valid = assignInitialGuessAabbs(
+            repaired, source, config_.containment_tolerance, assignment_reason);
+        diagnostics.aabb_assignment_valid = repaired.aabb_assignment_valid;
+        if (!repaired.aabb_assignment_valid) {
+            diagnostics.reason = "logical AABB assignment failed: " + assignment_reason;
+            repaired.valid = false;
+            repaired.reason = diagnostics.reason;
+            all_assignments_valid = false;
             continue;
         }
+
+        std::vector<int> assignment(repaired.nodes.size(), -1);
+        for (size_t node = 0; node < repaired.nodes.size(); ++node) {
+            assignment[node] = repaired.nodes[node].aabb_index;
+        }
+        const std::vector<int> original_assignment = assignment;
+        std::vector<bool> uncovered(original.nodes.size(), false);
+        for (size_t node = 0; node < original.nodes.size(); ++node) {
+            const double corridor_violation = corridorViolation(source.corridor,
+                original.nodes[node].disc_center);
+            if (!(node == 0 && original.start_aabb_exempt)) {
+                diagnostics.max_aabb_violation_before = std::max(
+                    diagnostics.max_aabb_violation_before,
+                    aabbViolation(source.corridor[static_cast<size_t>(assignment[node])],
+                                  original.nodes[node].disc_center));
+            }
+            uncovered[node] = corridor_violation > config_.containment_tolerance &&
+                !(node == 0 && original.start_aabb_exempt);
+            if (uncovered[node]) ++diagnostics.original_uncovered_nodes;
+        }
+        VehicleInitialGuess evaluated_original = original;
+        VehicleGeometryRepairDiagnostics original_derived;
+        recomputeDerivedState(evaluated_original, source, original_guess.average_dt,
+                              original_derived);
+        diagnostics.max_curvature_before = original_derived.max_curvature;
+        diagnostics.max_kinematic_position_residual_before =
+            original_derived.max_kinematic_position_residual;
+        diagnostics.max_kinematic_heading_residual_before =
+            original_derived.max_kinematic_heading_residual;
 
         std::vector<Pose2d> original_centers(original.nodes.size());
         std::vector<Pose2d> centers(original.nodes.size());
@@ -334,9 +256,14 @@ InitialGuessGeometryRepairResult InitialGuessGeometryRepair::repair(
         for (size_t node = 0; node < original.nodes.size(); ++node) {
             original_centers[node] = original.nodes[node].disc_center;
             centers[node] = original_centers[node];
-            if (!uncovered[node]) continue;
-            centers[node] = projectInside(centers[node],
+            if (!config_.enabled || !uncovered[node] || node == 0 ||
+                node + 1 == original.nodes.size() || isCusp(original, node)) continue;
+            diagnostics.repair_attempted = true;
+            const Pose2d projected = projectInside(centers[node],
                 source.corridor[static_cast<size_t>(assignment[node])], config_.aabb_inset);
+            if (pointDistance(original_centers[node], projected) >
+                config_.max_node_displacement + kEpsilon) continue;
+            centers[node] = projected;
             movable[node] = true;
             const size_t begin = node > config_.transition_nodes ?
                 node - config_.transition_nodes : 1;
@@ -345,6 +272,9 @@ InitialGuessGeometryRepairResult InitialGuessGeometryRepair::repair(
             for (size_t neighbor = begin; neighbor <= end; ++neighbor) {
                 if (!isCusp(original, neighbor)) movable[neighbor] = true;
             }
+        }
+        if (config_.enabled && diagnostics.original_uncovered_nodes > 0) {
+            diagnostics.repair_attempted = true;
         }
         for (size_t node = 1; node + 1 < centers.size(); ++node) {
             if (!movable[node] || uncovered[node]) continue;
@@ -382,6 +312,15 @@ InitialGuessGeometryRepairResult InitialGuessGeometryRepair::repair(
             centers.swap(next);
         }
 
+        for (size_t node = 1; node + 1 < centers.size(); ++node) {
+            if (!movable[node]) continue;
+            if (pointDistance(original_centers[node], centers[node]) >
+                config_.max_node_displacement + kEpsilon) {
+                centers[node] = original_centers[node];
+                movable[node] = false;
+            }
+        }
+
         for (size_t node = 1; node + 1 < repaired.nodes.size(); ++node) {
             if (!movable[node]) continue;
             const double direction_yaw = std::atan2(centers[node + 1].y - centers[node - 1].y,
@@ -398,13 +337,64 @@ InitialGuessGeometryRepairResult InitialGuessGeometryRepair::repair(
         }
         recomputeDerivedState(repaired, source, original_guess.average_dt, diagnostics);
 
-        bool local_valid = true;
+        repaired.aabb_assignment_valid = assignInitialGuessAabbs(
+            repaired, source, config_.containment_tolerance, assignment_reason);
+        diagnostics.aabb_assignment_valid = repaired.aabb_assignment_valid;
+        if (!repaired.aabb_assignment_valid) {
+            diagnostics.reason = "post-repair logical AABB assignment failed: " + assignment_reason;
+            repaired.valid = false;
+            repaired.reason = diagnostics.reason;
+            all_assignments_valid = false;
+            continue;
+        }
+        for (size_t node = 0; node < repaired.nodes.size(); ++node) {
+            assignment[node] = repaired.nodes[node].aabb_index;
+        }
+
         const double body_radius = std::hypot(0.5 * source.parameters.length,
                                                0.5 * source.parameters.width);
         if (source.parameters.disc_radius + kEpsilon < body_radius) {
+            ++diagnostics.static_obb_safety_violations_before;
             ++diagnostics.static_obb_safety_violations;
-            diagnostics.reason = "corridor disc does not circumscribe the vehicle OBB";
-            local_valid = false;
+        }
+        for (size_t node = 0; node < evaluated_original.nodes.size(); ++node) {
+            if (!(node == 0 && original.start_aabb_exempt) &&
+                !corridor_builder_.pointLegal(evaluated_original.nodes[node].disc_center)) {
+                ++diagnostics.disc_safety_violations_before;
+            }
+        }
+        for (size_t interval = 0; interval + 1 < evaluated_original.nodes.size(); ++interval) {
+            const Aabb& first = source.corridor[
+                static_cast<size_t>(original_assignment[interval])];
+            const Aabb& second = source.corridor[
+                static_cast<size_t>(original_assignment[interval + 1])];
+            for (size_t sample = 0; sample <= config_.interval_samples; ++sample) {
+                const double ratio = static_cast<double>(sample) /
+                                     static_cast<double>(config_.interval_samples);
+                const Pose2d rear = interpolatePose(
+                    evaluated_original.nodes[interval].rear_axle_pose,
+                    evaluated_original.nodes[interval + 1].rear_axle_pose, ratio);
+                const Pose2d center = discCenter(rear, source.parameters);
+                diagnostics.max_interval_aabb_violation_before = std::max(
+                    diagnostics.max_interval_aabb_violation_before,
+                    std::min(aabbViolation(first, center), aabbViolation(second, center)));
+                if (!(interval == 0 && original.start_aabb_exempt) &&
+                    !corridor_builder_.pointLegal(center)) {
+                    ++diagnostics.disc_safety_violations_before;
+                }
+                const Obb moving = makeObb(rear, source.parameters.length,
+                    source.parameters.width, source.parameters.rear_axle_to_center);
+                for (const StaticVehicleObstacle& obstacle : input.static_vehicles) {
+                    if (std::find(obstacle.influencing_vehicle_ids.begin(),
+                                  obstacle.influencing_vehicle_ids.end(), source.id) ==
+                        obstacle.influencing_vehicle_ids.end()) continue;
+                    const Obb fixed = makeObb(obstacle.rear_axle_pose, obstacle.length,
+                        obstacle.width, obstacle.rear_axle_to_center);
+                    if (obbOverlap(moving, fixed, config_.containment_tolerance)) {
+                        ++diagnostics.static_obb_safety_violations_before;
+                    }
+                }
+            }
         }
         for (size_t node = 0; node < repaired.nodes.size(); ++node) {
             const double displacement = pointDistance(original.nodes[node].disc_center,
@@ -416,23 +406,16 @@ InitialGuessGeometryRepairResult InitialGuessGeometryRepair::repair(
                 diagnostics.nodes.push_back({node, assignment[node], uncovered[node],
                                              displacement});
             }
-            diagnostics.max_aabb_violation_after = std::max(
-                diagnostics.max_aabb_violation_after,
-                corridorViolation(source.corridor, repaired.nodes[node].disc_center));
-            if (node > 0 && !corridor_builder_.pointLegal(repaired.nodes[node].disc_center)) {
-                ++diagnostics.disc_safety_violations;
-                local_valid = false;
+            if (!(node == 0 && repaired.start_aabb_exempt)) {
+                diagnostics.max_aabb_violation_after = std::max(
+                    diagnostics.max_aabb_violation_after,
+                    aabbViolation(source.corridor[static_cast<size_t>(assignment[node])],
+                                  repaired.nodes[node].disc_center));
             }
-        }
-        if (diagnostics.max_displacement > config_.max_node_displacement + kEpsilon) {
-            diagnostics.reason = "smoothed repair exceeds maximum node displacement";
-            local_valid = false;
-        }
-        const double curvature_limit = std::tan(source.parameters.max_steer_angle) /
-                                       source.parameters.wheel_base;
-        if (diagnostics.max_curvature > curvature_limit + 1e-6) {
-            diagnostics.reason = "repaired local curvature exceeds steering limit";
-            local_valid = false;
+            if (!(node == 0 && repaired.start_aabb_exempt) &&
+                !corridor_builder_.pointLegal(repaired.nodes[node].disc_center)) {
+                ++diagnostics.disc_safety_violations;
+            }
         }
         for (size_t interval = 0; interval + 1 < repaired.nodes.size(); ++interval) {
             const Aabb& first = source.corridor[static_cast<size_t>(assignment[interval])];
@@ -447,11 +430,9 @@ InitialGuessGeometryRepairResult InitialGuessGeometryRepair::repair(
                                                   aabbViolation(second, center));
                 diagnostics.max_interval_aabb_violation = std::max(
                     diagnostics.max_interval_aabb_violation, violation);
-                if (violation > config_.containment_tolerance) local_valid = false;
                 if (!(interval == 0 && original.start_aabb_exempt) &&
                     !corridor_builder_.pointLegal(center)) {
                     ++diagnostics.disc_safety_violations;
-                    local_valid = false;
                 }
                 const Obb moving = makeObb(rear, source.parameters.length,
                     source.parameters.width, source.parameters.rear_axle_to_center);
@@ -463,35 +444,57 @@ InitialGuessGeometryRepairResult InitialGuessGeometryRepair::repair(
                         obstacle.width, obstacle.rear_axle_to_center);
                     if (obbOverlap(moving, fixed, config_.containment_tolerance)) {
                         ++diagnostics.static_obb_safety_violations;
-                        local_valid = false;
                     }
                 }
             }
         }
-        std::string assignment_reason;
-        repaired.aabb_assignment_valid = assignInitialGuessAabbs(
-            repaired, source, config_.containment_tolerance, assignment_reason);
-        if (!repaired.aabb_assignment_valid) {
-            diagnostics.reason = "strict post-repair AABB assignment failed: " + assignment_reason;
-            local_valid = false;
+        repaired.valid = repaired.aabb_assignment_valid;
+        repaired.reason = repaired.valid ? "complete logical AABB assignment" : diagnostics.reason;
+        diagnostics.repaired = diagnostics.moved_nodes > 0;
+        result.repaired = result.repaired || diagnostics.repaired;
+        if (diagnostics.reason.empty()) {
+            if (!config_.enabled) diagnostics.reason = "geometry repair disabled; diagnostics only";
+            else if (diagnostics.original_uncovered_nodes == 0) {
+                diagnostics.reason = "no AABB gap; original guess retained";
+            } else if (diagnostics.repaired) {
+                diagnostics.reason = diagnostics.max_aabb_violation_after <=
+                    config_.containment_tolerance ? "local repair removed point AABB gaps" :
+                    "local repair applied; remaining violations are diagnostic only";
+            } else {
+                diagnostics.reason = "repair produced no admissible displacement; original guess retained";
+            }
         }
-        repaired.valid = local_valid && repaired.aabb_assignment_valid;
-        if (!repaired.valid && diagnostics.reason.empty()) {
-            diagnostics.reason = "post-repair interval or safety check failed";
-        }
-        repaired.reason = repaired.valid ? "geometry repair passed" : diagnostics.reason;
-        diagnostics.success = repaired.valid;
-        if (diagnostics.success) diagnostics.reason = "local geometry repair passed";
-        all_valid = all_valid && diagnostics.success;
     }
 
-    for (size_t first = 0; first < result.repaired_guess.vehicles.size(); ++first) {
-        for (size_t second = first + 1; second < result.repaired_guess.vehicles.size(); ++second) {
+    for (size_t first = 0;
+         all_assignments_valid && first < result.repaired_guess.vehicles.size(); ++first) {
+        for (size_t second = first + 1;
+             second < result.repaired_guess.vehicles.size(); ++second) {
             const auto& first_vehicle = result.repaired_guess.vehicles[first];
             const auto& second_vehicle = result.repaired_guess.vehicles[second];
+            const auto& original_first_vehicle = original_guess.vehicles[first];
+            const auto& original_second_vehicle = original_guess.vehicles[second];
             const auto& first_parameters = input.vehicles[first].parameters;
             const auto& second_parameters = input.vehicles[second].parameters;
             for (size_t node = 0; node < result.repaired_guess.node_count; ++node) {
+                const double original_center_distance = pointDistance(
+                    original_first_vehicle.nodes[node].disc_center,
+                    original_second_vehicle.nodes[node].disc_center);
+                if (original_center_distance + config_.containment_tolerance <
+                    first_parameters.disc_radius + second_parameters.disc_radius) {
+                    ++result.vehicles[first].participant_disc_collisions_before;
+                    ++result.vehicles[second].participant_disc_collisions_before;
+                }
+                if (obbOverlap(makeObb(original_first_vehicle.nodes[node].rear_axle_pose,
+                                      first_parameters.length, first_parameters.width,
+                                      first_parameters.rear_axle_to_center),
+                               makeObb(original_second_vehicle.nodes[node].rear_axle_pose,
+                                      second_parameters.length, second_parameters.width,
+                                      second_parameters.rear_axle_to_center),
+                               config_.containment_tolerance)) {
+                    ++result.vehicles[first].participant_obb_collisions_before;
+                    ++result.vehicles[second].participant_obb_collisions_before;
+                }
                 const double center_distance = pointDistance(
                     first_vehicle.nodes[node].disc_center,
                     second_vehicle.nodes[node].disc_center);
@@ -513,14 +516,14 @@ InitialGuessGeometryRepairResult InitialGuessGeometryRepair::repair(
             }
         }
     }
-    result.success = all_valid;
-    result.repaired_guess.generated = all_valid;
-    result.repaired_guess.constraints_satisfied = result.attempted ? false :
+    result.aabb_assignment_valid = all_assignments_valid;
+    result.generated = all_assignments_valid;
+    result.repaired_guess.generated = result.generated;
+    result.repaired_guess.constraints_satisfied = result.repaired ? false :
         original_guess.constraints_satisfied;
-    result.repaired_guess.reason = all_valid ?
-        (result.attempted ? "local geometry repair succeeded; ready for IPOPT" :
-                            "original AABB assignment valid; repair not required") :
-        "local geometry repair failed; IPOPT initialization prohibited";
+    result.repaired_guess.reason = result.generated ?
+        "initial guess generated with complete logical AABB assignments" :
+        "initial guess lacks a complete logical AABB assignment";
     result.reason = result.repaired_guess.reason;
     return result;
 }
@@ -539,32 +542,49 @@ bool saveGeometryRepairReport(const InitialGuessGeometryRepairResult& result,
         return false;
     }
     out << std::boolalpha << std::fixed << std::setprecision(9)
-        << "attempted: " << result.attempted << '\n'
-        << "success: " << result.success << '\n'
+        << "generated: " << result.generated << '\n'
+        << "repaired: " << result.repaired << '\n'
+        << "aabb_assignment_valid: " << result.aabb_assignment_valid << '\n'
         << "reason: \"" << result.reason << "\"\n"
         << "vehicles:\n";
     for (const auto& vehicle : result.vehicles) {
         out << "  - id: " << vehicle.id << '\n'
-            << "    attempted: " << vehicle.attempted << '\n'
-            << "    success: " << vehicle.success << '\n'
+            << "    repair_attempted: " << vehicle.repair_attempted << '\n'
+            << "    repaired: " << vehicle.repaired << '\n'
+            << "    aabb_assignment_valid: " << vehicle.aabb_assignment_valid << '\n'
             << "    reason: \"" << vehicle.reason << "\"\n"
             << "    original_uncovered_nodes: " << vehicle.original_uncovered_nodes << '\n'
             << "    moved_nodes: " << vehicle.moved_nodes << '\n'
             << "    max_displacement: " << vehicle.max_displacement << '\n'
             << "    max_aabb_violation_before: " << vehicle.max_aabb_violation_before << '\n'
             << "    max_aabb_violation_after: " << vehicle.max_aabb_violation_after << '\n'
-            << "    max_interval_aabb_violation: " << vehicle.max_interval_aabb_violation << '\n'
-            << "    max_curvature: " << vehicle.max_curvature << '\n'
-            << "    max_kinematic_position_residual: "
+            << "    max_interval_aabb_violation_before: "
+            << vehicle.max_interval_aabb_violation_before << '\n'
+            << "    max_interval_aabb_violation_after: " << vehicle.max_interval_aabb_violation << '\n'
+            << "    max_curvature_before: " << vehicle.max_curvature_before << '\n'
+            << "    max_curvature_after: " << vehicle.max_curvature << '\n'
+            << "    max_kinematic_position_residual_before: "
+            << vehicle.max_kinematic_position_residual_before << '\n'
+            << "    max_kinematic_heading_residual_before: "
+            << vehicle.max_kinematic_heading_residual_before << '\n'
+            << "    max_kinematic_position_residual_after: "
             << vehicle.max_kinematic_position_residual << '\n'
-            << "    max_kinematic_heading_residual: "
+            << "    max_kinematic_heading_residual_after: "
             << vehicle.max_kinematic_heading_residual << '\n'
-            << "    disc_safety_violations: " << vehicle.disc_safety_violations << '\n'
-            << "    static_obb_safety_violations: "
+            << "    disc_safety_violations_before: "
+            << vehicle.disc_safety_violations_before << '\n'
+            << "    disc_safety_violations_after: " << vehicle.disc_safety_violations << '\n'
+            << "    static_obb_safety_violations_before: "
+            << vehicle.static_obb_safety_violations_before << '\n'
+            << "    static_obb_safety_violations_after: "
             << vehicle.static_obb_safety_violations << '\n'
-            << "    participant_disc_collisions: "
+            << "    participant_disc_collisions_before: "
+            << vehicle.participant_disc_collisions_before << '\n'
+            << "    participant_disc_collisions_after: "
             << vehicle.participant_disc_collisions << '\n'
-            << "    participant_obb_collisions: "
+            << "    participant_obb_collisions_before: "
+            << vehicle.participant_obb_collisions_before << '\n'
+            << "    participant_obb_collisions_after: "
             << vehicle.participant_obb_collisions << '\n'
             << "    repaired_nodes:\n";
         for (const auto& node : vehicle.nodes) {
