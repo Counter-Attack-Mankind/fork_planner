@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "forklift_nlp_recovery/initial_guess.h"
+#include "forklift_nlp_recovery/nlp_constraint_diagnostics.h"
 
 namespace forklift_nlp_recovery {
 
@@ -15,6 +16,9 @@ struct NlpSolverConfig {
     double acceleration_weight = 1.0;
     double steer_rate_weight = 5.0;
     double control_smooth_weight = 5.0;
+    double reference_direction_weight = 5.0;
+    double direction_smoothing_speed = 0.02;
+    double direction_switch_speed_threshold = 0.01;
     int max_iterations = 1000;
     double tolerance = 1e-6;
     double acceptable_tolerance = 1e-4;
@@ -73,6 +77,14 @@ struct NlpSolverStatistics {
     double max_constraint_violation = 0.0;
 };
 
+struct VehicleDirectionDiagnostics {
+    int id = -1;
+    size_t initial_direction_changes = 0;
+    size_t optimized_direction_changes = 0;
+    double initial_opposite_direction_distance = 0.0;
+    double optimized_opposite_direction_distance = 0.0;
+};
+
 struct NlpSolveResult {
     bool problem_built = false;
     bool solver_success = false;
@@ -81,8 +93,11 @@ struct NlpSolveResult {
     size_t node_count = 0;
     double total_time = 0.0;
     double average_dt = 0.0;
+    double direction_switch_speed_threshold = 0.0;
     std::vector<OptimizedVehicleTrajectory> vehicles;
     NlpSolverStatistics statistics;
+    std::vector<VehicleDirectionDiagnostics> direction_diagnostics;
+    NlpConstraintDiagnostics constraint_diagnostics;
     NlpSolutionValidation validation;
 };
 

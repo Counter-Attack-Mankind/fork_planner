@@ -183,6 +183,15 @@ public:
         private_nh_.param("solver_control_smooth_weight",
                           solver_config_.control_smooth_weight,
                           solver_config_.control_smooth_weight);
+        private_nh_.param("solver_reference_direction_weight",
+                          solver_config_.reference_direction_weight,
+                          solver_config_.reference_direction_weight);
+        private_nh_.param("solver_direction_smoothing_speed",
+                          solver_config_.direction_smoothing_speed,
+                          solver_config_.direction_smoothing_speed);
+        private_nh_.param("solver_direction_switch_speed_threshold",
+                          solver_config_.direction_switch_speed_threshold,
+                          solver_config_.direction_switch_speed_threshold);
         private_nh_.param("solver_max_iterations", solver_config_.max_iterations,
                           solver_config_.max_iterations);
         private_nh_.param("solver_tolerance", solver_config_.tolerance,

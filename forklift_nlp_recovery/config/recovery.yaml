@@ -33,6 +33,12 @@ solver_time_weight: 1.0
 solver_acceleration_weight: 1.0
 solver_steer_rate_weight: 5.0
 solver_control_smooth_weight: 5.0
+# Soft cost only: stopping has zero cost, motion opposite to the frozen path
+# direction is penalized smoothly. Acceleration/control smoothing already
+# discourages rapid changes, so no separate speed-switch cost is added.
+solver_reference_direction_weight: 5.0
+solver_direction_smoothing_speed: 0.02
+solver_direction_switch_speed_threshold: 0.01
 solver_max_iterations: 1000
 solver_tolerance: 1.0e-6
 solver_acceptable_tolerance: 1.0e-4

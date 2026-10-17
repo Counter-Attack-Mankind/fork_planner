@@ -24,6 +24,7 @@ struct ReplayParameters {
     double width = 0.0;
     double rear_axle_to_center = 0.0;
     double wheel_base = 0.0;
+    double disc_radius = 0.0;
 };
 
 struct ReplayNode {

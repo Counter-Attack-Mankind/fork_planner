@@ -86,6 +86,33 @@ std::vector<double> unwrappedHeadings(const VehicleInitialGuess& guess,
     return headings;
 }
 
+size_t directionChanges(const std::vector<double>& speeds, double threshold) {
+    int direction = 0;
+    size_t changes = 0;
+    for (double speed : speeds) {
+        int next = 0;
+        if (speed >= threshold) next = 1;
+        else if (speed <= -threshold) next = -1;
+        if (next == 0) continue;
+        if (direction != 0 && next != direction) ++changes;
+        direction = next;
+    }
+    return changes;
+}
+
+double oppositeDirectionDistance(const std::vector<double>& speeds,
+                                 const VehicleInitialGuess& reference,
+                                 double dt) {
+    double distance = 0.0;
+    for (size_t node = 0; node + 1 < speeds.size(); ++node) {
+        const double reference_sign = reference.nodes[node].path_type == 1 ? -1.0 : 1.0;
+        const double first = std::max(0.0, -reference_sign * speeds[node]);
+        const double second = std::max(0.0, -reference_sign * speeds[node + 1]);
+        distance += 0.5 * dt * (first + second);
+    }
+    return distance;
+}
+
 casadi::MX squaredDistance(const casadi::MX& first, const casadi::MX& second) {
     const casadi::MX dx = first(0) - second(0);
     const casadi::MX dy = first(1) - second(1);
@@ -106,6 +133,14 @@ std::string yamlQuote(const std::string& value) {
     return '"' + escaped + '"';
 }
 
+std::string yamlNumber(double value) {
+    if (std::isinf(value)) return value > 0.0 ? ".inf" : "-.inf";
+    if (std::isnan(value)) return ".nan";
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(9) << value;
+    return out.str();
+}
+
 struct SymbolicVehicle {
     casadi::MX state;
     casadi::MX control;
@@ -117,25 +152,16 @@ struct ConstraintData {
     std::vector<casadi::MX> expressions;
     std::vector<double> lower;
     std::vector<double> upper;
+    std::vector<NlpConstraintMetadata> metadata;
 
-    void add(const casadi::MX& expression, double minimum, double maximum) {
+    void add(const casadi::MX& expression, double minimum, double maximum,
+             const NlpConstraintMetadata& constraint_metadata) {
         expressions.push_back(expression);
         lower.push_back(minimum);
         upper.push_back(maximum);
+        metadata.push_back(constraint_metadata);
     }
 };
-
-
-double maximumViolation(const std::vector<double>& values,
-                        const std::vector<double>& lower,
-                        const std::vector<double>& upper) {
-    double maximum = 0.0;
-    for (size_t index = 0; index < values.size(); ++index) {
-        if (std::isfinite(lower[index])) maximum = std::max(maximum, lower[index] - values[index]);
-        if (std::isfinite(upper[index])) maximum = std::max(maximum, values[index] - upper[index]);
-    }
-    return std::max(0.0, maximum);
-}
 
 }  // namespace
 
@@ -145,6 +171,9 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                                 const NlpInitialGuess& initial_guess) const {
     NlpSolveResult result;
     result.statistics.casadi_version = casadi::CasadiMeta::version();
+    result.constraint_diagnostics.reason = "candidate solution unavailable";
+    result.direction_switch_speed_threshold =
+        config_.direction_switch_speed_threshold;
     if (!input.valid || !initial_guess.generated) {
         result.reason = "valid optimization input and generated initial guess are required";
         return result;
@@ -156,6 +185,9 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
     }
     if (config_.min_time_scale <= 0.0 ||
         config_.max_time_scale < config_.min_time_scale ||
+        config_.reference_direction_weight < 0.0 ||
+        config_.direction_smoothing_speed <= 0.0 ||
+        config_.direction_switch_speed_threshold <= 0.0 ||
         config_.validation_substeps == 0) {
         result.reason = "invalid solver configuration";
         return result;
@@ -166,6 +198,7 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
     std::vector<double> initial_values;
     std::vector<double> lower_bounds;
     std::vector<double> upper_bounds;
+    std::vector<NlpConstraintMetadata> variable_metadata;
     ConstraintData constraints;
     std::vector<SymbolicVehicle> symbolic_vehicles;
     const casadi::MX total_time = casadi::MX::sym("T");
@@ -174,6 +207,8 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
     lower_bounds.push_back(std::max(1e-3, initial_guess.total_time * config_.min_time_scale));
     upper_bounds.push_back(std::max(lower_bounds.back() + 1e-3,
                                     initial_guess.total_time * config_.max_time_scale));
+    variable_metadata.push_back({NlpConstraintCategory::VARIABLE_BOUND,
+                                 -1, -1, 0, "total_time"});
     const casadi::MX dt = total_time / static_cast<double>(nodes - 1);
     casadi::MX objective = config_.time_weight * total_time;
 
@@ -207,6 +242,9 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
         variables.push_back(casadi::MX::reshape(state, 5 * nodes, 1));
         variables.push_back(casadi::MX::reshape(control, 2 * (nodes - 1), 1));
 
+        static const char* state_components[] = {"rear_x", "rear_y", "heading",
+                                                  "signed_speed", "front_steer"};
+
         for (size_t node = 0; node < nodes; ++node) {
             const InitialGuessNode& value = guess->nodes[node];
             const double state_initial[5] = {value.rear_axle_pose.x,
@@ -217,6 +255,8 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                 initial_values.push_back(state_initial[component]);
                 lower_bounds.push_back(-kInfinity);
                 upper_bounds.push_back(kInfinity);
+                variable_metadata.push_back({NlpConstraintCategory::VARIABLE_BOUND,
+                    vehicle.id, -1, node, state_components[component]});
             }
             const size_t base = lower_bounds.size() - 5;
             lower_bounds[base + 3] = -vehicle.parameters.max_speed;
@@ -244,6 +284,10 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
             upper_bounds.push_back(vehicle.parameters.max_accel);
             lower_bounds.push_back(-vehicle.parameters.max_steer_rate);
             upper_bounds.push_back(vehicle.parameters.max_steer_rate);
+            variable_metadata.push_back({NlpConstraintCategory::VARIABLE_BOUND,
+                vehicle.id, -1, interval, "acceleration"});
+            variable_metadata.push_back({NlpConstraintCategory::VARIABLE_BOUND,
+                vehicle.id, -1, interval, "steer_rate"});
         }
 
         for (size_t node = 0; node < nodes; ++node) {
@@ -257,17 +301,22 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
             const casadi::MX center = symbolicCenter(state(casadi::Slice(), node),
                 vehicle.parameters.rear_axle_to_center);
             if (!(node == 0 && guess->start_aabb_exempt)) {
-                constraints.add(center(0), box.min_x, box.max_x);
-                constraints.add(center(1), box.min_y, box.max_y);
+                constraints.add(center(0), box.min_x, box.max_x,
+                    {NlpConstraintCategory::AABB_NODE, vehicle.id, -1, node, "x"});
+                constraints.add(center(1), box.min_y, box.max_y,
+                    {NlpConstraintCategory::AABB_NODE, vehicle.id, -1, node, "y"});
             }
             if (node + 1 == nodes) continue;
             const casadi::MX current_state = state(casadi::Slice(), node);
             const casadi::MX current_control = control(casadi::Slice(), node);
             const casadi::MX predicted = integrateRk4(current_state, current_control,
                                                        dt, vehicle.parameters.wheel_base);
+            static const char* rk4_components[] = {"rear_x", "rear_y", "heading",
+                                                    "signed_speed", "front_steer"};
             for (size_t component = 0; component < 5; ++component) {
                 constraints.add(state(component, node + 1) - predicted(component),
-                                0.0, 0.0);
+                    0.0, 0.0, {NlpConstraintCategory::RK4, vehicle.id, -1,
+                               node, rk4_components[component]});
             }
             const int next_index = guess->nodes[node + 1].aabb_index;
             const Aabb& next_box = vehicle.corridor[next_index];
@@ -286,13 +335,23 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                                   std::max(box.min_y, next_box.min_y),
                                   std::min(box.max_y, next_box.max_y)};
             if (!(node == 0 && guess->start_aabb_exempt)) {
-                constraints.add(midpoint_center(0), middle_box.min_x, middle_box.max_x);
-                constraints.add(midpoint_center(1), middle_box.min_y, middle_box.max_y);
+                constraints.add(midpoint_center(0), middle_box.min_x, middle_box.max_x,
+                    {NlpConstraintCategory::AABB_MIDPOINT, vehicle.id, -1, node, "x"});
+                constraints.add(midpoint_center(1), middle_box.min_y, middle_box.max_y,
+                    {NlpConstraintCategory::AABB_MIDPOINT, vehicle.id, -1, node, "y"});
             }
             const casadi::MX acceleration = control(0, node);
             const casadi::MX steer_rate = control(1, node);
             objective += dt * (config_.acceleration_weight * acceleration * acceleration +
                                config_.steer_rate_weight * steer_rate * steer_rate);
+            const double reference_sign = guess->nodes[node].path_type == 1 ? -1.0 : 1.0;
+            const casadi::MX directed_speed = reference_sign * state(3, node);
+            const double smoothing = config_.direction_smoothing_speed;
+            const casadi::MX opposite_magnitude =
+                sqrt(directed_speed * directed_speed + smoothing * smoothing) - smoothing;
+            const casadi::MX opposite_gate = 1.0 / (1.0 + exp(directed_speed / smoothing));
+            objective += dt * config_.reference_direction_weight *
+                         opposite_magnitude * opposite_gate;
             if (node + 2 < nodes) {
                 const casadi::MX da = control(0, node + 1) - acceleration;
                 const casadi::MX dw = control(1, node + 1) - steer_rate;
@@ -316,7 +375,10 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                     second_vehicle.state(casadi::Slice(), node),
                     second_vehicle.input->parameters.rear_axle_to_center);
                 constraints.add(squaredDistance(first_center, second_center),
-                                required * required, kInfinity);
+                    required * required, kInfinity,
+                    {NlpConstraintCategory::PARTICIPANT_DISC,
+                     first_vehicle.input->id, second_vehicle.input->id,
+                     node, "node", required});
                 if (node + 1 == nodes) continue;
                 const casadi::MX first_mid = integrateRk4(
                     first_vehicle.state(casadi::Slice(), node),
@@ -329,7 +391,10 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                 constraints.add(squaredDistance(
                     symbolicCenter(first_mid, first_vehicle.input->parameters.rear_axle_to_center),
                     symbolicCenter(second_mid, second_vehicle.input->parameters.rear_axle_to_center)),
-                    required * required, kInfinity);
+                    required * required, kInfinity,
+                    {NlpConstraintCategory::PARTICIPANT_DISC,
+                     first_vehicle.input->id, second_vehicle.input->id,
+                     node, "midpoint", required});
             }
         }
     }
@@ -344,7 +409,9 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                     vehicle.state(casadi::Slice(), node),
                     vehicle.input->parameters.rear_axle_to_center);
                 constraints.add(squaredDistance(center, fixed_center),
-                                required * required, kInfinity);
+                    required * required, kInfinity,
+                    {NlpConstraintCategory::STATIC_DISC, vehicle.input->id,
+                     obstacle.id, node, "node", required});
                 if (node + 1 == nodes) continue;
                 const casadi::MX midpoint = integrateRk4(
                     vehicle.state(casadi::Slice(), node),
@@ -352,7 +419,9 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                     vehicle.input->parameters.wheel_base);
                 constraints.add(squaredDistance(symbolicCenter(
                     midpoint, vehicle.input->parameters.rear_axle_to_center), fixed_center),
-                    required * required, kInfinity);
+                    required * required, kInfinity,
+                    {NlpConstraintCategory::STATIC_DISC, vehicle.input->id,
+                     obstacle.id, node, "midpoint", required});
             }
         }
     }
@@ -391,9 +460,12 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
         result.statistics.objective = static_cast<double>(solution.at("f"));
         const std::vector<double> constraint_values = solution.at("g").get_elements();
         const std::vector<double> decision_values = solution.at("x").get_elements();
-        result.statistics.max_constraint_violation = std::max(
-            maximumViolation(constraint_values, constraints.lower, constraints.upper),
-            maximumViolation(decision_values, lower_bounds, upper_bounds));
+        result.constraint_diagnostics = diagnoseNlpConstraints({
+            constraint_values, constraints.lower, constraints.upper,
+            constraints.metadata, decision_values, lower_bounds, upper_bounds,
+            variable_metadata});
+        result.statistics.max_constraint_violation =
+            result.constraint_diagnostics.max_violation;
         result.solver_success = result.statistics.success;
         size_t offset = 0;
         result.total_time = decision_values[offset++];
@@ -425,6 +497,24 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                 trajectory.nodes.back().acceleration = trajectory.nodes[nodes - 2].acceleration;
                 trajectory.nodes.back().steer_rate = trajectory.nodes[nodes - 2].steer_rate;
             }
+            std::vector<double> initial_speeds;
+            std::vector<double> optimized_speeds;
+            initial_speeds.reserve(nodes);
+            optimized_speeds.reserve(nodes);
+            for (size_t node = 0; node < nodes; ++node) {
+                initial_speeds.push_back(symbolic.guess->nodes[node].signed_speed);
+                optimized_speeds.push_back(trajectory.nodes[node].signed_speed);
+            }
+            result.direction_diagnostics.push_back({
+                trajectory.id,
+                directionChanges(initial_speeds,
+                                 config_.direction_switch_speed_threshold),
+                directionChanges(optimized_speeds,
+                                 config_.direction_switch_speed_threshold),
+                oppositeDirectionDistance(initial_speeds, *symbolic.guess,
+                                           initial_guess.average_dt),
+                oppositeDirectionDistance(optimized_speeds, *symbolic.guess,
+                                           result.average_dt)});
             result.vehicles.push_back(std::move(trajectory));
         }
         result.validation = forklift_nlp_recovery::validateSolution(input, result, config_);
@@ -515,6 +605,63 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << result.validation.aabb_violation_samples << '\n'
            << "  invalid_aabb_switches: "
            << result.validation.invalid_aabb_switches << '\n';
+    report << "direction_diagnostics:\n"
+           << "  speed_hysteresis_threshold: "
+           << result.direction_switch_speed_threshold << '\n'
+           << "  vehicles:\n";
+    for (const VehicleDirectionDiagnostics& vehicle : result.direction_diagnostics) {
+        report << "    - id: " << vehicle.id << '\n'
+               << "      initial_direction_changes: "
+               << vehicle.initial_direction_changes << '\n'
+               << "      optimized_direction_changes: "
+               << vehicle.optimized_direction_changes << '\n'
+               << "      initial_opposite_direction_distance: "
+               << vehicle.initial_opposite_direction_distance << '\n'
+               << "      optimized_opposite_direction_distance: "
+               << vehicle.optimized_opposite_direction_distance << '\n';
+    }
+    report << "constraint_diagnostics:\n"
+           << "  available: " << result.constraint_diagnostics.available << '\n'
+           << "  reason: " << yamlQuote(result.constraint_diagnostics.reason) << '\n'
+           << "  max_violation: " << result.constraint_diagnostics.max_violation << '\n'
+           << "  categories:\n";
+    for (const NlpConstraintCategoryDiagnostics& category :
+         result.constraint_diagnostics.categories) {
+        report << "    - category: "
+               << nlpConstraintCategoryName(category.category) << '\n'
+               << "      sample_count: " << category.sample_count << '\n'
+               << "      violation_count: " << category.violation_count << '\n'
+               << "      max_violation: " << category.max_violation << '\n'
+               << "      max_distance_shortfall_m: "
+               << category.max_distance_shortfall << '\n';
+    }
+    report << "  worst_violations:\n";
+    for (size_t rank = 0;
+         rank < result.constraint_diagnostics.worst_violations.size(); ++rank) {
+        const NlpConstraintViolation& violation =
+            result.constraint_diagnostics.worst_violations[rank];
+        report << "    - rank: " << rank + 1 << '\n'
+               << "      category: "
+               << nlpConstraintCategoryName(violation.metadata.category) << '\n'
+               << "      vehicle_id: " << violation.metadata.vehicle_id << '\n'
+               << "      other_vehicle_id: "
+               << violation.metadata.other_vehicle_id << '\n'
+               << "      node: " << violation.metadata.node_index << '\n'
+               << "      component: " << yamlQuote(violation.metadata.component) << '\n'
+               << "      value: " << yamlNumber(violation.value) << '\n'
+               << "      lower_bound: " << yamlNumber(violation.lower_bound) << '\n'
+               << "      upper_bound: " << yamlNumber(violation.upper_bound) << '\n'
+               << "      violation: " << yamlNumber(violation.violation) << '\n';
+        if (violation.metadata.category == NlpConstraintCategory::PARTICIPANT_DISC ||
+            violation.metadata.category == NlpConstraintCategory::STATIC_DISC) {
+            report << "      actual_center_distance_m: "
+                   << yamlNumber(violation.actual_distance) << '\n'
+                   << "      required_center_distance_m: "
+                   << yamlNumber(violation.required_distance) << '\n'
+                   << "      distance_shortfall_m: "
+                   << yamlNumber(violation.distance_shortfall) << '\n';
+        }
+    }
     if (!report) {
         error = "failed while writing solver_report.yaml";
         return false;

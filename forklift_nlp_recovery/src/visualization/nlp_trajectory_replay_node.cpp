@@ -134,6 +134,26 @@ private:
             trajectory.color = color(base_color.r, base_color.g, base_color.b, 0.75f);
             for (const ReplayNode& node : vehicle.nodes) trajectory.points.push_back(point(node.rear_axle.x, node.rear_axle.y, 0.035));
             array.markers.push_back(trajectory);
+
+            auto configurations = marker("optimized_configuration_points",
+                visualization_msgs::Marker::SPHERE_LIST, stamp);
+            configurations.scale.x = configurations.scale.y = configurations.scale.z = 0.025;
+            configurations.color = color(base_color.r, base_color.g, base_color.b, 0.95f);
+            for (const ReplayNode& node : vehicle.nodes) {
+                configurations.points.push_back(point(node.rear_axle.x,
+                                                       node.rear_axle.y, 0.055));
+                const ReplayPose center = replayBodyCenter(
+                    node.rear_axle, vehicle.parameters.rear_axle_to_center);
+                auto disc = marker("optimized_center_discs",
+                    visualization_msgs::Marker::CYLINDER, stamp);
+                disc.pose.position = point(center.x, center.y, 0.018);
+                disc.scale.x = 2.0 * vehicle.parameters.disc_radius;
+                disc.scale.y = 2.0 * vehicle.parameters.disc_radius;
+                disc.scale.z = 0.006;
+                disc.color = color(base_color.r, base_color.g, base_color.b, 0.10f);
+                array.markers.push_back(disc);
+            }
+            array.markers.push_back(configurations);
         }
         std::set<int> colliding_static_ids;
         for (const ReplayViolation& violation : violations) {

@@ -52,6 +52,8 @@ TEST(ReplayDataTest, LoadsNonContiguousVehicleIdsAndCommonGrid) {
     ASSERT_EQ(replay_case.participant_ids, (std::vector<int>{2, 9}));
     EXPECT_EQ(replay_case.node_count, 2u);
     EXPECT_DOUBLE_EQ(replay_case.total_time, 1.0);
+    ASSERT_EQ(replay_case.vehicles.size(), 2u);
+    EXPECT_DOUBLE_EQ(replay_case.vehicles.front().parameters.disc_radius, 0.12);
     EXPECT_EQ(replay_case.report.collision_geometry,
               "legacy_body_center_discs");
     EXPECT_FALSE(replay_case.report.has_obb_validation_metrics);

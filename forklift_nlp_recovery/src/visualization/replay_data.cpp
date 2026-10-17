@@ -203,9 +203,10 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
             vehicle.parameters.length = requireDouble(parameters, "length");
             vehicle.parameters.width = requireDouble(parameters, "width");
             vehicle.parameters.rear_axle_to_center = requireDouble(parameters, "rear_axle_to_center");
+            vehicle.parameters.disc_radius = requireDouble(parameters, "disc_radius");
             vehicle.parameters.wheel_base = requireDouble(parameters, "wheel_base");
             if (vehicle.parameters.length <= 0.0 || vehicle.parameters.width <= 0.0 ||
-                vehicle.parameters.wheel_base <= 0.0) {
+                vehicle.parameters.disc_radius <= 0.0 || vehicle.parameters.wheel_base <= 0.0) {
                 throw std::runtime_error("vehicle " + std::to_string(vehicle.id) + " has invalid geometry");
             }
             if (!source["aabbs"] || !source["aabbs"].IsSequence() || source["aabbs"].size() == 0) {

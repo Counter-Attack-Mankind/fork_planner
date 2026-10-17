@@ -105,6 +105,9 @@ TEST(NlpSolverTest, SolvesTwoVehiclesWithSingleAndMultipleAabbs) {
     EXPECT_EQ(result.vehicles[1].id, 9);
     EXPECT_EQ(result.node_count, guess.node_count);
     EXPECT_GT(result.total_time, 0.0);
+    EXPECT_TRUE(result.constraint_diagnostics.available);
+    EXPECT_EQ(result.constraint_diagnostics.categories.size(), 6u);
+    EXPECT_EQ(result.direction_diagnostics.size(), 2u);
     std::cout << "two_vehicle_result T=" << result.total_time
               << " iterations=" << result.statistics.iterations
               << " wall=" << result.statistics.wall_time
@@ -243,6 +246,9 @@ TEST(NlpSolverTest, SavesTrajectoryAndReportInExistingCaseDirectory) {
     EXPECT_NE(content.find("independent_validation: obb_sat"), std::string::npos);
     EXPECT_NE(content.find("minimum_participant_obb_separation_margin:"),
               std::string::npos);
+    EXPECT_NE(content.find("direction_diagnostics:"), std::string::npos);
+    EXPECT_NE(content.find("constraint_diagnostics:"), std::string::npos);
+    EXPECT_NE(content.find("category: rk4"), std::string::npos);
     std::filesystem::remove_all(directory);
 }
 

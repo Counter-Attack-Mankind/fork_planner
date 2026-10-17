@@ -20,7 +20,7 @@ find_package(yaml-cpp REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_initial_guess forklift_nlp_recovery_validator forklift_nlp_recovery_solver forklift_nlp_recovery_replay
+  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_initial_guess forklift_nlp_recovery_validator forklift_nlp_recovery_constraint_diagnostics forklift_nlp_recovery_solver forklift_nlp_recovery_replay
   CATKIN_DEPENDS roscpp roslib geometry_msgs std_msgs std_srvs visualization_msgs forklift_map forklift_planner sandbox_msgs
 )
 
@@ -57,11 +57,18 @@ target_link_libraries(forklift_nlp_recovery_validator
   ${catkin_LIBRARIES}
 )
 
+add_library(forklift_nlp_recovery_constraint_diagnostics
+  src/optimization/nlp_constraint_diagnostics.cpp
+)
+add_dependencies(forklift_nlp_recovery_constraint_diagnostics ${catkin_EXPORTED_TARGETS})
+target_link_libraries(forklift_nlp_recovery_constraint_diagnostics ${catkin_LIBRARIES})
+
 add_library(forklift_nlp_recovery_solver src/optimization/nlp_solver.cpp)
 add_dependencies(forklift_nlp_recovery_solver ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_solver
   forklift_nlp_recovery_initial_guess
   forklift_nlp_recovery_validator
+  forklift_nlp_recovery_constraint_diagnostics
   casadi
   ${catkin_LIBRARIES}
 )
@@ -178,6 +185,7 @@ endif()
 install(TARGETS forklift_nlp_recovery_geometry forklift_nlp_recovery_input
                 forklift_nlp_recovery_initial_guess
                 forklift_nlp_recovery_validator
+                forklift_nlp_recovery_constraint_diagnostics
                 forklift_nlp_recovery_solver
                 forklift_nlp_recovery_replay
                 recovery_visualizer_node
