@@ -170,6 +170,53 @@ int main() {
         return fail("third failed PASS did not enter two-vehicle NLP preparation");
     }
 
+    VehicleAgent upstream = retreat;
+    upstream.id = 0;
+    upstream.blocker_id = 1;
+    VehicleAgent pair_first = retreat;
+    pair_first.id = 1;
+    pair_first.blocker_id = 2;
+    VehicleAgent pair_second = passer;
+    pair_second.id = 2;
+    pair_second.blocker_id = 1;
+    std::vector<VehicleAgent> associated_vehicles{
+        upstream, pair_first, pair_second};
+    DeadlockManager::Snapshot associated_state;
+    associated_state.transaction.phase = RecoveryPhase::PASS;
+    associated_state.transaction.retreat_attempt =
+        config.deadlock_retreat_max_attempts;
+    associated_state.transaction.retreat_vehicle_id = pair_first.id;
+    associated_state.transaction.pass_vehicle_id = pair_second.id;
+    associated_state.transaction.retreat_path_gen = pair_first.path_gen;
+    associated_state.transaction.pass_path_gen = pair_second.path_gen;
+    DeadlockManager associated_manager(map, config);
+    associated_manager.restore(associated_state);
+    associated_manager.update(associated_vehicles, {}, 0.10, false);
+    if (associated_manager.directive().phase != RecoveryPhase::NLP_PREP ||
+        associated_manager.directive().nlp_vehicle_ids !=
+            std::vector<int>({0, 1, 2})) {
+        return fail("upstream stopped blocker was omitted from NLP participants");
+    }
+
+    associated_vehicles[0].mission_phase = MissionPhase::TO_A1;
+    associated_vehicles[0].path_s = 0.0;
+    VehicleAgent parked_at_b = upstream;
+    parked_at_b.id = 3;
+    parked_at_b.mission_phase = MissionPhase::TO_B;
+    parked_at_b.path_s = parked_at_b.track.length();
+    VehicleAgent unloading = upstream;
+    unloading.id = 4;
+    unloading.mission_phase = MissionPhase::UNLOAD_DWELL;
+    associated_vehicles.push_back(parked_at_b);
+    associated_vehicles.push_back(unloading);
+    DeadlockManager parked_manager(map, config);
+    parked_manager.restore(associated_state);
+    parked_manager.update(associated_vehicles, {}, 0.10, false);
+    if (parked_manager.directive().nlp_vehicle_ids !=
+        std::vector<int>({1, 2})) {
+        return fail("vehicle parked at a slot was not removed from NLP participants");
+    }
+
     DeadlockManager ordinary_stop_manager(map, config);
     vehicles[0].blocker_id = -1;
     vehicles[1].blocker_id = -1;

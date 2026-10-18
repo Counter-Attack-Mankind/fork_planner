@@ -79,7 +79,6 @@ RoughPath PathGenerator::generateRouteBToA1(const Slot& src, const Slot& tgt,
     const TurnCurve final_turn_min =
         build_clothoid_turn(final_turn_sign, max_curvature, sample_ds, sample_ds);
     const double final_req_y = std::max(0.20, final_turn_req.t_out + 0.02);
-    const double final_req_x = std::max(0.20, final_turn_req.t_in + 0.02);
     const double final_min_req_y = std::max(0.20, final_turn_min.t_out + 0.02);
     const double final_min_req_x = std::max(0.20, final_turn_min.t_in + 0.02);
     const double target_x = tgt.pre_dock_x;
@@ -170,7 +169,6 @@ RoughPath PathGenerator::generateRouteBToA1(const Slot& src, const Slot& tgt,
     }
     const double terminal_heading = tgt.dock_theta;
     const double terminal_reverse_out_heading = norm_angle(tgt.dock_theta + kPi);
-    const double terminal_dir_y = std::sin(terminal_heading);
 
     double terminal_stop_y = tgt.pre_dock_y;
     double planned_goal_lane_y = corridor_lane_y(mp_, tgt_corr, final_hdir);
@@ -326,23 +324,6 @@ RoughPath PathGenerator::generateRouteBToA1(const Slot& src, const Slot& tgt,
         target_is_depot_a1 && src.row_id == 7 && src.col <= 4;
     const bool row4_bottom_right_to_a1 =
         target_is_depot_a1 && src.row_id == 7 && src.col >= 5;
-    auto row1_upper_aux_lane_y = [&]() {
-        const double upper_lane_y = corridor_lane_y(mp_, 1, HDir::LEFT);
-        const double lower_lane_y = corridor_lane_y(mp_, 1, HDir::RIGHT);
-        const double source_rear_y =
-            src.dock_y() -
-            mp_.rear_axle_to_center * std::sin(src.dock_theta);
-        const double min_source_gap =
-            std::max(final_min_req_y + 0.02, 0.36);
-        const double max_safe_y =
-            std::max(lower_lane_y + sample_ds,
-                     source_rear_y + min_source_gap);
-        double aux_y = std::min(upper_lane_y - 0.10, max_safe_y);
-        aux_y = std::max(lower_lane_y + 0.06,
-                         std::min(upper_lane_y - 0.04, aux_y));
-        return aux_y;
-    };
-
     int current_corr = src_corr;
     double current_x = src.dock_x();
     double current_y = src.dock_y();

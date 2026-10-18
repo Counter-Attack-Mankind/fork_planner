@@ -78,7 +78,6 @@ RoughPath PathGenerator::generateRouteA2ToB(const Slot& src, const Slot& tgt,
     const TurnCurve final_turn_min =
         build_clothoid_turn(final_turn_sign, max_curvature, sample_ds, sample_ds);
     const double final_req_y = std::max(0.20, final_turn_req.t_out + 0.02);
-    const double final_req_x = std::max(0.20, final_turn_req.t_in + 0.02);
     const double final_min_req_y = std::max(0.20, final_turn_min.t_out + 0.02);
     const double final_min_req_x = std::max(0.20, final_turn_min.t_in + 0.02);
     const double target_x = tgt.pre_dock_x;
@@ -166,7 +165,6 @@ RoughPath PathGenerator::generateRouteA2ToB(const Slot& src, const Slot& tgt,
     }
     const double terminal_heading = tgt.dock_theta;
     const double terminal_reverse_out_heading = norm_angle(tgt.dock_theta + kPi);
-    const double terminal_dir_y = std::sin(terminal_heading);
 
     double terminal_stop_y = tgt.pre_dock_y;
     double planned_goal_lane_y = corridor_lane_y(mp_, tgt_corr, final_hdir);

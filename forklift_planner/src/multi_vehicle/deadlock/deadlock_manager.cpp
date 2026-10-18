@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 
 #include <ros/ros.h>
@@ -248,6 +249,39 @@ void DeadlockManager::clearSuccessfulRecovery(
     refreshDirective();
 }
 
+std::vector<int> DeadlockManager::nlpVehicleIds(
+    const std::vector<VehicleAgent>& vehicles,
+    const std::vector<int>& deadlock_vehicle_ids) const {
+    std::set<int> related(deadlock_vehicle_ids.begin(),
+                          deadlock_vehicle_ids.end());
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const VehicleAgent& vehicle : vehicles) {
+            if (vehicle.mode == VehicleMode::ACTIVE &&
+                vehicle.action == VehicleAction::STOP &&
+                related.count(vehicle.blocker_id) != 0) {
+                changed = related.insert(vehicle.id).second || changed;
+            }
+        }
+    }
+
+    const double tolerance = std::max(0.005, config_.path_validation_step);
+    std::vector<int> participant_ids;
+    for (const int id : related) {
+        const VehicleAgent* vehicle = vehicleById(vehicles, id);
+        if (vehicle == nullptr) continue;
+        const bool parked_in_slot =
+            (vehicle->mission_phase == MissionPhase::TO_A1 &&
+             std::abs(vehicle->path_s) <= tolerance) ||
+            (vehicle->mission_phase == MissionPhase::TO_B &&
+             std::abs(vehicle->path_s - vehicle->track.length()) <= tolerance) ||
+            vehicle->mission_phase == MissionPhase::UNLOAD_DWELL;
+        if (!parked_in_slot) participant_ids.push_back(id);
+    }
+    return participant_ids;
+}
+
 void DeadlockManager::enterNlpRecovery(const std::vector<int>& vehicle_ids,
                                        const std::string& reason,
                                        bool emit_logs) {
@@ -363,7 +397,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                 // 已经无 s- 退让空间。
                 if (retreat->path_s <= tolerance)
                 {
-                    enterNlpRecovery({retreat->id, passer->id},
+                    enterNlpRecovery(nlpVehicleIds(
+                                         vehicles, {retreat->id, passer->id}),
                                      "no_retreat_space_and_both_stopped",
                                      emit_logs);
                     return;
@@ -372,7 +407,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                 // 已经完成最大退让次数。
                 if (transaction_.retreat_attempt >=config_.deadlock_retreat_max_attempts)
                 {
-                    enterNlpRecovery({retreat->id, passer->id},
+                    enterNlpRecovery(nlpVehicleIds(
+                                         vehicles, {retreat->id, passer->id}),
                                      "max_fixed_retreat_attempts_reached",
                                      emit_logs);
                     return;
@@ -382,7 +418,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
 
                 if (!retreatSweepClear(*retreat,*passer,vehicles,next_target_s))
                 {
-                    enterNlpRecovery({retreat->id, passer->id},
+                    enterNlpRecovery(nlpVehicleIds(
+                                         vehicles, {retreat->id, passer->id}),
                                      "next_retreat_sweep_blocked", emit_logs);
                     return;
                 }
@@ -422,7 +459,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
             // 每一拍都重新检查：从当前实际位置继续退到本次 target 是否仍然安全，不安全则直接退出
             if (!retreatSweepClear(*retreat, *passer, vehicles,transaction_.retreat_target_s)) 
             {   
-                enterNlpRecovery({retreat->id, passer->id},
+                enterNlpRecovery(nlpVehicleIds(
+                                     vehicles, {retreat->id, passer->id}),
                                  "retreat_sweep_invalidated", emit_logs);
                 return;
             }
@@ -525,7 +563,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
     emit("CONFIRMED", confirmed.str(), emit_logs);
 
     if (cycle.size() >= 3) {
-        enterNlpRecovery(cycle_ids, "multi_vehicle_wait_cycle", emit_logs);
+        enterNlpRecovery(nlpVehicleIds(vehicles, cycle_ids),
+                         "multi_vehicle_wait_cycle", emit_logs);
         return;
     }
 
@@ -605,7 +644,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                 << " start_s=" << retreat->path_s << " target_s=" << target_s
                 << " attempt=1 sweep_clear=0 reason=first_retreat_sweep_blocked";
         emit("FIXED_RETREAT_FAILED", details.str(), emit_logs);
-        enterNlpRecovery({retreat->id, passer->id},
+        enterNlpRecovery(nlpVehicleIds(
+                             vehicles, {retreat->id, passer->id}),
                          "first_retreat_sweep_blocked", emit_logs);
         return;
     }

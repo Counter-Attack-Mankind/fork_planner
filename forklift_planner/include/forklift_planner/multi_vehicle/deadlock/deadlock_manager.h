@@ -136,6 +136,9 @@ private:
                                  const VehicleAgent* passer,
                                  const std::string& reason,
                                  bool emit_logs);
+    std::vector<int> nlpVehicleIds(
+        const std::vector<VehicleAgent>& vehicles,
+        const std::vector<int>& deadlock_vehicle_ids) const;
     void enterNlpRecovery(const std::vector<int>& vehicle_ids,
                           const std::string& reason, bool emit_logs);
 

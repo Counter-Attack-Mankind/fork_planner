@@ -142,16 +142,6 @@ private:
             for (const ReplayNode& node : vehicle.nodes) {
                 configurations.points.push_back(point(node.rear_axle.x,
                                                        node.rear_axle.y, 0.055));
-                const ReplayPose center = replayBodyCenter(
-                    node.rear_axle, vehicle.parameters.rear_axle_to_center);
-                auto disc = marker("optimized_center_discs",
-                    visualization_msgs::Marker::CYLINDER, stamp);
-                disc.pose.position = point(center.x, center.y, 0.018);
-                disc.scale.x = 2.0 * vehicle.parameters.disc_radius;
-                disc.scale.y = 2.0 * vehicle.parameters.disc_radius;
-                disc.scale.z = 0.006;
-                disc.color = color(base_color.r, base_color.g, base_color.b, 0.10f);
-                array.markers.push_back(disc);
             }
             array.markers.push_back(configurations);
         }
@@ -221,8 +211,31 @@ private:
             body.scale.x = vehicle.parameters.length; body.scale.y = vehicle.parameters.width; body.scale.z = 0.10;
             body.color = color(base.r, base.g, base.b, 0.9f);
             array.markers.push_back(body);
+
+            auto disc = marker("current_disc", visualization_msgs::Marker::CYLINDER, stamp);
+            disc.pose.position = point(center.x, center.y, 0.018);
+            disc.scale.x = 2.0 * vehicle.parameters.disc_radius;
+            disc.scale.y = 2.0 * vehicle.parameters.disc_radius;
+            disc.scale.z = 0.006;
+            disc.color = color(base.r, base.g, base.b, 0.22f);
+            array.markers.push_back(disc);
+
+            auto heading = marker("current_heading", visualization_msgs::Marker::ARROW, stamp);
+            const double arrow_length = 0.5 * vehicle.parameters.length;
+            heading.points = {
+                point(center.x, center.y, 0.14),
+                point(center.x + arrow_length * std::cos(state.rear_axle.yaw),
+                      center.y + arrow_length * std::sin(state.rear_axle.yaw), 0.14)};
+            heading.scale.x = 0.025;
+            heading.scale.y = 0.055;
+            heading.scale.z = 0.07;
+            heading.color = color(base.r, base.g, base.b, 1.0f);
+            array.markers.push_back(heading);
+
             std::ostringstream label;
-            label << "V" << vehicle.id << "  t=" << std::fixed << std::setprecision(2) << playback_time_;
+            label << "V" << vehicle.id << "  t=" << std::fixed
+                  << std::setprecision(2) << playback_time_ << "  v="
+                  << std::showpos << state.speed;
             addText(array, "current_vehicle_label", center.x, center.y, 0.18, label.str(), base, 0.075, stamp);
         }
     }
