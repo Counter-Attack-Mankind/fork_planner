@@ -37,6 +37,8 @@ struct CorridorConfig {
     double shelf_inflation_reduction = 0.0;
     double expansion_step = 0.02;
     double path_sample_step = 0.05;
+    double seed_search_step = 0.01;
+    double seed_search_max_offset = 0.10;
     double min_rejoin_distance = 0.20;
     double rejoin_distance = 0.80;
     double max_width = 2.50;

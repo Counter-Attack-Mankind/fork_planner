@@ -53,6 +53,8 @@ shelf_inflation_reduction: 0.05
 boundary_inset_reduction: 0.05
 expansion_step: 0.02
 path_sample_step: 0.05
+seed_search_step: 0.01
+seed_search_max_offset: 0.10
 min_rejoin_distance: 0.20
 rejoin_distance: 0.80
 max_width: 2.50

@@ -134,6 +134,78 @@ TEST_F(CorridorBuilderTest, ShortensRejoinAtLastLegalPathIntersection) {
     EXPECT_NE(result.reason.find("shortened"), std::string::npos);
 }
 
+TEST(CorridorBuilderSeedSearchTest, ConnectsConsecutiveIllegalSeedsAndRejoinsOriginalPath) {
+    MapParam param;
+    param.rear_axle_to_center = 0.0;
+    fnr::CorridorConfig config;
+    config.vehicle_radius = 0.05;
+    config.path_sample_step = 0.01;
+    config.rejoin_distance = 0.15;
+    fnr::CorridorBuilder builder(param, {}, config);
+    const std::vector<fnr::Pose2d> poses{{0.08, 1.0, 0.0}, {0.02, 1.0, 0.0},
+                                          {0.08, 1.0, 0.0}, {0.20, 1.0, 0.0}};
+    const auto path = fnr::CorridorBuilder::parameterizePath(poses, {});
+    const auto result = builder.build(poses.front(), path, 0.0, 6);
+    ASSERT_TRUE(result.success) << result.reason;
+    EXPECT_FALSE(builder.pointLegal(poses[1]));
+    EXPECT_NEAR(result.terminal.path_s, config.rejoin_distance, 1e-9);
+    EXPECT_NEAR(result.terminal.pose.x, 0.11, 1e-9);
+    EXPECT_EQ(result.terminal.path_gen, 6);
+    for (size_t i = 0; i < result.boxes.size(); ++i) {
+        EXPECT_TRUE(builder.aabbLegal(result.boxes[i]));
+        if (i > 0) {
+            EXPECT_TRUE(builder.connected(result.boxes[i - 1], result.boxes[i]));
+        }
+    }
+    const auto& last = result.boxes.back();
+    EXPECT_LE(last.min_x, result.terminal.pose.x);
+    EXPECT_GE(last.max_x, result.terminal.pose.x);
+    EXPECT_LE(last.min_y, result.terminal.pose.y);
+    EXPECT_GE(last.max_y, result.terminal.pose.y);
+}
+
+TEST(CorridorBuilderSeedSearchTest, FindsConnectedSeedsAlongInflatedShelf) {
+    MapParam param;
+    param.rear_axle_to_center = 0.0;
+    fnr::CorridorConfig config;
+    config.vehicle_radius = 0.05;
+    config.path_sample_step = 0.01;
+    config.rejoin_distance = 0.26;
+    ShelfBlock shelf;
+    shelf.x = 1.0;
+    shelf.y = 1.0;
+    shelf.w = 0.02;
+    shelf.h = 0.02;
+    fnr::CorridorBuilder builder(param, {shelf}, config);
+    const std::vector<fnr::Pose2d> poses{{0.88, 0.96, 0.0}, {1.14, 0.96, 0.0}};
+    const auto path = fnr::CorridorBuilder::parameterizePath(poses, {});
+    ASSERT_FALSE(builder.pointLegal({1.0, 0.96, 0.0}));
+    const auto result = builder.build(poses.front(), path, 0.0, 9);
+    ASSERT_TRUE(result.success) << result.reason;
+    EXPECT_NEAR(result.terminal.pose.x, poses.back().x, 1e-9);
+    EXPECT_GT(result.seeds.size(), 2U);
+    for (size_t i = 0; i < result.boxes.size(); ++i) {
+        EXPECT_TRUE(builder.aabbLegal(result.boxes[i]));
+        if (i > 0) {
+            EXPECT_TRUE(builder.connected(result.boxes[i - 1], result.boxes[i]));
+        }
+    }
+}
+
+TEST(CorridorBuilderSeedSearchTest, RejectsWhenNoLegalOriginalPathRejoinRemains) {
+    MapParam param;
+    param.rear_axle_to_center = 0.0;
+    fnr::CorridorConfig config;
+    config.vehicle_radius = 0.05;
+    config.path_sample_step = 0.01;
+    config.min_rejoin_distance = 0.06;
+    fnr::CorridorBuilder builder(param, {}, config);
+    const std::vector<fnr::Pose2d> poses{{0.08, 1.0, 0.0}, {0.0, 1.0, 0.0}};
+    const auto path = fnr::CorridorBuilder::parameterizePath(poses, {});
+    const auto result = builder.build(poses.front(), path, 0.0, 8);
+    EXPECT_FALSE(result.success);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

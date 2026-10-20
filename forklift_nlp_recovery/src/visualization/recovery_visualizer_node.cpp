@@ -217,6 +217,10 @@ public:
         private_nh_.param("expansion_step", config_.expansion_step, config_.expansion_step);
         private_nh_.param("path_sample_step", config_.path_sample_step,
                           config_.path_sample_step);
+        private_nh_.param("seed_search_step", config_.seed_search_step,
+                          config_.seed_search_step);
+        private_nh_.param("seed_search_max_offset", config_.seed_search_max_offset,
+                          config_.seed_search_max_offset);
         private_nh_.param("min_rejoin_distance", config_.min_rejoin_distance,
                           config_.min_rejoin_distance);
         private_nh_.param("rejoin_distance", config_.rejoin_distance,

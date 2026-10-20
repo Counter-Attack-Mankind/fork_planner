@@ -288,29 +288,65 @@ CorridorResult CorridorBuilder::build(const Pose2d& start,
         result.reason = reason;
         return result;
     }
+    const auto appendPathSeed = [&](const Pose2d& original_seed) {
+        if (pointLegal(original_seed)) {
+            return appendConnected(original_seed, 0, result.seeds, result.boxes, reason);
+        }
+        const size_t seed_count = result.seeds.size();
+        const size_t box_count = result.boxes.size();
+        const int max_steps = config_.seed_search_step > 0.0 &&
+                              std::isfinite(config_.seed_search_step) &&
+                              std::isfinite(config_.seed_search_max_offset) ?
+            static_cast<int>(std::clamp(config_.seed_search_max_offset /
+                                       config_.seed_search_step, 0.0, 100.0)) : 0;
+        for (int step = 1; step <= max_steps; ++step) {
+            const double offset = step * config_.seed_search_step;
+            for (int direction = 0; direction < 4; ++direction) {
+                Pose2d candidate = original_seed;
+                if (direction == 0) candidate.x += offset;
+                if (direction == 1) candidate.x -= offset;
+                if (direction == 2) candidate.y += offset;
+                if (direction == 3) candidate.y -= offset;
+                if (!pointLegal(candidate)) continue;
+                Aabb box;
+                if (!generateAabb(candidate, box, reason)) continue;
+                if (appendConnected(candidate, 0, result.seeds, result.boxes, reason)) {
+                    return true;
+                }
+                result.seeds.resize(seed_count);
+                result.boxes.resize(box_count);
+            }
+        }
+        reason = "no connected legal AABB seed within local search range";
+        return false;
+    };
     const PathPoint current = interpolate(path, clamped_s);
-    if (!appendConnected(bodyCenter(current.pose), 0,
-                         result.seeds, result.boxes, reason)) {
+    const Pose2d current_center = bodyCenter(current.pose);
+    if (!appendPathSeed(current_center)) {
         result.reason = "cannot connect actual start to current path: " + reason;
         return result;
     }
 
     double sample_s = clamped_s;
     PathPoint terminal = current;
+    bool terminal_valid = pointLegal(current_center);
+    size_t terminal_seed_count = result.seeds.size();
+    size_t terminal_box_count = result.boxes.size();
     bool shortened = false;
     std::string stop_reason;
     while (sample_s + kEpsilon < target_s) {
         sample_s = std::min(target_s,
             sample_s + std::max(0.01, config_.path_sample_step));
         const PathPoint point = interpolate(path, sample_s);
+        const Pose2d original_seed = bodyCenter(point.pose);
+        const bool original_legal = pointLegal(original_seed);
         const size_t seed_count = result.seeds.size();
         const size_t box_count = result.boxes.size();
-        if (!appendConnected(bodyCenter(point.pose), 0,
-                             result.seeds, result.boxes, reason)) {
+        if (!appendPathSeed(original_seed)) {
             result.seeds.resize(seed_count);
             result.boxes.resize(box_count);
-            const double usable_distance = terminal.s - clamped_s;
-            if (usable_distance + kEpsilon < config_.min_rejoin_distance) {
+            if (!terminal_valid || terminal.s - clamped_s + kEpsilon <
+                                       config_.min_rejoin_distance) {
                 result.reason = "path corridor stopped before minimum rejoin distance at s=" +
                                 std::to_string(sample_s) + ": " + reason;
                 return result;
@@ -319,7 +355,23 @@ CorridorResult CorridorBuilder::build(const Pose2d& start,
             stop_reason = reason;
             break;
         }
-        terminal = point;
+        if (original_legal) {
+            terminal = point;
+            terminal_valid = true;
+            terminal_seed_count = result.seeds.size();
+            terminal_box_count = result.boxes.size();
+        }
+    }
+    if (!terminal_valid || (terminal.s + kEpsilon < target_s &&
+        terminal.s - clamped_s + kEpsilon < config_.min_rejoin_distance)) {
+        result.reason = "no legal original-path rejoin point within the allowed range";
+        return result;
+    }
+    if (result.seeds.size() != terminal_seed_count) {
+        result.seeds.resize(terminal_seed_count);
+        result.boxes.resize(terminal_box_count);
+        shortened = true;
+        stop_reason = "trailing original-path samples are not legal rejoin points";
     }
     mergeRedundant(result.seeds, result.boxes);
     for (size_t i = 1; i < result.boxes.size(); ++i) {
@@ -329,6 +381,15 @@ CorridorResult CorridorBuilder::build(const Pose2d& start,
             result.seeds.clear();
             return result;
         }
+    }
+    const Pose2d terminal_center = bodyCenter(terminal.pose);
+    const Aabb& final_box = result.boxes.back();
+    if (!pointLegal(terminal_center) || terminal_center.x < final_box.min_x - kEpsilon ||
+        terminal_center.x > final_box.max_x + kEpsilon ||
+        terminal_center.y < final_box.min_y - kEpsilon ||
+        terminal_center.y > final_box.max_y + kEpsilon) {
+        result.reason = "original-path rejoin point is outside the final legal AABB";
+        return result;
     }
     result.terminal = {terminal.pose, terminal.s, path_gen, terminal.type};
     result.success = true;
