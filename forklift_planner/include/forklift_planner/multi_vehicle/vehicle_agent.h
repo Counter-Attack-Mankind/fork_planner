@@ -2,6 +2,7 @@
 
 #include <std_msgs/ColorRGBA.h>
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -125,6 +126,12 @@ struct VehicleAgent {
     double spans_track_len = -1.0;
 
     bool active() const { return mode == VehicleMode::ACTIVE && !track.empty(); }
+    bool parkedInSlot(double tolerance) const {
+        return (mission_phase == MissionPhase::TO_A1 && std::abs(path_s) <= tolerance) ||
+               (mission_phase == MissionPhase::TO_B &&
+                std::abs(path_s - track.length()) <= tolerance) ||
+               mission_phase == MissionPhase::UNLOAD_DWELL;
+    }
     double remainingS() const { return track.empty() ? 0.0 : track.length() - path_s; }
 };
 

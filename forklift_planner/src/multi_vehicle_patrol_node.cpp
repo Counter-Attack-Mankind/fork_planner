@@ -2605,6 +2605,8 @@ private:
             state.path_s = vehicle.path_s;
             state.current_speed = vehicle.current_speed;
             state.pose_valid = recoveryPose(vehicle, state.pose);
+            state.parked_in_slot = vehicle.parkedInSlot(
+                std::max(0.005, cfg_.path_validation_step));
             state.mode = static_cast<int>(vehicle.mode);
             state.action = static_cast<int>(vehicle.action);
             state.blocker_id = vehicle.blocker_id;

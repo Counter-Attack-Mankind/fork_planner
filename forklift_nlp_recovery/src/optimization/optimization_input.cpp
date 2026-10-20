@@ -89,7 +89,8 @@ void OptimizationInputBuilder::selectStaticVehicles(
     const std::set<int> participants(input.participant_ids.begin(),
                                      input.participant_ids.end());
     for (const auto& vehicle : snapshot.vehicles) {
-        if (participants.count(vehicle.id) != 0 || !vehicle.pose_valid) continue;
+        if (participants.count(vehicle.id) != 0 || !vehicle.pose_valid ||
+            vehicle.parked_in_slot) continue;
 
         StaticVehicleObstacle obstacle;
         obstacle.id = vehicle.id;

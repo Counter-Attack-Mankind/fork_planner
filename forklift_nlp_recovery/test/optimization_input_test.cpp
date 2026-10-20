@@ -105,6 +105,9 @@ TEST_F(OptimizationInputTest, BuildsTwoVehicleInputAndPreservesMetadata) {
         near_center.x - map_param.rear_axle_to_center, near_center.y, 0.0};
     snapshot.vehicles.push_back(makeStaticVehicle(41, near_rear));
     snapshot.vehicles.push_back(makeStaticVehicle(42, {10.0, 10.0, 0.0}));
+    auto parked = makeStaticVehicle(43, near_rear);
+    parked.parked_in_slot = true;
+    snapshot.vehicles.push_back(parked);
 
     const auto result = input_builder.build(snapshot, {2, 9}, "debug");
     ASSERT_TRUE(result.complete) << result.reason;

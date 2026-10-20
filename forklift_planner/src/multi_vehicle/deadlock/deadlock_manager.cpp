@@ -271,13 +271,7 @@ std::vector<int> DeadlockManager::nlpVehicleIds(
     for (const int id : related) {
         const VehicleAgent* vehicle = vehicleById(vehicles, id);
         if (vehicle == nullptr) continue;
-        const bool parked_in_slot =
-            (vehicle->mission_phase == MissionPhase::TO_A1 &&
-             std::abs(vehicle->path_s) <= tolerance) ||
-            (vehicle->mission_phase == MissionPhase::TO_B &&
-             std::abs(vehicle->path_s - vehicle->track.length()) <= tolerance) ||
-            vehicle->mission_phase == MissionPhase::UNLOAD_DWELL;
-        if (!parked_in_slot) participant_ids.push_back(id);
+        if (!vehicle->parkedInSlot(tolerance)) participant_ids.push_back(id);
     }
     return participant_ids;
 }

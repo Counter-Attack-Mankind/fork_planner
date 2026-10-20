@@ -7,6 +7,7 @@ float64 path_s
 float64 current_speed
 bool pose_valid
 geometry_msgs/Pose2D pose
+bool parked_in_slot
 int32 mode
 int32 action
 int32 blocker_id
