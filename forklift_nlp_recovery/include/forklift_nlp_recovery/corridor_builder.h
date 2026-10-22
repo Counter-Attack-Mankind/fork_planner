@@ -31,6 +31,12 @@ struct Aabb {
     double height() const { return max_y - min_y; }
 };
 
+struct PointLegalityViolation {
+    std::string type;
+    int shelf_index = -1;
+    double distance = 0.0;
+};
+
 struct CorridorConfig {
     double boundary_inset_reduction = 0.0;
     double vehicle_radius = 0.0;
@@ -73,6 +79,8 @@ public:
     Pose2d bodyCenter(const Pose2d& rear_axle_pose) const;
     // The point/seed arguments below are body-center coordinates.
     bool pointLegal(const Pose2d& point) const;
+    bool diagnosePointViolation(const Pose2d& point,
+                                PointLegalityViolation& violation) const;
     bool aabbLegal(const Aabb& box) const;
     bool generateAabb(const Pose2d& seed, Aabb& box, std::string& reason) const;
     bool findLegalSeed(const Pose2d& requested, Pose2d& legal,

@@ -39,6 +39,43 @@ bool CorridorBuilder::pointLegal(const Pose2d& point) const {
     return aabbLegal({point.x, point.x, point.y, point.y});
 }
 
+bool CorridorBuilder::diagnosePointViolation(
+    const Pose2d& point, PointLegalityViolation& violation) const {
+    violation = PointLegalityViolation{};
+    const double min_x = boundary_clearance_;
+    const double max_x = map_param_.field_width - boundary_clearance_;
+    const double min_y = boundary_clearance_;
+    const double max_y = map_param_.field_height - boundary_clearance_;
+    const double outside_x = std::max({min_x - point.x, point.x - max_x, 0.0});
+    const double outside_y = std::max({min_y - point.y, point.y - max_y, 0.0});
+    if (outside_x > kEpsilon || outside_y > kEpsilon) {
+        violation.type = "map_boundary";
+        violation.distance = std::hypot(outside_x, outside_y);
+        return true;
+    }
+    for (size_t index = 0; index < original_shelves_.size(); ++index) {
+        const Aabb& shelf = original_shelves_[index];
+        const double dx = std::max({0.0, shelf.min_x - point.x, point.x - shelf.max_x});
+        const double dy = std::max({0.0, shelf.min_y - point.y, point.y - shelf.max_y});
+        const bool inside = point.x > shelf.min_x + kEpsilon &&
+            point.x < shelf.max_x - kEpsilon && point.y > shelf.min_y + kEpsilon &&
+            point.y < shelf.max_y - kEpsilon;
+        const double separation = std::hypot(dx, dy);
+        if (!inside && separation >= shelf_inflation_ - kEpsilon) continue;
+        violation.type = "inflated_shelf_boundary";
+        violation.shelf_index = static_cast<int>(index);
+        if (inside) {
+            violation.distance = shelf_inflation_ + std::min({
+                point.x - shelf.min_x, shelf.max_x - point.x,
+                point.y - shelf.min_y, shelf.max_y - point.y});
+        } else {
+            violation.distance = std::max(0.0, shelf_inflation_ - separation);
+        }
+        return true;
+    }
+    return false;
+}
+
 bool CorridorBuilder::aabbLegal(const Aabb& box) const {
     if (box.min_x < boundary_clearance_ - kEpsilon ||
         box.max_x > map_param_.field_width - boundary_clearance_ + kEpsilon ||

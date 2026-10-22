@@ -530,11 +530,56 @@ private:
         return true;
     }
 
+    bool optimizedTrajectoryComplete(const NlpOptimizationInput& input,
+                                     const NlpSolveResult& result,
+                                     std::string& reason) const {
+        if (!result.solver_success) {
+            reason = "IPOPT did not report success";
+            return false;
+        }
+        if (result.node_count < 2 || result.vehicles.empty() ||
+            result.vehicles.size() != input.vehicles.size() ||
+            !std::isfinite(result.total_time) || result.total_time <= 0.0) {
+            reason = "optimized trajectory dimensions or duration are incomplete";
+            return false;
+        }
+        std::set<int> received;
+        const auto& reference_nodes = result.vehicles.front().nodes;
+        for (const auto& solved : result.vehicles) {
+            const auto found = std::find_if(
+                input.vehicles.begin(), input.vehicles.end(),
+                [&](const NlpVehicleInput& vehicle) { return vehicle.id == solved.id; });
+            if (found == input.vehicles.end() || !received.insert(solved.id).second ||
+                solved.nodes.size() != result.node_count) {
+                reason = "optimized trajectory participant set or node count is incomplete";
+                return false;
+            }
+            for (size_t index = 0; index < solved.nodes.size(); ++index) {
+                const auto& node = solved.nodes[index];
+                if (node.index != index || !std::isfinite(node.time) ||
+                    !std::isfinite(node.rear_axle_pose.x) ||
+                    !std::isfinite(node.rear_axle_pose.y) ||
+                    !std::isfinite(node.rear_axle_pose.yaw) ||
+                    !std::isfinite(node.signed_speed) ||
+                    !std::isfinite(node.front_steer) ||
+                    !std::isfinite(node.acceleration) ||
+                    !std::isfinite(node.steer_rate) ||
+                    (index == 0 && std::abs(node.time) > 1e-9) ||
+                    (index > 0 && node.time <= solved.nodes[index - 1].time) ||
+                    std::abs(node.time - reference_nodes[index].time) > 1e-9) {
+                    reason = "optimized trajectory contains invalid values or time ordering";
+                    return false;
+                }
+            }
+        }
+        reason = "ok";
+        return true;
+    }
+
     void submitLockedTrajectory() {
         if (!execute_after_solve_ || mode_ != OperatingMode::AUTO ||
             locked_.submitted || locked_.recovery_id == 0 ||
-            !locked_.solver_result.solver_success ||
-            !locked_.solver_result.validation_passed) {
+            !locked_.solver_result.execution_publish_eligible) {
             return;
         }
         sandbox_msgs::NlpRecoveryTrajectory message;
@@ -570,6 +615,19 @@ private:
         }
         trajectory_pub_.publish(message);
         locked_.submitted = true;
+        locked_.solver_result.execution_published = true;
+        if (!locked_.case_directory.empty()) {
+            std::string error;
+            if (!saveNlpSolveResult(locked_.solver_result, locked_.case_directory, error)) {
+                ROS_ERROR("[nlp_recovery][auto] failed to update execution status: %s",
+                          error.c_str());
+            }
+        }
+        if (!locked_.solver_result.validation_passed) {
+            ROS_WARN("[nlp_recovery][auto] independent validation failed; publishing "
+                     "recovery_id=%llu because IPOPT succeeded",
+                     static_cast<unsigned long long>(locked_.recovery_id));
+        }
         ROS_WARN("[nlp_recovery][auto] submitted recovery_id=%llu vehicles=%zu",
                  static_cast<unsigned long long>(locked_.recovery_id),
                  message.vehicles.size());
@@ -645,14 +703,16 @@ private:
     void logSolveResult(const NlpSolveResult& result,
                         const std::string& case_id) const {
         ROS_INFO("[nlp_recovery][solver] case=%s vehicles=%zu N=%zu T=%.3f "
-                 "status=%s iterations=%d wall=%.3f objective=%.6f "
-                 "max_violation=%.3g validation=%s reason=%s",
+                 "status=%s solver_success=%d iterations=%d wall=%.3f objective=%.6f "
+                 "max_violation=%.3g validation=%s publish_eligible=%d reason=%s",
                  case_id.c_str(), result.vehicles.size(), result.node_count,
                  result.total_time, result.statistics.return_status.c_str(),
-                 result.statistics.iterations, result.statistics.wall_time,
+                 result.solver_success, result.statistics.iterations,
+                 result.statistics.wall_time,
                  result.statistics.objective,
                  result.statistics.max_constraint_violation,
                  result.validation_passed ? "passed" : "failed",
+                 result.execution_publish_eligible,
                  result.reason.c_str());
         if (!result.validation_passed) {
             ROS_WARN("[nlp_recovery][solver] independent validation: "
@@ -675,6 +735,17 @@ private:
                      result.validation.static_map_violation_samples,
                      result.validation.minimum_participant_obb_separation_margin,
                      result.validation.minimum_static_obb_separation_margin);
+            for (const StaticMapViolation& violation :
+                 result.validation.static_map_violations) {
+                ROS_WARN("[nlp_recovery][validation][static_map] vehicle=%d "
+                         "interval=%zu substep=%zu time=%.6f center=(%.6f,%.6f) "
+                         "type=%s shelf=%d distance=%.6f",
+                         violation.vehicle_id, violation.interval_index,
+                         violation.substep_index, violation.sample_time,
+                         violation.disc_center.x, violation.disc_center.y,
+                         violation.type.c_str(), violation.shelf_index,
+                         violation.violation_distance);
+            }
         }
     }
 
@@ -682,6 +753,13 @@ private:
                                 const NlpInitialGuess& guess,
                                 const CaseSaveResult& saved) {
         NlpSolveResult result = nlp_solver_->solve(build.input, guess);
+        std::string completeness_reason;
+        result.execution_publish_eligible = optimizedTrajectoryComplete(
+            build.input, result, completeness_reason);
+        if (result.solver_success && !result.execution_publish_eligible) {
+            ROS_ERROR("[nlp_recovery][solver] IPOPT succeeded but trajectory is not "
+                      "publishable: %s", completeness_reason.c_str());
+        }
         logSolveResult(result, saved.case_id);
         if (!saved.success) {
             ROS_ERROR("[nlp_recovery][solver] case files unavailable; solve result not saved: %s",
@@ -813,6 +891,7 @@ private:
                     locked_.build, locked_.build.input.valid, &saved);
                 locked_.original_initial_guess = prepared.original;
                 locked_.actual_initial_guess = prepared.actual;
+                if (saved.success) locked_.case_directory = saved.case_directory;
                 writeDebugInput(locked_.build);
                 if (locked_.actual_initial_guess.generated) {
                     locked_.solver_result = solveAndSave(
@@ -937,6 +1016,7 @@ private:
         bool submitted = false;
         uint64_t recovery_id = 0;
         std::string frame_id;
+        std::string case_directory;
         OptimizationInputBuildResult build;
         NlpInitialGuess original_initial_guess;
         NlpInitialGuess actual_initial_guess;

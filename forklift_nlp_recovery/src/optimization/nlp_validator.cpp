@@ -203,6 +203,12 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
                                                  source.parameters.rear_axle_to_center);
                 if (!corridor_builder.pointLegal(center)) {
                     ++validation.static_map_violation_samples;
+                    PointLegalityViolation detail;
+                    corridor_builder.diagnosePointViolation(center, detail);
+                    validation.static_map_violations.push_back({
+                        vehicle.id, interval, substep,
+                        (static_cast<double>(interval) + fraction) * dt,
+                        center, detail.type, detail.shelf_index, detail.distance});
                 }
             }
         }

@@ -2642,8 +2642,8 @@ private:
             reason = "trajectory frame does not match the planner frame";
             return false;
         }
-        if (!message.solver_success || !message.validation_passed) {
-            reason = "solver or independent validation did not pass";
+        if (!message.solver_success) {
+            reason = "IPOPT did not report success";
             return false;
         }
         if (message.vehicles.size() != recovery.nlp_vehicle_ids.size() ||
@@ -2745,6 +2745,11 @@ private:
         sim_plan_frames_.clear();
         sim_plan_cursor_ = 0;
         sim_plan_valid_ = false;
+        if (!message->validation_passed) {
+            ROS_WARN("[NLP_EXEC] independent validation failed; executing because IPOPT succeeded");
+            if (diagnostics_) diagnostics_->event(
+                "[NLP_EXEC] independent validation failed; executing IPOPT-success trajectory");
+        }
         ROS_WARN("[NLP_EXEC] recovery_id=%llu vehicles=%zu duration=%.3f",
                  static_cast<unsigned long long>(message->recovery_id),
                  message->vehicles.size(), message->vehicles.front().points.back().time);

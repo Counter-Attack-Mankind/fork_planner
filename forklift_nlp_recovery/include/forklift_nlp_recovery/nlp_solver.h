@@ -44,6 +44,17 @@ struct OptimizedVehicleTrajectory {
     std::vector<OptimizedTrajectoryNode> nodes;
 };
 
+struct StaticMapViolation {
+    int vehicle_id = -1;
+    size_t interval_index = 0;
+    size_t substep_index = 0;
+    double sample_time = 0.0;
+    Pose2d disc_center;
+    std::string type;
+    int shelf_index = -1;
+    double violation_distance = 0.0;
+};
+
 struct NlpSolutionValidation {
     bool passed = false;
     std::string reason;
@@ -62,6 +73,7 @@ struct NlpSolutionValidation {
     size_t static_obb_collision_samples = 0;
     size_t aabb_violation_samples = 0;
     size_t static_map_violation_samples = 0;
+    std::vector<StaticMapViolation> static_map_violations;
 };
 
 struct NlpSolverStatistics {
@@ -88,6 +100,8 @@ struct NlpSolveResult {
     bool problem_built = false;
     bool solver_success = false;
     bool validation_passed = false;
+    bool execution_publish_eligible = false;
+    bool execution_published = false;
     std::string reason;
     size_t node_count = 0;
     double total_time = 0.0;

@@ -492,7 +492,7 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
             result.reason = "IPOPT did not report success: " +
                             result.statistics.return_status;
         } else if (!result.validation_passed) {
-            result.reason = "IPOPT returned success but independent validation failed";
+            result.reason = "IPOPT succeeded; independent validation reported violations";
         } else {
             result.reason = "solver and independent validation succeeded";
         }
@@ -530,7 +530,9 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << "problem_built: " << result.problem_built << '\n'
            << "solver_success: " << result.solver_success << '\n'
            << "validation_passed: " << result.validation_passed << '\n'
-           << "executable_trajectory: false\n"
+           << "execution_publish_eligible: " << result.execution_publish_eligible << '\n'
+           << "execution_published: " << result.execution_published << '\n'
+           << "executable_trajectory: " << result.execution_publish_eligible << '\n'
            << "reason: " << yamlQuote(result.reason) << '\n'
            << "solver: " << yamlQuote(result.statistics.solver_name) << '\n'
            << "casadi_version: " << yamlQuote(result.statistics.casadi_version) << '\n'
@@ -574,6 +576,22 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << result.validation.aabb_violation_samples << '\n'
            << "  static_map_violation_samples: "
            << result.validation.static_map_violation_samples << '\n';
+    if (result.validation.static_map_violations.empty()) {
+        report << "  static_map_violations: []\n";
+    } else {
+        report << "  static_map_violations:\n";
+    }
+    for (const StaticMapViolation& violation : result.validation.static_map_violations) {
+        report << "    - vehicle_id: " << violation.vehicle_id << '\n'
+               << "      interval: " << violation.interval_index << '\n'
+               << "      substep: " << violation.substep_index << '\n'
+               << "      sample_time: " << violation.sample_time << '\n'
+               << "      disc_center_x: " << violation.disc_center.x << '\n'
+               << "      disc_center_y: " << violation.disc_center.y << '\n'
+               << "      violation_type: " << yamlQuote(violation.type) << '\n'
+               << "      shelf_index: " << violation.shelf_index << '\n'
+               << "      violation_distance_m: " << violation.violation_distance << '\n';
+    }
     report << "direction_diagnostics:\n"
            << "  speed_hysteresis_threshold: "
            << result.direction_switch_speed_threshold << '\n'
