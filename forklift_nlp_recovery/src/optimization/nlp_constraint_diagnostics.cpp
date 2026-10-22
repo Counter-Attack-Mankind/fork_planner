@@ -9,10 +9,9 @@
 namespace forklift_nlp_recovery {
 namespace {
 
-constexpr std::array<NlpConstraintCategory, 6> kCategories{
+constexpr std::array<NlpConstraintCategory, 5> kCategories{
     NlpConstraintCategory::RK4,
     NlpConstraintCategory::AABB_NODE,
-    NlpConstraintCategory::AABB_MIDPOINT,
     NlpConstraintCategory::PARTICIPANT_DISC,
     NlpConstraintCategory::STATIC_DISC,
     NlpConstraintCategory::VARIABLE_BOUND};
@@ -78,7 +77,6 @@ const char* nlpConstraintCategoryName(NlpConstraintCategory category) {
     switch (category) {
         case NlpConstraintCategory::RK4: return "rk4";
         case NlpConstraintCategory::AABB_NODE: return "aabb_node";
-        case NlpConstraintCategory::AABB_MIDPOINT: return "aabb_midpoint";
         case NlpConstraintCategory::PARTICIPANT_DISC: return "participant_disc";
         case NlpConstraintCategory::STATIC_DISC: return "static_disc";
         case NlpConstraintCategory::VARIABLE_BOUND: return "variable_bound";

@@ -80,17 +80,6 @@ NumericState addScaled(const NumericState& state, const NumericState& delta, dou
             state.steer + scale * delta.steer};
 }
 
-double unionAabbViolation(const ReplayVehicle& vehicle, const ReplayPose& center,
-                          std::size_t interval, double time) {
-    const ReplayNode& current = vehicle.nodes[interval];
-    double violation = replayAabbViolation(center, vehicle.corridor.at(current.aabb_index));
-    if (interval + 1 < vehicle.nodes.size() && time > current.time + kTimeTolerance) {
-        const ReplayNode& next = vehicle.nodes[interval + 1];
-        violation = std::min(violation, replayAabbViolation(center, vehicle.corridor.at(next.aabb_index)));
-    }
-    return violation;
-}
-
 std::array<ReplayPose, 4> obbCorners(const ReplayPose& rear_axle, double length,
                                      double width, double rear_axle_to_center) {
     const ReplayPose center = replayBodyCenter(rear_axle, rear_axle_to_center);
@@ -277,10 +266,12 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
             auto found = nodes.find(vehicle.id);
             if (found == nodes.end() || found->second.size() < 2) throw std::runtime_error("trajectory missing or too short for vehicle " + std::to_string(vehicle.id));
             vehicle.nodes = std::move(found->second);
+            if (vehicle.corridor.size() != vehicle.nodes.size())
+                throw std::runtime_error("AABB and node counts differ for vehicle " + std::to_string(vehicle.id));
             for (std::size_t i = 0; i < vehicle.nodes.size(); ++i) {
                 const ReplayNode& node = vehicle.nodes[i];
                 if (node.node_index != static_cast<int>(i)) throw std::runtime_error("non-contiguous node_index for vehicle " + std::to_string(vehicle.id));
-                if (node.aabb_index < 0 || static_cast<std::size_t>(node.aabb_index) >= vehicle.corridor.size()) throw std::runtime_error("invalid aabb_index for vehicle " + std::to_string(vehicle.id));
+                if (node.aabb_index != static_cast<int>(i)) throw std::runtime_error("aabb_index does not equal node_index for vehicle " + std::to_string(vehicle.id));
                 if (i > 0 && node.time <= vehicle.nodes[i - 1].time) throw std::runtime_error("non-increasing time for vehicle " + std::to_string(vehicle.id));
             }
         }
@@ -395,21 +386,23 @@ double replayAabbViolation(const ReplayPose& center, const ReplayAabb& box) {
 std::vector<ReplayViolation> checkReplayInstant(const ReplayCase& replay_case, double time,
                                                 double tolerance) {
     std::vector<ReplayNode> states;
-    std::vector<std::size_t> intervals;
     std::vector<ReplayPose> centers;
     for (const ReplayVehicle& vehicle : replay_case.vehicles) {
-        std::size_t interval = 0;
-        states.push_back(sampleReplayVehicle(vehicle, time, &interval));
-        intervals.push_back(interval);
+        states.push_back(sampleReplayVehicle(vehicle, time));
         centers.push_back(replayBodyCenter(states.back().rear_axle, vehicle.parameters.rear_axle_to_center));
     }
     std::vector<ReplayViolation> result;
     for (std::size_t i = 0; i < replay_case.vehicles.size(); ++i) {
         const auto& vehicle = replay_case.vehicles[i];
-        const double outside = unionAabbViolation(vehicle, centers[i], intervals[i], time);
-        if (outside > tolerance) result.push_back({ReplayViolationType::AABB, time, vehicle.id, -1,
-                                                   false, outside, 0.0, outside,
-                                                   centers[i], centers[i]});
+        const auto node = std::find_if(vehicle.nodes.begin(), vehicle.nodes.end(),
+            [&](const ReplayNode& value) { return std::abs(value.time - time) <= kTimeTolerance; });
+        if (node != vehicle.nodes.end()) {
+            const double outside = replayAabbViolation(centers[i],
+                vehicle.corridor[static_cast<size_t>(node->node_index)]);
+            if (outside > tolerance) result.push_back({ReplayViolationType::AABB, time, vehicle.id, -1,
+                                                       false, outside, 0.0, outside,
+                                                       centers[i], centers[i]});
+        }
         for (std::size_t j = i + 1; j < replay_case.vehicles.size(); ++j) {
             const auto& other = replay_case.vehicles[j];
             const double margin = obbSeparationMargin(

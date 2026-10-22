@@ -13,9 +13,10 @@ ReplayVehicle vehicle(int id, double x, double y, double speed = 0.0) {
     ReplayVehicle value;
     value.id = id;
     value.parameters = {0.20, 0.10, 0.05, 0.50};
-    value.corridor = {{-10.0, 10.0, -10.0, 10.0}};
+    value.corridor = {{-10.0, 10.0, -10.0, 10.0},
+                      {-10.0, 10.0, -10.0, 10.0}};
     value.nodes = {{0, 0.0, {x, y, 0.0}, speed, 0.0, 0.0, 0.0, 0},
-                   {1, 1.0, {x + speed, y, 0.0}, speed, 0.0, 0.0, 0.0, 0}};
+                   {1, 1.0, {x + speed, y, 0.0}, speed, 0.0, 0.0, 0.0, 1}};
     return value;
 }
 
@@ -27,15 +28,15 @@ std::filesystem::path writeCase(bool inconsistent_time = false) {
     std::ofstream input(directory / "optimization_input.yaml");
     input << "frame_id: map\nparticipant_ids: [2, 9]\nvehicles:\n"
           << "  - id: 2\n    parameters: {length: 0.2, width: 0.1, rear_axle_to_center: 0.05, disc_radius: 0.12, wheel_base: 0.5}\n"
-          << "    aabbs: [{min_x: -1, max_x: 3, min_y: -1, max_y: 1}]\n"
+          << "    aabbs: [{min_x: -1, max_x: 3, min_y: -1, max_y: 1}, {min_x: -1, max_x: 3, min_y: -1, max_y: 1}]\n"
           << "  - id: 9\n    parameters: {length: 0.2, width: 0.1, rear_axle_to_center: 0.05, disc_radius: 0.12, wheel_base: 0.5}\n"
-          << "    aabbs: [{min_x: -1, max_x: 3, min_y: 1, max_y: 3}]\n"
+          << "    aabbs: [{min_x: -1, max_x: 3, min_y: 1, max_y: 3}, {min_x: -1, max_x: 3, min_y: 1, max_y: 3}]\n"
           << "static_vehicles: []\n";
     input.close();
     std::ofstream csv(directory / "optimized_trajectory.csv");
     csv << "vehicle_id,node_index,time,rear_x,rear_y,heading,signed_speed,front_steer,acceleration,steer_rate,aabb_index\n"
-        << "2,0,0,0,0,0,1,0,0,0,0\n2,1,1,1,0,0,1,0,0,0,0\n"
-        << "9,0,0,0,2,0,1,0,0,0,0\n9,1," << (inconsistent_time ? 1.1 : 1.0) << ",1,2,0,1,0,0,0,0\n";
+        << "2,0,0,0,0,0,1,0,0,0,0\n2,1,1,1,0,0,1,0,0,0,1\n"
+        << "9,0,0,0,2,0,1,0,0,0,0\n9,1," << (inconsistent_time ? 1.1 : 1.0) << ",1,2,0,1,0,0,0,1\n";
     csv.close();
     std::ofstream report(directory / "solver_report.yaml");
     report << "solver_success: true\nvalidation_passed: true\nreturn_status: Solve_Succeeded\nnode_count: 2\ntotal_time: 1.0\n"
@@ -99,16 +100,17 @@ TEST(ReplayDataTest, IgnoresFormerDiscOverlapWhenObbsAreSeparated) {
     EXPECT_TRUE(checkReplayInstant(replay_case, 0.5, 1e-6).empty());
 }
 
-TEST(ReplayDataTest, ReportsOnlyObbSatAndSeparateAabbViolations) {
+TEST(ReplayDataTest, ReportsNodeAabbAndIndependentObbViolations) {
     ReplayCase replay_case;
     replay_case.vehicles = {vehicle(2, 0.0, 0.0), vehicle(9, 0.0, 0.05)};
     replay_case.participant_ids = {2, 9};
     replay_case.node_count = 2;
     replay_case.total_time = 1.0;
-    replay_case.vehicles[0].corridor = {{0.20, 1.0, -1.0, 1.0}};
+    replay_case.vehicles[0].corridor = {{0.20, 1.0, -1.0, 1.0},
+                                        {0.20, 1.0, -1.0, 1.0}};
     replay_case.static_vehicles.push_back({17, {0.0, -0.05, 0.0},
                                            0.20, 0.10, 0.05});
-    const auto violations = checkReplayInstant(replay_case, 0.5, 1e-6);
+    const auto violations = checkReplayInstant(replay_case, 0.0, 1e-6);
     bool participant_obb = false, static_obb = false, aabb = false;
     for (const auto& violation : violations) {
         aabb |= violation.type == ReplayViolationType::AABB;

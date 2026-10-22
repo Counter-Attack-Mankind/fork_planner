@@ -98,9 +98,9 @@ TEST_F(OptimizationInputTest, BuildsTwoVehicleInputAndPreservesMetadata) {
     ASSERT_TRUE(preliminary.input.valid) << preliminary.reason;
     ASSERT_EQ(preliminary.input.vehicles.size(), 2U);
 
-    const fnr::Aabb& box = preliminary.input.vehicles.front().corridor.front();
-    const fnr::Pose2d near_center{(box.min_x + box.max_x) * 0.5,
-                                  (box.min_y + box.max_y) * 0.5, 0.0};
+    EXPECT_TRUE(preliminary.input.vehicles.front().corridor.empty());
+    const fnr::Pose2d near_center = corridor.bodyCenter(
+        preliminary.input.vehicles.front().initial_state.rear_axle_pose);
     const fnr::Pose2d near_rear{
         near_center.x - map_param.rear_axle_to_center, near_center.y, 0.0};
     snapshot.vehicles.push_back(makeStaticVehicle(41, near_rear));
@@ -121,8 +121,8 @@ TEST_F(OptimizationInputTest, BuildsTwoVehicleInputAndPreservesMetadata) {
     EXPECT_EQ(result.input.vehicles[0].path_gen, 12);
     EXPECT_EQ(result.input.vehicles[0].terminal.path_gen, 12);
     EXPECT_EQ(result.input.vehicles[0].original_path.size(), 4U);
-    EXPECT_FALSE(result.input.vehicles[0].corridor.empty());
-    ASSERT_EQ(result.input.static_vehicles.size(), 1U);
+    EXPECT_TRUE(result.input.vehicles[0].corridor.empty());
+    ASSERT_EQ(result.input.static_vehicles.size(), 2U);
     EXPECT_EQ(result.input.static_vehicles.front().id, 41);
     EXPECT_DOUBLE_EQ(result.input.static_vehicles.front().length,
                      result.input.vehicles.front().parameters.length);

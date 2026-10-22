@@ -83,7 +83,7 @@ bool OptimizationInputBuilder::discMayAffectCorridor(
         });
 }
 
-void OptimizationInputBuilder::selectStaticVehicles(
+void OptimizationInputBuilder::collectStaticVehicleCandidates(
     const sandbox_msgs::RecoverySnapshot& snapshot,
     NlpOptimizationInput& input) const {
     const std::set<int> participants(input.participant_ids.begin(),
@@ -102,29 +102,8 @@ void OptimizationInputBuilder::selectStaticVehicles(
         obstacle.length = vehicle_parameters_.length;
         obstacle.width = vehicle_parameters_.width;
         obstacle.rear_axle_to_center = vehicle_parameters_.rear_axle_to_center;
-        obstacle.min_distance_to_corridor =
-            std::numeric_limits<double>::infinity();
-
-        for (const NlpVehicleInput& participant : input.vehicles) {
-            double participant_distance = std::numeric_limits<double>::infinity();
-            for (const Aabb& box : participant.corridor) {
-                participant_distance = std::min(
-                    participant_distance,
-                    pointToAabbDistance(obstacle.disc_center, box));
-            }
-            const double influence_distance = obstacle.disc_radius +
-                                               participant.parameters.disc_radius;
-            if (participant_distance <= influence_distance + kEpsilon) {
-                obstacle.influencing_vehicle_ids.push_back(participant.id);
-                if (participant_distance < obstacle.min_distance_to_corridor) {
-                    obstacle.min_distance_to_corridor = participant_distance;
-                    obstacle.influence_distance = influence_distance;
-                }
-            }
-        }
-        if (!obstacle.influencing_vehicle_ids.empty()) {
-            input.static_vehicles.push_back(std::move(obstacle));
-        }
+        obstacle.min_distance_to_corridor = std::numeric_limits<double>::infinity();
+        input.static_vehicles.push_back(std::move(obstacle));
     }
 }
 
@@ -149,7 +128,7 @@ OptimizationInputBuildResult OptimizationInputBuilder::build(
 
     std::set<int> unique_ids;
     std::vector<std::string> structural_errors;
-    bool corridors_valid = true;
+    bool terminals_valid = true;
     for (const int id : participant_ids) {
         if (!unique_ids.insert(id).second) {
             structural_errors.push_back("duplicate participant V" +
@@ -193,7 +172,7 @@ OptimizationInputBuildResult OptimizationInputBuilder::build(
         input_vehicle.terminal = corridor.terminal;
         input_vehicle.corridor = corridor.boxes;
         input_vehicle.corridor_seeds = corridor.seeds;
-        corridors_valid = corridors_valid && corridor.success;
+        terminals_valid = terminals_valid && corridor.success;
         result.input.vehicles.push_back(std::move(input_vehicle));
     }
 
@@ -209,13 +188,13 @@ OptimizationInputBuildResult OptimizationInputBuilder::build(
     }
 
     result.complete = true;
-    selectStaticVehicles(snapshot, result.input);
-    result.input.valid = corridors_valid;
-    if (corridors_valid) {
+    collectStaticVehicleCandidates(snapshot, result.input);
+    result.input.valid = terminals_valid;
+    if (terminals_valid) {
         result.reason = "ok";
     } else {
         std::ostringstream reason;
-        reason << "corridor construction failed for";
+        reason << "rejoin terminal construction failed for";
         for (const NlpVehicleInput& vehicle : result.input.vehicles) {
             if (!vehicle.corridor_valid) reason << " V" << vehicle.id;
         }
@@ -269,6 +248,9 @@ bool writeOptimizationInputDebugFile(const OptimizationInputBuildResult& result,
         out << "    terminal_path_gen: " << vehicle.terminal.path_gen << "\n";
         out << "    terminal_path_type: "
             << static_cast<int>(vehicle.terminal.type) << "\n";
+        out << "    aabb_count: " << vehicle.corridor.size() << "\n";
+        out << "    node_aabb_one_to_one: "
+            << (vehicle.corridor.size() == vehicle.corridor_seeds.size()) << "\n";
         const auto& p = vehicle.parameters;
         out << "    parameters: {length: " << p.length
             << ", width: " << p.width
@@ -292,11 +274,22 @@ bool writeOptimizationInputDebugFile(const OptimizationInputBuildResult& result,
             out << "    aabbs: []\n";
         } else {
             out << "    aabbs:\n";
-            for (const Aabb& box : vehicle.corridor) {
-                out << "      - {min_x: " << box.min_x
+            for (size_t node = 0; node < vehicle.corridor.size(); ++node) {
+                const Aabb& box = vehicle.corridor[node];
+                out << "      - {node: " << node << ", min_x: " << box.min_x
                     << ", max_x: " << box.max_x
                     << ", min_y: " << box.min_y
                     << ", max_y: " << box.max_y << "}\n";
+            }
+        }
+        if (vehicle.corridor_seeds.empty()) {
+            out << "    aabb_seeds: []\n";
+        } else {
+            out << "    aabb_seeds:\n";
+            for (size_t node = 0; node < vehicle.corridor_seeds.size(); ++node) {
+                out << "      - {node: " << node << ", x: "
+                    << vehicle.corridor_seeds[node].x << ", y: "
+                    << vehicle.corridor_seeds[node].y << "}\n";
             }
         }
     }

@@ -4,7 +4,7 @@
 
 #include <visualization_msgs/MarkerArray.h>
 
-#include "forklift_nlp_recovery/initial_guess_geometry_repair.h"
+#include "forklift_nlp_recovery/initial_guess.h"
 
 namespace forklift_nlp_recovery {
 
@@ -16,7 +16,7 @@ void appendRecoveryStageMarkers(
     double containment_tolerance,
     const NlpOptimizationInput& input,
     const NlpInitialGuess& original,
-    const InitialGuessGeometryRepairResult& repair,
+    const NlpInitialGuess& actual,
     const std::string& prefix);
 
 }  // namespace forklift_nlp_recovery

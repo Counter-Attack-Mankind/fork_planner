@@ -212,18 +212,12 @@ public:
                           corridor_config.boundary_inset_reduction);
         private_nh_.param("expansion_step", corridor_config.expansion_step,
                           corridor_config.expansion_step);
-        private_nh_.param("path_sample_step", corridor_config.path_sample_step,
-                          corridor_config.path_sample_step);
-        private_nh_.param("min_rejoin_distance", corridor_config.min_rejoin_distance,
-                          corridor_config.min_rejoin_distance);
         private_nh_.param("rejoin_distance", corridor_config.rejoin_distance,
                           corridor_config.rejoin_distance);
         private_nh_.param("max_width", corridor_config.max_width,
                           corridor_config.max_width);
         private_nh_.param("max_height", corridor_config.max_height,
                           corridor_config.max_height);
-        private_nh_.param("max_bridge_depth", corridor_config.max_bridge_depth,
-                          corridor_config.max_bridge_depth);
         private_nh_.param("route", route_, std::string("a1_to_b"));
         private_nh_.param("slot_id", slot_id_, 0);
         private_nh_.param("catalog_file", catalog_file_, std::string());

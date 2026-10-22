@@ -27,7 +27,6 @@
 #include "forklift_map/map_param.h"
 #include "forklift_nlp_recovery/corridor_builder.h"
 #include "forklift_nlp_recovery/initial_guess.h"
-#include "forklift_nlp_recovery/initial_guess_geometry_repair.h"
 #include "forklift_nlp_recovery/nlp_solver.h"
 #include "forklift_nlp_recovery/optimization_input.h"
 #include "forklift_nlp_recovery/recovery_stage_visualization.h"
@@ -118,56 +117,14 @@ public:
         private_nh_.param<std::string>("results_dir", results_directory_,
                                        "package://forklift_nlp_recovery/results");
         private_nh_.param("execute_after_solve", execute_after_solve_, false);
-        private_nh_.param("initial_guess_auto", initial_guess_config_.automatic,
-                          initial_guess_config_.automatic);
         int initial_guess_nodes = static_cast<int>(initial_guess_config_.node_count);
         private_nh_.param("initial_guess_nodes", initial_guess_nodes,
                           initial_guess_nodes);
         initial_guess_config_.node_count = initial_guess_nodes > 0 ?
             static_cast<size_t>(initial_guess_nodes) : 0;
-        private_nh_.param("initial_guess_total_time",
-                          initial_guess_config_.total_time,
-                          initial_guess_config_.total_time);
-        private_nh_.param("initial_guess_target_dt", initial_guess_config_.target_dt,
-                          initial_guess_config_.target_dt);
-        int initial_guess_min_nodes = static_cast<int>(initial_guess_config_.min_nodes);
-        int initial_guess_max_nodes = static_cast<int>(initial_guess_config_.max_nodes);
-        private_nh_.param("initial_guess_min_nodes", initial_guess_min_nodes,
-                          initial_guess_min_nodes);
-        private_nh_.param("initial_guess_max_nodes", initial_guess_max_nodes,
-                          initial_guess_max_nodes);
-        initial_guess_config_.min_nodes = initial_guess_min_nodes > 0 ?
-            static_cast<size_t>(initial_guess_min_nodes) : 0;
-        initial_guess_config_.max_nodes = initial_guess_max_nodes > 0 ?
-            static_cast<size_t>(initial_guess_max_nodes) : 0;
         private_nh_.param("initial_guess_time_margin",
                           initial_guess_config_.time_margin,
                           initial_guess_config_.time_margin);
-        private_nh_.param("geometry_repair_enabled", repair_config_.enabled,
-                          repair_config_.enabled);
-        int transition_nodes = static_cast<int>(repair_config_.transition_nodes);
-        int smoothing_iterations = static_cast<int>(repair_config_.smoothing_iterations);
-        int interval_samples = static_cast<int>(repair_config_.interval_samples);
-        private_nh_.param("geometry_repair_transition_nodes", transition_nodes,
-                          transition_nodes);
-        private_nh_.param("geometry_repair_smoothing_iterations", smoothing_iterations,
-                          smoothing_iterations);
-        private_nh_.param("geometry_repair_interval_samples", interval_samples,
-                          interval_samples);
-        repair_config_.transition_nodes = transition_nodes > 0 ?
-            static_cast<size_t>(transition_nodes) : 0;
-        repair_config_.smoothing_iterations = smoothing_iterations > 0 ?
-            static_cast<size_t>(smoothing_iterations) : 0;
-        repair_config_.interval_samples = interval_samples > 0 ?
-            static_cast<size_t>(interval_samples) : 1;
-        private_nh_.param("geometry_repair_max_node_displacement",
-                          repair_config_.max_node_displacement,
-                          repair_config_.max_node_displacement);
-        private_nh_.param("geometry_repair_aabb_inset", repair_config_.aabb_inset,
-                          repair_config_.aabb_inset);
-        private_nh_.param("geometry_repair_max_heading_adjustment",
-                          repair_config_.max_heading_adjustment,
-                          repair_config_.max_heading_adjustment);
         private_nh_.param("solver_min_time_scale", solver_config_.min_time_scale,
                           solver_config_.min_time_scale);
         private_nh_.param("solver_max_time_scale", solver_config_.max_time_scale,
@@ -215,21 +172,15 @@ public:
                           config_.shelf_inflation_reduction,
                           config_.shelf_inflation_reduction);
         private_nh_.param("expansion_step", config_.expansion_step, config_.expansion_step);
-        private_nh_.param("path_sample_step", config_.path_sample_step,
-                          config_.path_sample_step);
         private_nh_.param("seed_search_step", config_.seed_search_step,
                           config_.seed_search_step);
         private_nh_.param("seed_search_max_offset", config_.seed_search_max_offset,
                           config_.seed_search_max_offset);
-        private_nh_.param("min_rejoin_distance", config_.min_rejoin_distance,
-                          config_.min_rejoin_distance);
         private_nh_.param("rejoin_distance", config_.rejoin_distance,
                           config_.rejoin_distance);
         private_nh_.param("max_width", config_.max_width, map_param_.field_width);
         private_nh_.param("max_height", config_.max_height, config_.max_height);
         private_nh_.param("safety_margin", config_.safety_margin, config_.safety_margin);
-        private_nh_.param("max_bridge_depth", config_.max_bridge_depth,
-                          config_.max_bridge_depth);
         private_nh_.param("boundary_inset_reduction",config_.boundary_inset_reduction,
                           config_.boundary_inset_reduction);
         builder_ = std::make_unique<CorridorBuilder>(
@@ -256,10 +207,8 @@ public:
         input_builder_ = std::make_unique<OptimizationInputBuilder>(
             *builder_, vehicle_parameters);
         initial_guess_generator_ = std::make_unique<InitialGuessGenerator>(
-            initial_guess_config_);
-        geometry_repair_ = std::make_unique<InitialGuessGeometryRepair>(
-            repair_config_, *builder_);
-        nlp_solver_ = std::make_unique<NlpSolver>(solver_config_);
+            initial_guess_config_, *builder_);
+        nlp_solver_ = std::make_unique<NlpSolver>(solver_config_, *builder_);
         int experiment_vehicle_count = 0;
         int experiment_seed = 0;
         global_nh.param("forklift_planner/multi_vehicle/vehicle_count",
@@ -291,17 +240,14 @@ public:
         }
         ROS_INFO("[nlp_recovery] solver/validator: mode=%s execute_after_solve=%d debug_ids=[%s] "
                  "disc_radius=%.4f boundary_clearance=%.4f "
-                 "shelf_inflation=%.4f topic=%s output=%s timing=%s "
-                 "manual=(N=%zu,T=%.3f) auto=(dt=%.3f,N=[%zu,%zu],margin=%.2f) "
+                 "shelf_inflation=%.4f topic=%s output=%s "
+                 "initial_grid=(N=%zu,margin=%.2f) "
                  "solver_time_scale=[%.2f,%.2f] validation_substeps=%zu results=%s",
                  mode_name_.c_str(), execute_after_solve_, selected_ids.str().c_str(),
                  builder_->vehicleRadius(),
                  builder_->boundaryClearance(), builder_->shelfInflation(),
                  snapshot_topic_.c_str(), debug_output_file_.c_str(),
-                 initial_guess_config_.automatic ? "auto" : "manual",
-                 initial_guess_config_.node_count, initial_guess_config_.total_time,
-                 initial_guess_config_.target_dt, initial_guess_config_.min_nodes,
-                 initial_guess_config_.max_nodes, initial_guess_config_.time_margin,
+                 initial_guess_config_.node_count, initial_guess_config_.time_margin,
                  solver_config_.min_time_scale, solver_config_.max_time_scale,
                  solver_config_.validation_substeps,
                  results_directory_.c_str());
@@ -651,12 +597,11 @@ private:
             ROS_WARN("[nlp_recovery][initial_guess] not solver-ready: %s",
                      guess.reason.c_str());
         }
-        ROS_INFO("[nlp_recovery][initial_guess] vehicles=%zu timing=%s N=%zu "
+        ROS_INFO("[nlp_recovery][initial_guess] vehicles=%zu N=%zu "
                  "T_init=%.3f dt=%.3f "
                  "status=%s max_pos_res=%.6f max_yaw_res=%.6f bounds=%zu "
                  "vehicle_collisions=%zu static_collisions=%zu min_clear=(%.6f,%.6f)",
-                 guess.vehicles.size(), guess.automatic_timing ? "auto" : "manual",
-                 guess.node_count, guess.total_time, guess.average_dt,
+                 guess.vehicles.size(), guess.node_count, guess.total_time, guess.average_dt,
                  guess.constraints_satisfied ? "valid" : "constraint_violation",
                  guess.diagnostics.max_kinematic_position_residual,
                  guess.diagnostics.max_kinematic_heading_residual,
@@ -669,12 +614,14 @@ private:
             const auto& d = vehicle.diagnostics;
             ROS_INFO("[nlp_recovery][initial_guess] V%d length=%.3f estimate=%.3f "
                      "cusps=%zu initial_error=(%.3g m,%.3g rad,%.3g m/s) "
-                     "end=(%.3g m,%.3g rad) aabb=%s max_res=(%.6f m,%.6f rad)",
+                     "end=(%.3g m,%.3g rad) aabb=%s shifted=%zu max_shift=%.3f "
+                     "max_res=(%.6f m,%.6f rad)",
                      vehicle.id, d.reference_length, d.estimated_travel_time,
                      d.direction_changes, d.start_position_error, d.start_heading_error,
                      d.start_speed_magnitude_error, d.terminal_position_error,
                      d.terminal_heading_error,
-                     vehicle.aabb_assignment_valid ? "ok" : "failed",
+                     vehicle.one_to_one_aabbs_valid ? "ok" : "failed",
+                     d.shifted_seed_nodes, d.max_seed_offset,
                      d.max_kinematic_position_residual,
                      d.max_kinematic_heading_residual);
         }
@@ -695,34 +642,6 @@ private:
         }
     }
 
-    void logGeometryRepair(const InitialGuessGeometryRepairResult& repair) const {
-        ROS_INFO("[nlp_recovery][geometry_repair] generated=%d repaired=%d "
-                 "aabb_assignment=%d reason=%s",
-                 repair.generated, repair.repaired, repair.aabb_assignment_valid,
-                 repair.reason.c_str());
-        for (const auto& vehicle : repair.vehicles) {
-            ROS_INFO("[nlp_recovery][geometry_repair] V%d attempted=%d repaired=%d "
-                     "aabb_assignment=%d "
-                     "uncovered=%zu moved=%zu max_move=%.6f aabb_before=%.6f "
-                     "aabb_after=%.6f interval=%.6f curvature=%.6f "
-                     "kinematic=(%.6f,%.6f) disc=%zu static_obb=%zu "
-                     "participant=(disc %zu,obb %zu) reason=%s",
-                     vehicle.id, vehicle.repair_attempted, vehicle.repaired,
-                     vehicle.aabb_assignment_valid,
-                     vehicle.original_uncovered_nodes, vehicle.moved_nodes,
-                     vehicle.max_displacement, vehicle.max_aabb_violation_before,
-                     vehicle.max_aabb_violation_after,
-                     vehicle.max_interval_aabb_violation, vehicle.max_curvature,
-                     vehicle.max_kinematic_position_residual,
-                     vehicle.max_kinematic_heading_residual,
-                     vehicle.disc_safety_violations,
-                     vehicle.static_obb_safety_violations,
-                     vehicle.participant_disc_collisions,
-                     vehicle.participant_obb_collisions,
-                     vehicle.reason.c_str());
-        }
-    }
-
     void logSolveResult(const NlpSolveResult& result,
                         const std::string& case_id) const {
         ROS_INFO("[nlp_recovery][solver] case=%s vehicles=%zu N=%zu T=%.3f "
@@ -740,7 +659,7 @@ private:
                      "boundary=(%.3g,%.3g) dynamics=(%.3g,%.3g) "
                      "bounds=(v %.3g,steer %.3g,a %.3g,omega %.3g) "
                      "aabb=%.3g/%zu obb_sat=(pair %zu,static %zu) "
-                     "min_obb_margin=(pair %.3g,static %.3g) switches=%zu",
+                     "map_samples=%zu min_obb_margin=(pair %.3g,static %.3g)",
                      result.validation.max_start_error,
                      result.validation.max_terminal_error,
                      result.validation.max_kinematic_position_residual,
@@ -753,9 +672,9 @@ private:
                      result.validation.aabb_violation_samples,
                      result.validation.participant_obb_collision_samples,
                      result.validation.static_obb_collision_samples,
+                     result.validation.static_map_violation_samples,
                      result.validation.minimum_participant_obb_separation_margin,
-                     result.validation.minimum_static_obb_separation_margin,
-                     result.validation.invalid_aabb_switches);
+                     result.validation.minimum_static_obb_separation_margin);
         }
     }
 
@@ -835,34 +754,29 @@ private:
 
     struct PreparedGuess {
         NlpInitialGuess original;
-        InitialGuessGeometryRepairResult repair;
+        NlpInitialGuess actual;
     };
 
-    PreparedGuess prepareInitialGuess(const OptimizationInputBuildResult& build,
+    PreparedGuess prepareInitialGuess(OptimizationInputBuildResult& build,
                                       bool save_case,
                                       CaseSaveResult* case_result = nullptr) {
         if (case_result != nullptr) *case_result = CaseSaveResult{};
         PreparedGuess prepared;
-        prepared.original = initial_guess_generator_->generate(build.input);
-        prepared.repair = geometry_repair_->repair(build.input, prepared.original);
+        InitialGuessPreparationResult result = initial_guess_generator_->prepare(build.input);
+        prepared.original = std::move(result.original_guess);
+        prepared.actual = std::move(result.actual_guess);
+        build.reason = build.input.reason;
         if (save_case || build.input.source_mode == "auto") {
-            logInitialGuess(prepared.original);
-            logGeometryRepair(prepared.repair);
+            logInitialGuess(prepared.actual);
         }
         if (!save_case) return prepared;
         const CaseSaveResult saved = saveInitialGuessCase(
-            build, prepared.original, prepared.repair.repaired_guess,
+            build, prepared.original, prepared.actual,
             results_directory_, case_prefix_);
         if (saved.success) {
             if (case_result != nullptr) *case_result = saved;
-            std::string error;
-            if (!saveGeometryRepairReport(prepared.repair,
-                                          saved.case_directory, error)) {
-                ROS_ERROR("[nlp_recovery][geometry_repair] report save failed: %s",
-                          error.c_str());
-            }
             ROS_INFO("[nlp_recovery][initial_guess] saved %s at %s "
-                     "(original/repaired synchronized grids)",
+                     "(pre-offset/actual synchronized grids)",
                      saved.case_id.c_str(), saved.case_directory.c_str());
         } else {
             ROS_ERROR("[nlp_recovery][initial_guess] save failed: %s",
@@ -889,7 +803,6 @@ private:
         if (!locked_.active) {
             OptimizationInputBuildResult build = input_builder_->build(
                 snapshot, snapshot.nlp_vehicle_ids, "auto");
-            writeDebugInput(build);
             if (build.complete) {
                 locked_.active = true;
                 locked_.recovery_id = snapshot.recovery_id;
@@ -899,12 +812,11 @@ private:
                 const PreparedGuess prepared = prepareInitialGuess(
                     locked_.build, locked_.build.input.valid, &saved);
                 locked_.original_initial_guess = prepared.original;
-                locked_.geometry_repair = prepared.repair;
-                locked_.repaired_initial_guess = prepared.repair.repaired_guess;
-                if (locked_.geometry_repair.generated &&
-                    locked_.geometry_repair.aabb_assignment_valid) {
+                locked_.actual_initial_guess = prepared.actual;
+                writeDebugInput(locked_.build);
+                if (locked_.actual_initial_guess.generated) {
                     locked_.solver_result = solveAndSave(
-                        locked_.build, locked_.repaired_initial_guess, saved);
+                        locked_.build, locked_.actual_initial_guess, saved);
                     submitLockedTrajectory();
                 }
                 ROS_WARN("[nlp_recovery][auto] locked NLP_PREP input "
@@ -952,8 +864,8 @@ private:
                 color(1.0f, 0.2f, 0.2f, 1.0f), 0.06);
         appendRecoveryStageMarkers(markers, map_param_.frame_id,
             map_param_.field_width, map_param_.field_height,
-            repair_config_.containment_tolerance, input,
-            locked_.original_initial_guess, locked_.geometry_repair, "auto");
+            initial_guess_config_.containment_tolerance, input,
+            locked_.original_initial_guess, locked_.actual_initial_guess, "auto");
         addOptimizedResult(markers, locked_.solver_result, "auto");
     }
 
@@ -965,23 +877,24 @@ private:
                 addOrangeVehicle(markers, vehicle);
             }
         }
-        const OptimizationInputBuildResult build = input_builder_->build(
+        OptimizationInputBuildResult build = input_builder_->build(
             snapshot, debug_vehicle_ids_, "debug");
-        writeDebugInput(build);
         const std::string identity = inputIdentity(build);
         const bool save_case = build.complete && build.input.valid &&
                                identity != last_debug_case_identity_;
+        CaseSaveResult saved;
+        PreparedGuess prepared;
+        if (build.complete) {
+            prepared = prepareInitialGuess(build, save_case, &saved);
+            latest_debug_original_guess_ = prepared.original;
+            latest_debug_actual_guess_ = prepared.actual;
+        }
+        writeDebugInput(build);
         if (save_case) {
             latest_debug_solver_result_ = NlpSolveResult{};
-            CaseSaveResult saved;
-            const PreparedGuess prepared = prepareInitialGuess(build, true, &saved);
-            latest_debug_original_guess_ = prepared.original;
-            latest_debug_geometry_repair_ = prepared.repair;
-            latest_debug_repaired_guess_ = prepared.repair.repaired_guess;
-            if (latest_debug_geometry_repair_.generated &&
-                latest_debug_geometry_repair_.aabb_assignment_valid) {
+            if (latest_debug_actual_guess_.generated) {
                 latest_debug_solver_result_ = solveAndSave(
-                    build, latest_debug_repaired_guess_, saved);
+                    build, latest_debug_actual_guess_, saved);
             }
             if (saved.success) last_debug_case_identity_ = identity;
         }
@@ -1001,8 +914,8 @@ private:
         if (!latest_debug_original_guess_.vehicles.empty()) {
             appendRecoveryStageMarkers(markers, map_param_.frame_id,
                 map_param_.field_width, map_param_.field_height,
-                repair_config_.containment_tolerance, build.input,
-                latest_debug_original_guess_, latest_debug_geometry_repair_, "debug");
+                initial_guess_config_.containment_tolerance, build.input,
+                latest_debug_original_guess_, latest_debug_actual_guess_, "debug");
         }
         addOptimizedResult(markers, latest_debug_solver_result_, "debug");
     }
@@ -1026,8 +939,7 @@ private:
         std::string frame_id;
         OptimizationInputBuildResult build;
         NlpInitialGuess original_initial_guess;
-        NlpInitialGuess repaired_initial_guess;
-        InitialGuessGeometryRepairResult geometry_repair;
+        NlpInitialGuess actual_initial_guess;
         NlpSolveResult solver_result;
     };
 
@@ -1041,10 +953,8 @@ private:
     std::unique_ptr<CorridorBuilder> builder_;
     std::unique_ptr<OptimizationInputBuilder> input_builder_;
     std::unique_ptr<InitialGuessGenerator> initial_guess_generator_;
-    std::unique_ptr<InitialGuessGeometryRepair> geometry_repair_;
     std::unique_ptr<NlpSolver> nlp_solver_;
     InitialGuessConfig initial_guess_config_;
-    InitialGuessGeometryRepairConfig repair_config_;
     NlpSolverConfig solver_config_;
     OperatingMode mode_ = OperatingMode::DEBUG;
     std::string mode_name_ = "debug";
@@ -1057,8 +967,7 @@ private:
     bool execute_after_solve_ = false;
     std::string last_debug_case_identity_;
     NlpInitialGuess latest_debug_original_guess_;
-    NlpInitialGuess latest_debug_repaired_guess_;
-    InitialGuessGeometryRepairResult latest_debug_geometry_repair_;
+    NlpInitialGuess latest_debug_actual_guess_;
     NlpSolveResult latest_debug_solver_result_;
 };
 

@@ -1,30 +1,13 @@
 mode: auto     # debug下会指定车辆，在运动中一直构造AABB和边值的Rviz可视化，auto下只有出现死锁才会进行构造
 # Execute the validated NLP recovery trajectory in simulation.
 execute_after_solve: true
-initial_guess_auto: true    # true下会自动根据给定的路径长度自动计算配置点数量与所需要的时间给初始解
 
 vehicle_ids: [0, 1]
 snapshot_topic: /forklift_planner/recovery_snapshot
 debug_output_file: /tmp/forklift_nlp_recovery_input.yaml
 results_dir: package://forklift_nlp_recovery/results
-initial_guess_target_dt: 0.2
-initial_guess_min_nodes: 11
-initial_guess_max_nodes: 101
+initial_guess_nodes: 51
 initial_guess_time_margin: 1.2
-
-# Local repair only touches the frozen NLP initial-guess samples. It does not
-# alter offline paths, corridor construction, or formal NLP constraints.
-geometry_repair_enabled: true
-geometry_repair_transition_nodes: 2
-geometry_repair_smoothing_iterations: 12
-geometry_repair_interval_samples: 10
-geometry_repair_max_node_displacement: 0.15
-geometry_repair_aabb_inset: 0.002
-geometry_repair_max_heading_adjustment: 0.35
-
-# Used only when initial_guess_auto is false.（手动配置点个数与时间，通常应该需要自己生成）
-initial_guess_nodes: 31
-initial_guess_total_time: 10.0
 
 # CasADi + IPOPT solve and independent continuous validation.
 solver_min_time_scale: 0.5
@@ -52,11 +35,8 @@ safety_margin: 0.0
 shelf_inflation_reduction: 0.05
 boundary_inset_reduction: 0.05
 expansion_step: 0.02
-path_sample_step: 0.05
 seed_search_step: 0.01
 seed_search_max_offset: 0.10
-min_rejoin_distance: 0.20
 rejoin_distance: 0.80
 max_width: 2.50
 max_height: 2.00
-max_bridge_depth: 8

@@ -41,7 +41,6 @@ struct OptimizedTrajectoryNode {
 
 struct OptimizedVehicleTrajectory {
     int id = -1;
-    bool start_aabb_exempt = false;
     std::vector<OptimizedTrajectoryNode> nodes;
 };
 
@@ -62,7 +61,7 @@ struct NlpSolutionValidation {
     size_t participant_obb_collision_samples = 0;
     size_t static_obb_collision_samples = 0;
     size_t aabb_violation_samples = 0;
-    size_t invalid_aabb_switches = 0;
+    size_t static_map_violation_samples = 0;
 };
 
 struct NlpSolverStatistics {
@@ -103,13 +102,14 @@ struct NlpSolveResult {
 
 class NlpSolver {
 public:
-    explicit NlpSolver(const NlpSolverConfig& config);
+    NlpSolver(const NlpSolverConfig& config, const CorridorBuilder& corridor_builder);
 
     NlpSolveResult solve(const NlpOptimizationInput& input,
                          const NlpInitialGuess& initial_guess) const;
 
 private:
     NlpSolverConfig config_;
+    const CorridorBuilder& corridor_builder_;
 };
 
 bool saveNlpSolveResult(const NlpSolveResult& result,

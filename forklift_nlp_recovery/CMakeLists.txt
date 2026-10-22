@@ -42,7 +42,6 @@ target_link_libraries(forklift_nlp_recovery_input
 
 add_library(forklift_nlp_recovery_initial_guess
   src/optimization/initial_guess.cpp
-  src/optimization/initial_guess_geometry_repair.cpp
 )
 add_dependencies(forklift_nlp_recovery_initial_guess ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_initial_guess

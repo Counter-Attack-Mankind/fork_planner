@@ -9,7 +9,6 @@
 namespace forklift_nlp_recovery {
 
 enum class GuessValueSource {
-    SNAPSHOT_MAGNITUDE_PATH_SIGN,
     PATH_TIME_DIFFERENCE,
     PATH_GEOMETRY_ESTIMATE,
     FINITE_DIFFERENCE,
@@ -19,12 +18,7 @@ enum class GuessValueSource {
 const char* guessValueSourceName(GuessValueSource source);
 
 struct InitialGuessConfig {
-    bool automatic = true;
-    size_t node_count = 31;
-    double total_time = 10.0;
-    double target_dt = 0.2;
-    size_t min_nodes = 11;
-    size_t max_nodes = 101;
+    size_t node_count = 51;
     double time_margin = 1.2;
     double containment_tolerance = 1e-8;
 };
@@ -41,6 +35,8 @@ struct InitialGuessNode {
     double acceleration = 0.0;
     double steer_rate = 0.0;
     int aabb_index = -1;
+    double seed_offset_x = 0.0;
+    double seed_offset_y = 0.0;
     GuessValueSource speed_source = GuessValueSource::PATH_TIME_DIFFERENCE;
     GuessValueSource steer_source = GuessValueSource::PATH_GEOMETRY_ESTIMATE;
     GuessValueSource acceleration_source = GuessValueSource::FINITE_DIFFERENCE;
@@ -53,6 +49,8 @@ struct VehicleInitialGuessDiagnostics {
     double reference_length = 0.0;
     double estimated_travel_time = 0.0;
     size_t direction_changes = 0;
+    size_t shifted_seed_nodes = 0;
+    double max_seed_offset = 0.0;
     double start_position_error = 0.0;
     double start_heading_error = 0.0;
     double start_speed_magnitude_error = 0.0;
@@ -72,8 +70,7 @@ struct VehicleInitialGuessDiagnostics {
 struct VehicleInitialGuess {
     int id = -1;
     bool valid = false;
-    bool aabb_assignment_valid = false;
-    bool start_aabb_exempt = false;
+    bool one_to_one_aabbs_valid = false;
     std::string reason;
     std::vector<InitialGuessNode> nodes;
     VehicleInitialGuessDiagnostics diagnostics;
@@ -106,7 +103,6 @@ struct NlpInitialGuessDiagnostics {
 struct NlpInitialGuess {
     bool generated = false;
     bool constraints_satisfied = false;
-    bool automatic_timing = false;
     std::string reason;
     size_t node_count = 0;
     double total_time = 0.0;
@@ -116,22 +112,22 @@ struct NlpInitialGuess {
     NlpInitialGuessDiagnostics diagnostics;
 };
 
+struct InitialGuessPreparationResult {
+    NlpInitialGuess original_guess;
+    NlpInitialGuess actual_guess;
+};
+
 class InitialGuessGenerator {
 public:
-    explicit InitialGuessGenerator(const InitialGuessConfig& config);
+    InitialGuessGenerator(const InitialGuessConfig& config,
+                          const CorridorBuilder& corridor_builder);
 
-    NlpInitialGuess generate(const NlpOptimizationInput& input) const;
+    InitialGuessPreparationResult prepare(NlpOptimizationInput& input) const;
 
 private:
     InitialGuessConfig config_;
+    const CorridorBuilder& corridor_builder_;
 };
-
-// Applies the same ordered, adjacent-box assignment used by the generator.
-// This is exposed for the geometry repair stage so repaired samples are not
-// accepted through a weaker assignment rule.
-bool assignInitialGuessAabbs(VehicleInitialGuess& guess,
-                             const NlpVehicleInput& input,
-                             double tolerance, std::string& reason);
 
 struct CaseSaveResult {
     bool success = false;
@@ -141,13 +137,9 @@ struct CaseSaveResult {
 };
 
 CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
-                                    const NlpInitialGuess& guess,
-                                    const std::string& results_directory);
-
-CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
                                     const NlpInitialGuess& original_guess,
-                                    const NlpInitialGuess& repaired_guess,
+                                    const NlpInitialGuess& actual_guess,
                                     const std::string& results_directory,
-                                    const std::string& case_prefix);
+                                    const std::string& case_prefix = "");
 
 }  // namespace forklift_nlp_recovery

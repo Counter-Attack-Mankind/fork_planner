@@ -100,8 +100,8 @@ private:
         const sandbox_msgs::RecoverySnapshot& snapshot, int id) const;
     std::vector<PathPoint> pathFromMessage(
         const sandbox_msgs::RecoveryVehicleState& vehicle) const;
-    void selectStaticVehicles(const sandbox_msgs::RecoverySnapshot& snapshot,
-                              NlpOptimizationInput& input) const;
+    void collectStaticVehicleCandidates(const sandbox_msgs::RecoverySnapshot& snapshot,
+                                        NlpOptimizationInput& input) const;
 
     const CorridorBuilder& corridor_builder_;
     VehicleParameters vehicle_parameters_;

@@ -9,7 +9,6 @@ namespace forklift_nlp_recovery {
 enum class NlpConstraintCategory {
     RK4,
     AABB_NODE,
-    AABB_MIDPOINT,
     PARTICIPANT_DISC,
     STATIC_DISC,
     VARIABLE_BOUND

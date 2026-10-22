@@ -35,14 +35,6 @@ Pose2d bodyCenter(const Pose2d& rear, double offset) {
             rear.y + offset * std::sin(rear.yaw), rear.yaw};
 }
 
-bool boxesOverlap(const Aabb& first, const Aabb& second, double tolerance) {
-    return std::min(first.max_x, second.max_x) + tolerance >=
-               std::max(first.min_x, second.min_x) &&
-           std::min(first.max_y, second.max_y) + tolerance >=
-               std::max(first.min_y, second.min_y);
-}
-
-
 casadi::MX derivative(const casadi::MX& state, const casadi::MX& control,
                       double wheel_base) {
     return casadi::MX::vertcat({state(3) * cos(state(2)),
@@ -165,7 +157,9 @@ struct ConstraintData {
 
 }  // namespace
 
-NlpSolver::NlpSolver(const NlpSolverConfig& config) : config_(config) {}
+NlpSolver::NlpSolver(const NlpSolverConfig& config,
+                     const CorridorBuilder& corridor_builder)
+    : config_(config), corridor_builder_(corridor_builder) {}
 
 NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                                 const NlpInitialGuess& initial_guess) const {
@@ -227,9 +221,9 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                             std::to_string(vehicle.id);
             return result;
         }
-        if (!vehicle.corridor_valid || vehicle.corridor.empty() ||
-            !guess->aabb_assignment_valid) {
-            result.reason = "fixed AABB assignment is unavailable for V" +
+        if (!vehicle.corridor_valid || vehicle.corridor.size() != nodes ||
+            !guess->one_to_one_aabbs_valid) {
+            result.reason = "one-to-one node AABBs are unavailable for V" +
                             std::to_string(vehicle.id);
             return result;
         }
@@ -291,21 +285,18 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
         }
 
         for (size_t node = 0; node < nodes; ++node) {
-            const int box_index = guess->nodes[node].aabb_index;
-            if (box_index < 0 || static_cast<size_t>(box_index) >= vehicle.corridor.size()) {
+            if (guess->nodes[node].aabb_index != static_cast<int>(node)) {
                 result.reason = "invalid AABB index at V" + std::to_string(vehicle.id) +
                                 " node " + std::to_string(node);
                 return result;
             }
-            const Aabb& box = vehicle.corridor[box_index];
+            const Aabb& box = vehicle.corridor[node];
             const casadi::MX center = symbolicCenter(state(casadi::Slice(), node),
                 vehicle.parameters.rear_axle_to_center);
-            if (!(node == 0 && guess->start_aabb_exempt)) {
-                constraints.add(center(0), box.min_x, box.max_x,
-                    {NlpConstraintCategory::AABB_NODE, vehicle.id, -1, node, "x"});
-                constraints.add(center(1), box.min_y, box.max_y,
-                    {NlpConstraintCategory::AABB_NODE, vehicle.id, -1, node, "y"});
-            }
+            constraints.add(center(0), box.min_x, box.max_x,
+                {NlpConstraintCategory::AABB_NODE, vehicle.id, -1, node, "x"});
+            constraints.add(center(1), box.min_y, box.max_y,
+                {NlpConstraintCategory::AABB_NODE, vehicle.id, -1, node, "y"});
             if (node + 1 == nodes) continue;
             const casadi::MX current_state = state(casadi::Slice(), node);
             const casadi::MX current_control = control(casadi::Slice(), node);
@@ -317,28 +308,6 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                 constraints.add(state(component, node + 1) - predicted(component),
                     0.0, 0.0, {NlpConstraintCategory::RK4, vehicle.id, -1,
                                node, rk4_components[component]});
-            }
-            const int next_index = guess->nodes[node + 1].aabb_index;
-            const Aabb& next_box = vehicle.corridor[next_index];
-            if (!boxesOverlap(box, next_box, config_.validation_tolerance)) {
-                result.reason = "disconnected fixed AABB switch at V" +
-                    std::to_string(vehicle.id) + " node " + std::to_string(node);
-                return result;
-            }
-            const casadi::MX midpoint = integrateRk4(current_state, current_control,
-                                                      dt * 0.5,
-                                                      vehicle.parameters.wheel_base);
-            const casadi::MX midpoint_center = symbolicCenter(
-                midpoint, vehicle.parameters.rear_axle_to_center);
-            const Aabb middle_box{std::max(box.min_x, next_box.min_x),
-                                  std::min(box.max_x, next_box.max_x),
-                                  std::max(box.min_y, next_box.min_y),
-                                  std::min(box.max_y, next_box.max_y)};
-            if (!(node == 0 && guess->start_aabb_exempt)) {
-                constraints.add(midpoint_center(0), middle_box.min_x, middle_box.max_x,
-                    {NlpConstraintCategory::AABB_MIDPOINT, vehicle.id, -1, node, "x"});
-                constraints.add(midpoint_center(1), middle_box.min_y, middle_box.max_y,
-                    {NlpConstraintCategory::AABB_MIDPOINT, vehicle.id, -1, node, "y"});
             }
             const casadi::MX acceleration = control(0, node);
             const casadi::MX steer_rate = control(1, node);
@@ -474,7 +443,6 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
         for (const SymbolicVehicle& symbolic : symbolic_vehicles) {
             OptimizedVehicleTrajectory trajectory;
             trajectory.id = symbolic.input->id;
-            trajectory.start_aabb_exempt = symbolic.guess->start_aabb_exempt;
             trajectory.nodes.resize(nodes);
             for (size_t node = 0; node < nodes; ++node) {
                 OptimizedTrajectoryNode& value = trajectory.nodes[node];
@@ -517,7 +485,8 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                                            result.average_dt)});
             result.vehicles.push_back(std::move(trajectory));
         }
-        result.validation = forklift_nlp_recovery::validateSolution(input, result, config_);
+        result.validation = forklift_nlp_recovery::validateSolution(
+            input, result, config_, corridor_builder_);
         result.validation_passed = result.validation.passed;
         if (!result.solver_success) {
             result.reason = "IPOPT did not report success: " +
@@ -603,8 +572,8 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << result.validation.static_obb_collision_samples << '\n'
            << "  aabb_violation_samples: "
            << result.validation.aabb_violation_samples << '\n'
-           << "  invalid_aabb_switches: "
-           << result.validation.invalid_aabb_switches << '\n';
+           << "  static_map_violation_samples: "
+           << result.validation.static_map_violation_samples << '\n';
     report << "direction_diagnostics:\n"
            << "  speed_hysteresis_threshold: "
            << result.direction_switch_speed_threshold << '\n'
