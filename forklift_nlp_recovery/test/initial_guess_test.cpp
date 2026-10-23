@@ -1,9 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <cmath>
 
 #include "forklift_nlp_recovery/initial_guess.h"
 
@@ -87,7 +88,7 @@ TEST(InitialGuessTest, UsesFixed51NodeCommonTimeGridAndOneToOneAabbs) {
     EXPECT_DOUBLE_EQ(prepared.actual_guess.vehicles.front().nodes.back().signed_speed, 0.0);
 }
 
-TEST(InitialGuessTest, MapsDifferentVehicleTimesToSameFinalNode) {
+TEST(InitialGuessTest, ShorterProfileArrivesEarlyAndWaitsOnCommonTimeGrid) {
     fnr::CorridorBuilder corridor = builder();
     fnr::InitialGuessConfig config;
     fnr::NlpVehicleInput slow = vehicle(1, 1.0);
@@ -104,6 +105,27 @@ TEST(InitialGuessTest, MapsDifferentVehicleTimesToSameFinalNode) {
                     input.vehicles[i].terminal.pose.x, 1e-12);
         EXPECT_NEAR(prepared.actual_guess.vehicles[i].nodes.back().time,
                     prepared.actual_guess.total_time, 1e-12);
+    }
+    const auto& fast_nodes = prepared.actual_guess.vehicles[1].nodes;
+    const auto first_waiting = std::find_if(fast_nodes.begin(), fast_nodes.end(),
+        [&](const fnr::InitialGuessNode& node) {
+            return node.index > 0 &&
+                std::abs(node.rear_axle_pose.x - fast.terminal.pose.x) < 1e-12 &&
+                std::abs(node.rear_axle_pose.y - fast.terminal.pose.y) < 1e-12;
+        });
+    ASSERT_NE(first_waiting, fast_nodes.end());
+    ASSERT_LT(first_waiting->index, fast_nodes.size() - 1);
+    const double waiting_steer = first_waiting->front_steer;
+    for (auto node = first_waiting; node != fast_nodes.end(); ++node) {
+        EXPECT_NEAR(node->rear_axle_pose.x, fast.terminal.pose.x, 1e-12);
+        EXPECT_NEAR(node->rear_axle_pose.y, fast.terminal.pose.y, 1e-12);
+        EXPECT_NEAR(node->rear_axle_pose.yaw, fast.terminal.pose.yaw, 1e-12);
+        EXPECT_NEAR(node->path_s, fast.terminal.path_s, 1e-12);
+        EXPECT_EQ(node->path_type, fast.terminal.type);
+        EXPECT_DOUBLE_EQ(node->signed_speed, 0.0);
+        EXPECT_DOUBLE_EQ(node->acceleration, 0.0);
+        EXPECT_DOUBLE_EQ(node->steer_rate, 0.0);
+        EXPECT_DOUBLE_EQ(node->front_steer, waiting_steer);
     }
 }
 

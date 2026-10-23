@@ -273,8 +273,10 @@ double positiveViolation(double value, double limit) {
     return std::max(0.0, value - std::max(0.0, limit));
 }
 
-void recomputeDerived(VehicleInitialGuess& guess, const NlpVehicleInput& input, double dt) {
+void recomputeDerived(VehicleInitialGuess& guess, const NlpVehicleInput& input, double dt,
+                      size_t waiting_begin) {
     const size_t count = guess.nodes.size();
+    waiting_begin = std::min(waiting_begin, count);
     for (InitialGuessNode& node : guess.nodes) {
         node.disc_center = discCenter(node.rear_axle_pose, input.parameters);
     }
@@ -303,6 +305,15 @@ void recomputeDerived(VehicleInitialGuess& guess, const NlpVehicleInput& input, 
             node.front_steer = 0.0;
         }
     }
+    if (waiting_begin < count) {
+        const double waiting_steer = waiting_begin > 0 ?
+            guess.nodes[waiting_begin - 1].front_steer : guess.nodes[waiting_begin].front_steer;
+        for (size_t i = waiting_begin; i < count; ++i) {
+            guess.nodes[i].signed_speed = 0.0;
+            guess.nodes[i].speed_source = GuessValueSource::TERMINAL_ZERO_ASSUMPTION;
+            guess.nodes[i].front_steer = waiting_steer;
+        }
+    }
     for (size_t i = 0; i < count; ++i) {
         const size_t lo = i == 0 ? 0 : i - 1;
         const size_t hi = i + 1 < count ? i + 1 : i;
@@ -311,6 +322,10 @@ void recomputeDerived(VehicleInitialGuess& guess, const NlpVehicleInput& input, 
             (guess.nodes[hi].signed_speed - guess.nodes[lo].signed_speed) / span : 0.0;
         guess.nodes[i].steer_rate = span > 0.0 ?
             normalizeAngle(guess.nodes[hi].front_steer - guess.nodes[lo].front_steer) / span : 0.0;
+        if (i >= waiting_begin) {
+            guess.nodes[i].acceleration = 0.0;
+            guess.nodes[i].steer_rate = 0.0;
+        }
     }
 }
 
@@ -540,6 +555,7 @@ InitialGuessPreparationResult InitialGuessGenerator::prepare(NlpOptimizationInpu
     std::vector<std::vector<SegmentProfile>> profiles(input.vehicles.size());
     std::vector<double> profile_times(input.vehicles.size(), 0.0);
     std::vector<double> estimated_times(input.vehicles.size(), 0.0);
+    std::vector<size_t> waiting_begins(input.vehicles.size(), config_.node_count);
     double maximum_time = 0.0;
     for (size_t i = 0; i < input.vehicles.size(); ++i) {
         const NlpVehicleInput& vehicle = input.vehicles[i];
@@ -577,14 +593,17 @@ InitialGuessPreparationResult InitialGuessGenerator::prepare(NlpOptimizationInpu
             value.index = node;
             value.time = original.time_grid[node];
             value.aabb_index = static_cast<int>(node);
-            const double local_time = value.time * estimated_times[vehicle_index] / original.total_time;
-            const double profile_time = local_time * profile_times[vehicle_index] /
-                                        estimated_times[vehicle_index];
-            const double progress = node + 1 == original.node_count ? references[vehicle_index].total_length :
+            const bool waiting = value.time + kEpsilon >= profile_times[vehicle_index];
+            if (waiting && waiting_begins[vehicle_index] == original.node_count) {
+                waiting_begins[vehicle_index] = node;
+            }
+            const double profile_time = std::min(value.time, profile_times[vehicle_index]);
+            const double progress = waiting || node + 1 == original.node_count ?
+                references[vehicle_index].total_length :
                 sampleProfile(profiles[vehicle_index], source.parameters, profile_time);
             sampleReferenceNode(source, references[vehicle_index], progress, value);
         }
-        recomputeDerived(vehicle, source, original.average_dt);
+        recomputeDerived(vehicle, source, original.average_dt, waiting_begins[vehicle_index]);
         vehicle.valid = true;
         vehicle.reason = "time-profile resampling completed";
         original.vehicles.push_back(std::move(vehicle));
@@ -631,7 +650,7 @@ InitialGuessPreparationResult InitialGuessGenerator::prepare(NlpOptimizationInpu
             source.corridor.push_back(box);
         }
         if (source.corridor.size() == vehicle.nodes.size()) {
-            recomputeDerived(vehicle, source, actual.average_dt);
+            recomputeDerived(vehicle, source, actual.average_dt, waiting_begins[vehicle_index]);
             vehicle.one_to_one_aabbs_valid = true;
             vehicle.valid = true;
             vehicle.reason = "one AABB generated for every NLP node";
