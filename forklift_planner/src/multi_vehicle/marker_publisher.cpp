@@ -288,10 +288,10 @@ void MarkerPublisher::addBodyMarker(visualization_msgs::MarkerArray& arr,
     // 外包络仍是 L×W；后半段是车身，前半段分成两根叉臂，便于区分车头。
     const double body_len = L * 0.62;
     const double fork_len = L - body_len;
-    const double fork_w = W * 0.22;
+    const double fork_w = W * 0.18;
     const double body_x = -0.5 * L + 0.5 * body_len;
     const double fork_x = 0.5 * L - 0.5 * fork_len;
-    const double fork_y = 0.5 * W - 0.5 * fork_w;
+    const double fork_y = W * 0.27;
 
     auto addPart = [&](int id, double local_x, double local_y,
                        double sx, double sy) {
@@ -332,8 +332,8 @@ void MarkerPublisher::addBodyMarker(visualization_msgs::MarkerArray& arr,
     cargo.pose.orientation.z = std::sin(p.theta * 0.5);
     cargo.pose.orientation.w = std::cos(p.theta * 0.5);
     // Leave room at both fork ends and overlap each fork's inner edge slightly.
-    cargo.scale.x = fork_len * 0.94;
-    cargo.scale.y = 2.0 * fork_y - fork_w * 0.8;
+    cargo.scale.x = fork_len * 0.70;
+    cargo.scale.y = W * 0.80;
     cargo.scale.z = 0.050;
     cargo.color = rgba(0.72f, 0.48f, 0.18f);
     arr.markers.push_back(cargo);
