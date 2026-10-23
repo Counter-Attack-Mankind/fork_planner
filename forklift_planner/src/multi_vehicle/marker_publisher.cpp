@@ -317,6 +317,26 @@ void MarkerPublisher::addBodyMarker(visualization_msgs::MarkerArray& arr,
     addPart(v.id, body_x, 0.0, body_len, W);
     addPart(1000 + v.id * 2, fork_x, fork_y, fork_len, fork_w);
     addPart(1001 + v.id * 2, fork_x, -fork_y, fork_len, fork_w);
+
+    visualization_msgs::Marker cargo;
+    cargo.header.frame_id = pp_.frame_id;
+    cargo.header.stamp = ros::Time::now();
+    cargo.ns = "multi_patrol_cargo";
+    cargo.id = v.id;
+    cargo.type = visualization_msgs::Marker::CUBE;
+    cargo.action = v.loaded && v.mission_phase != MissionPhase::UNLOAD_DWELL
+        ? visualization_msgs::Marker::ADD : visualization_msgs::Marker::DELETE;
+    cargo.pose.position.x = p.x + c * fork_x;
+    cargo.pose.position.y = p.y + s * fork_x;
+    cargo.pose.position.z = 0.035;
+    cargo.pose.orientation.z = std::sin(p.theta * 0.5);
+    cargo.pose.orientation.w = std::cos(p.theta * 0.5);
+    // Leave room at both fork ends and overlap each fork's inner edge slightly.
+    cargo.scale.x = fork_len * 0.94;
+    cargo.scale.y = 2.0 * fork_y - fork_w * 0.8;
+    cargo.scale.z = 0.050;
+    cargo.color = rgba(0.72f, 0.48f, 0.18f);
+    arr.markers.push_back(cargo);
 }
 
 void MarkerPublisher::addArrowMarker(visualization_msgs::MarkerArray& arr,
@@ -1019,7 +1039,16 @@ void MarkerPublisher::publish(
     addOriginAxes(arr);  // 地图原点+XY正方向(标定核对用)
     for (const VehicleAgent& v : vehicles) {
         addPathMarker(arr, v);
-        if (v.mode == VehicleMode::NEED_TASK || v.track.empty()) continue;
+        if (v.mode == VehicleMode::NEED_TASK || v.track.empty()) {
+            visualization_msgs::Marker cargo;
+            cargo.header.frame_id = pp_.frame_id;
+            cargo.header.stamp = ros::Time::now();
+            cargo.ns = "multi_patrol_cargo";
+            cargo.id = v.id;
+            cargo.action = visualization_msgs::Marker::DELETE;
+            arr.markers.push_back(cargo);
+            continue;
+        }
         addBodyMarker(arr, v);
         addArrowMarker(arr, v);
         addLabelMarker(arr, v, recovery);
