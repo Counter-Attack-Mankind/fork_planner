@@ -1498,6 +1498,33 @@ if (a1_first_inner_lane_shift &&
                 turn_limits[j] = std::min(0.90 * seg_len[j - 1], 0.98 * seg_len[j]);
             }
         }
+
+        // A1 -> B, row7 only: match the lower turn of the yellow
+        // corridor-3/4 road connector (approximately y=0.5..1.0 m).
+        // This bounds the clothoid tangent without changing the route
+        // skeleton, terminal docking geometry, or any other row.
+        if (use_a1_to_b_rules && src.id == 101 &&
+            !target_is_endpoint && tgt.row_id == 7) {
+            const double map_lower_y =
+                corridor_lane_y(mp_, 4, HDir::LEFT);
+            const double map_upper_y =
+                corridor_lane_y(mp_, 3, HDir::RIGHT);
+            const double map_max_tangent =
+                0.45 * std::max(0.0, map_upper_y - map_lower_y);
+            const double connector_x =
+                (tgt.col <= 4) ? row3_up_x : row3_down_x;
+            const double match_tol =
+                std::max(0.005, 0.5 * sample_ds);
+            const bool at_lower_map_turn =
+                std::abs(simplified[j].y - map_lower_y) <= match_tol;
+            const bool on_connector =
+                std::abs(simplified[j].x - connector_x) <= match_tol;
+            if (at_lower_map_turn && on_connector &&
+                map_max_tangent > sample_ds) {
+                turn_limits[j] =
+                    std::min(turn_limits[j], map_max_tangent);
+            }
+        }
     }
 
     auto fit_clear_turn = [&](size_t j, double max_tangent) {

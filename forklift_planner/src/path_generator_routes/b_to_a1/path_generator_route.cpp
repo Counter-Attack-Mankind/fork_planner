@@ -1730,6 +1730,46 @@ RoughPath PathGenerator::generateRouteBToA1(const Slot& src, const Slot& tgt,
                 turn_limits[j] = std::min(0.90 * seg_len[j - 1], 0.98 * seg_len[j]);
             }
         }
+
+        // B(row5)->A1: align the two corridor-3/2 spine turns with the
+        // tangent budget used by forklift_map's yellow road centerlines.
+        // Other rows and all other corners retain their original limits.
+        if (target_is_depot_a1 && src.row_id == 5) {
+            const double map_lower_y = corridor_lane_y(mp_, 3, HDir::LEFT);
+            const double map_upper_y = corridor_lane_y(mp_, 2, HDir::RIGHT);
+            const double map_max_tangent =
+                0.45 * std::max(0.0, map_upper_y - map_lower_y);
+            const double match_tol = std::max(0.005, 0.5 * sample_ds);
+            const bool on_spine =
+                std::abs(simplified[j].x - spine_x_) <= match_tol;
+            const bool on_map_turn =
+                std::abs(simplified[j].y - map_lower_y) <= match_tol ||
+                std::abs(simplified[j].y - map_upper_y) <= match_tol;
+            if (on_spine && on_map_turn && map_max_tangent > sample_ds) {
+                turn_limits[j] = std::min(turn_limits[j], map_max_tangent);
+            }
+        }
+
+        // Row7 -> A1: match the lower (corridor-4) turn of the yellow
+        // corridor-4/3 connector.  This is the bend around y = 0.5..1.0 m.
+        // The existing row5 rule above is intentionally left unchanged.
+        if (target_is_depot_a1 && src.row_id == 7) {
+            const double map_lower_y = corridor_lane_y(mp_, 4, HDir::LEFT);
+            const double map_upper_y = corridor_lane_y(mp_, 3, HDir::RIGHT);
+            const double map_max_tangent =
+                0.45 * std::max(0.0, map_upper_y - map_lower_y);
+            const double connector_x =
+                (src.col <= 4) ? row3_up_x : row3_down_x;
+            const double match_tol = std::max(0.005, 0.5 * sample_ds);
+            const bool on_connector =
+                std::abs(simplified[j].x - connector_x) <= match_tol;
+            const bool at_lower_map_turn =
+                std::abs(simplified[j].y - map_lower_y) <= match_tol;
+            if (on_connector && at_lower_map_turn &&
+                map_max_tangent > sample_ds) {
+                turn_limits[j] = std::min(turn_limits[j], map_max_tangent);
+            }
+        }
     }
 
     auto fit_clear_turn = [&](size_t j, double max_tangent) {
