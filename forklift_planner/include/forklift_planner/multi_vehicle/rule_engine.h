@@ -223,6 +223,11 @@ public:
     bool completeNlpRecovery(uint64_t recovery_id) {
         return deadlock_manager_.completeNlpRecovery(recovery_id);
     }
+    bool restartNlpRecovery(uint64_t recovery_id,
+                            const std::vector<VehicleAgent>& vehicles,
+                            const std::string& reason) {
+        return deadlock_manager_.restartNlpRecovery(recovery_id, vehicles, reason);
+    }
 
     // 前瞻仿真用:快照/恢复跨周期持久状态,使「克隆-空跑」忠实复现真实协调(确定性⇒预测准)。
     struct SimSnapshot {

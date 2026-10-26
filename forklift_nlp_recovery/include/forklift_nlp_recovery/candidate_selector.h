@@ -1,0 +1,64 @@
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "forklift_map/map_param.h"
+#include "forklift_map/map_types.h"
+#include "forklift_nlp_recovery/optimization_input.h"
+
+namespace forklift_nlp_recovery {
+
+struct CandidateSelectionConfig {
+    double stopped_speed_tolerance = 0.01;
+    double sweep_step = 0.01;
+    double minimum_effective_gain = 0.05;
+    double maximum_negative_gain = 0.02;
+};
+
+struct CandidateEvaluation {
+    int vehicle_id = -1;
+    bool eligible = false;
+    std::string reason;
+    OptimizationInputBuildResult build;
+    std::vector<int> beneficiary_ids;
+    std::vector<double> gains;
+    int positive_gain_count = 0;
+    double total_positive_gain = 0.0;
+    double worst_gain = 0.0;
+};
+
+struct CandidateSelectionResult {
+    bool complete_snapshot = false;
+    std::string reason;
+    std::vector<CandidateEvaluation> ranked;
+};
+
+class CandidateSelector {
+public:
+    CandidateSelector(const MapParam& map_param,
+                      const std::vector<ShelfBlock>& shelves,
+                      const CandidateSelectionConfig& config,
+                      const OptimizationInputBuilder& input_builder);
+
+    CandidateSelectionResult evaluate(
+        const sandbox_msgs::RecoverySnapshot& snapshot,
+        const std::vector<int>& deadlock_cycle_ids) const;
+
+private:
+    const sandbox_msgs::RecoveryVehicleState* findVehicle(
+        const sandbox_msgs::RecoverySnapshot& snapshot, int id) const;
+    bool intersectsRow2Bridge(
+        const sandbox_msgs::RecoveryVehicleState& vehicle) const;
+    double continuousSafeDistance(
+        const sandbox_msgs::RecoveryVehicleState& vehicle,
+        const sandbox_msgs::RecoverySnapshot& snapshot,
+        int moved_vehicle_id, const Pose2d* moved_pose) const;
+
+    MapParam map_param_;
+    std::vector<ShelfBlock> shelves_;
+    CandidateSelectionConfig config_;
+    const OptimizationInputBuilder& input_builder_;
+};
+
+}  // namespace forklift_nlp_recovery

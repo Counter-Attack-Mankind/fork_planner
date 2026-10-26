@@ -41,6 +41,8 @@ fnr::NlpVehicleInput vehicle(int id, double y, uint8_t second_type = 0) {
     value.terminal = {value.original_path.back().pose, 1.0, value.path_gen, second_type};
     value.corridor_valid = true;
     value.corridor_reason = "terminal selected";
+    value.corridor = {{0.20, 2.30, 0.30, 4.20}};
+    value.corridor_seeds = {{1.05, y, 0.0}};
     return value;
 }
 
@@ -59,8 +61,6 @@ fnr::CorridorBuilder builder(const std::vector<ShelfBlock>& shelves = {}) {
     MapParam map;
     fnr::CorridorConfig config;
     config.vehicle_radius = 0.05;
-    config.seed_search_step = 0.01;
-    config.seed_search_max_offset = 0.10;
     return fnr::CorridorBuilder(map, shelves, config);
 }
 
@@ -129,23 +129,14 @@ TEST(InitialGuessTest, ShorterProfileArrivesEarlyAndWaitsOnCommonTimeGrid) {
     }
 }
 
-TEST(InitialGuessTest, OffsetsOnlyIllegalInternalSeedsAndRecomputesState) {
-    ShelfBlock shelf;
-    shelf.x = 1.49; shelf.y = 0.99; shelf.w = 0.02; shelf.h = 0.02;
-    fnr::CorridorBuilder corridor = builder({shelf});
+TEST(InitialGuessTest, RejectsReferenceThatLeavesSingleStcWithoutOffsettingIt) {
+    fnr::CorridorBuilder corridor = builder();
     fnr::NlpOptimizationInput input = inputFor({vehicle(4, 1.0)});
+    input.vehicles.front().corridor.front().max_x = 1.40;
     const auto prepared = fnr::InitialGuessGenerator({}, corridor).prepare(input);
-    ASSERT_TRUE(prepared.actual_guess.generated) << prepared.actual_guess.reason;
-    const auto& original = prepared.original_guess.vehicles.front();
-    const auto& actual = prepared.actual_guess.vehicles.front();
-    EXPECT_GT(actual.diagnostics.shifted_seed_nodes, 0U);
-    EXPECT_EQ(actual.nodes.front().rear_axle_pose.x, original.nodes.front().rear_axle_pose.x);
-    EXPECT_EQ(actual.nodes.back().rear_axle_pose.x, original.nodes.back().rear_axle_pose.x);
-    for (size_t node = 0; node < actual.nodes.size(); ++node) {
-        EXPECT_NEAR(actual.nodes[node].rear_axle_pose.yaw,
-                    original.nodes[node].rear_axle_pose.yaw, 1e-12);
-        EXPECT_TRUE(corridor.pointLegal(actual.nodes[node].disc_center));
-    }
+    EXPECT_FALSE(prepared.actual_guess.generated);
+    EXPECT_NE(prepared.actual_guess.reason.find("leaves the single STC"),
+              std::string::npos);
 }
 
 TEST(InitialGuessTest, RejectsIllegalFixedEndpointWithoutOffset) {
@@ -156,7 +147,7 @@ TEST(InitialGuessTest, RejectsIllegalFixedEndpointWithoutOffset) {
     const auto prepared = fnr::InitialGuessGenerator({}, corridor).prepare(input);
     EXPECT_FALSE(prepared.actual_guess.generated);
     EXPECT_FALSE(input.valid);
-    EXPECT_NE(prepared.actual_guess.reason.find("fixed endpoint seed is illegal"), std::string::npos);
+    EXPECT_NE(prepared.actual_guess.reason.find("leaves the single STC"), std::string::npos);
 }
 
 TEST(InitialGuessTest, SavesOnlyPreOffsetAndActualCsvFiles) {

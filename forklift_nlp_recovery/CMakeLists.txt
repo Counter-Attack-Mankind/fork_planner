@@ -20,7 +20,7 @@ find_package(yaml-cpp REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_initial_guess forklift_nlp_recovery_validator forklift_nlp_recovery_constraint_diagnostics forklift_nlp_recovery_solver forklift_nlp_recovery_replay
+  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_selection forklift_nlp_recovery_initial_guess forklift_nlp_recovery_validator forklift_nlp_recovery_constraint_diagnostics forklift_nlp_recovery_solver forklift_nlp_recovery_replay
   CATKIN_DEPENDS roscpp roslib geometry_msgs std_msgs std_srvs visualization_msgs forklift_map forklift_planner sandbox_msgs
 )
 
@@ -36,6 +36,17 @@ target_link_libraries(forklift_nlp_recovery_geometry ${catkin_LIBRARIES})
 add_library(forklift_nlp_recovery_input src/optimization/optimization_input.cpp)
 add_dependencies(forklift_nlp_recovery_input ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_input
+  forklift_nlp_recovery_geometry
+  ${catkin_LIBRARIES}
+)
+
+add_library(forklift_nlp_recovery_selection
+  src/optimization/candidate_selector.cpp
+  src/optimization/hybrid_astar.cpp
+)
+add_dependencies(forklift_nlp_recovery_selection ${catkin_EXPORTED_TARGETS})
+target_link_libraries(forklift_nlp_recovery_selection
+  forklift_nlp_recovery_input
   forklift_nlp_recovery_geometry
   ${catkin_LIBRARIES}
 )
@@ -91,6 +102,7 @@ add_executable(recovery_visualizer_node
 add_dependencies(recovery_visualizer_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(recovery_visualizer_node
   forklift_nlp_recovery_solver
+  forklift_nlp_recovery_selection
   forklift_nlp_recovery_initial_guess
   forklift_nlp_recovery_input
   forklift_nlp_recovery_geometry
@@ -161,6 +173,29 @@ if(CATKIN_ENABLE_TESTING)
     )
   endif()
 
+  catkin_add_gtest(hybrid_astar_test test/hybrid_astar_test.cpp)
+  if(TARGET hybrid_astar_test)
+    add_dependencies(hybrid_astar_test ${catkin_EXPORTED_TARGETS})
+    target_link_libraries(hybrid_astar_test
+      forklift_nlp_recovery_selection
+      forklift_nlp_recovery_input
+      forklift_nlp_recovery_geometry
+      ${catkin_LIBRARIES}
+    )
+  endif()
+
+  catkin_add_gtest(candidate_selector_test test/candidate_selector_test.cpp)
+  if(TARGET candidate_selector_test)
+    add_dependencies(candidate_selector_test ${catkin_EXPORTED_TARGETS})
+    target_link_libraries(candidate_selector_test
+      forklift_nlp_recovery_selection
+      forklift_nlp_recovery_input
+      forklift_nlp_recovery_geometry
+      forklift_map_lib
+      ${catkin_LIBRARIES}
+    )
+  endif()
+
   catkin_add_gtest(nlp_solver_test test/nlp_solver_test.cpp)
   if(TARGET nlp_solver_test)
     add_dependencies(nlp_solver_test ${catkin_EXPORTED_TARGETS})
@@ -182,6 +217,7 @@ if(CATKIN_ENABLE_TESTING)
 endif()
 
 install(TARGETS forklift_nlp_recovery_geometry forklift_nlp_recovery_input
+                forklift_nlp_recovery_selection
                 forklift_nlp_recovery_initial_guess
                 forklift_nlp_recovery_validator
                 forklift_nlp_recovery_constraint_diagnostics

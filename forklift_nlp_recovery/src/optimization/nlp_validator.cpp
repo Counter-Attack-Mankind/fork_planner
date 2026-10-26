@@ -81,6 +81,18 @@ double obbSatSeparationMargin(const Obb& first, const Obb& second) {
     return margin;
 }
 
+Obb aabbObb(const Aabb& box) {
+    return {{0.5 * (box.min_x + box.max_x), 0.5 * (box.min_y + box.max_y)},
+            {1.0, 0.0}, {0.0, 1.0}, 0.5 * box.width(), 0.5 * box.height()};
+}
+
+bool obbInsideField(const Obb& box, double width, double height) {
+    const double extent_x = projectionRadius(box, {1.0, 0.0});
+    const double extent_y = projectionRadius(box, {0.0, 1.0});
+    return box.center.x - extent_x >= 0.0 && box.center.x + extent_x <= width &&
+           box.center.y - extent_y >= 0.0 && box.center.y + extent_y <= height;
+}
+
 NumericState derivative(const NumericState& state, const NumericControl& control,
                         double wheel_base) {
     return {state.speed * std::cos(state.yaw), state.speed * std::sin(state.yaw),
@@ -201,14 +213,39 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
                 samples[index].push_back(state);
                 const Pose2d center = bodyCenter({state.x, state.y, state.yaw},
                                                  source.parameters.rear_axle_to_center);
-                if (!corridor_builder.pointLegal(center)) {
+                const double stc_violation = pointAabbViolation(center,
+                    source.corridor[interval]);
+                validation.max_aabb_violation = std::max(
+                    validation.max_aabb_violation, stc_violation);
+                if (stc_violation > config.validation_tolerance) {
+                    ++validation.aabb_violation_samples;
+                }
+                const Obb body = vehicleObb({state.x, state.y, state.yaw},
+                    source.parameters.length, source.parameters.width,
+                    source.parameters.rear_axle_to_center);
+                bool body_map_collision = !obbInsideField(body,
+                    corridor_builder.fieldWidth(), corridor_builder.fieldHeight());
+                int shelf_index = -1;
+                if (!body_map_collision) {
+                    const auto& shelves = corridor_builder.originalShelves();
+                    for (size_t index = 0; index < shelves.size(); ++index) {
+                        if (obbSatSeparationMargin(body, aabbObb(shelves[index])) <= 0.0) {
+                            body_map_collision = true;
+                            shelf_index = static_cast<int>(index);
+                            break;
+                        }
+                    }
+                }
+                if (body_map_collision || !corridor_builder.pointLegal(center)) {
                     ++validation.static_map_violation_samples;
                     PointLegalityViolation detail;
                     corridor_builder.diagnosePointViolation(center, detail);
                     validation.static_map_violations.push_back({
                         vehicle.id, interval, substep,
                         (static_cast<double>(interval) + fraction) * dt,
-                        center, detail.type, detail.shelf_index, detail.distance});
+                        center, body_map_collision ? "body_obb_map_collision" : detail.type,
+                        shelf_index >= 0 ? shelf_index : detail.shelf_index,
+                        detail.distance});
                 }
             }
         }
@@ -216,6 +253,27 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
         samples[index].push_back({last_node.rear_axle_pose.x, last_node.rear_axle_pose.y,
                                   last_node.rear_axle_pose.yaw, last_node.signed_speed,
                                   last_node.front_steer});
+        const Obb terminal_body = vehicleObb(last_node.rear_axle_pose,
+            source.parameters.length, source.parameters.width,
+            source.parameters.rear_axle_to_center);
+        bool terminal_map_collision = !obbInsideField(terminal_body,
+            corridor_builder.fieldWidth(), corridor_builder.fieldHeight());
+        int terminal_shelf = -1;
+        for (size_t shelf = 0; !terminal_map_collision &&
+             shelf < corridor_builder.originalShelves().size(); ++shelf) {
+            if (obbSatSeparationMargin(terminal_body,
+                aabbObb(corridor_builder.originalShelves()[shelf])) <= 0.0) {
+                terminal_map_collision = true;
+                terminal_shelf = static_cast<int>(shelf);
+            }
+        }
+        if (terminal_map_collision) {
+            ++validation.static_map_violation_samples;
+            validation.static_map_violations.push_back({vehicle.id,
+                result.node_count - 2, substeps, result.total_time,
+                last_node.disc_center, "body_obb_map_collision",
+                terminal_shelf, 0.0});
+        }
     }
 
     const size_t sample_count = samples.front().size();

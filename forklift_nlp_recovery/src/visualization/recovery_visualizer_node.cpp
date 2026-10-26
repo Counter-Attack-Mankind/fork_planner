@@ -26,6 +26,8 @@
 #include "forklift_map/forklift_map.h"
 #include "forklift_map/map_param.h"
 #include "forklift_nlp_recovery/corridor_builder.h"
+#include "forklift_nlp_recovery/candidate_selector.h"
+#include "forklift_nlp_recovery/hybrid_astar.h"
 #include "forklift_nlp_recovery/initial_guess.h"
 #include "forklift_nlp_recovery/nlp_solver.h"
 #include "forklift_nlp_recovery/optimization_input.h"
@@ -168,21 +170,14 @@ public:
                           solver_config_.validation_tolerance);
         private_nh_.param("vehicle_radius", config_.vehicle_radius,
                           config_.vehicle_radius);
-        private_nh_.param("shelf_inflation_reduction",
-                          config_.shelf_inflation_reduction,
-                          config_.shelf_inflation_reduction);
         private_nh_.param("expansion_step", config_.expansion_step, config_.expansion_step);
-        private_nh_.param("seed_search_step", config_.seed_search_step,
-                          config_.seed_search_step);
-        private_nh_.param("seed_search_max_offset", config_.seed_search_max_offset,
-                          config_.seed_search_max_offset);
         private_nh_.param("rejoin_distance", config_.rejoin_distance,
                           config_.rejoin_distance);
-        private_nh_.param("max_width", config_.max_width, map_param_.field_width);
-        private_nh_.param("max_height", config_.max_height, config_.max_height);
+        private_nh_.param("exit_search_step", config_.exit_search_step,
+                          config_.exit_search_step);
+        private_nh_.param("cusp_clearance", config_.cusp_clearance,
+                          config_.cusp_clearance);
         private_nh_.param("safety_margin", config_.safety_margin, config_.safety_margin);
-        private_nh_.param("boundary_inset_reduction",config_.boundary_inset_reduction,
-                          config_.boundary_inset_reduction);
         builder_ = std::make_unique<CorridorBuilder>(
             map_param_, map_->shelf_blocks(), config_);
         VehicleParameters vehicle_parameters;
@@ -206,6 +201,42 @@ public:
                         vehicle_parameters.fixed_retreat_speed, 0.10);
         input_builder_ = std::make_unique<OptimizationInputBuilder>(
             *builder_, vehicle_parameters);
+        private_nh_.param("stopped_speed_tolerance",
+                          candidate_config_.stopped_speed_tolerance,
+                          candidate_config_.stopped_speed_tolerance);
+        private_nh_.param("sweep_step", candidate_config_.sweep_step,
+                          candidate_config_.sweep_step);
+        private_nh_.param("minimum_effective_gain",
+                          candidate_config_.minimum_effective_gain,
+                          candidate_config_.minimum_effective_gain);
+        private_nh_.param("maximum_negative_gain",
+                          candidate_config_.maximum_negative_gain,
+                          candidate_config_.maximum_negative_gain);
+        candidate_selector_ = std::make_unique<CandidateSelector>(
+            map_param_, map_->shelf_blocks(), candidate_config_, *input_builder_);
+        private_nh_.param("hybrid_integration_step", hybrid_config_.integration_step,
+                          hybrid_config_.integration_step);
+        private_nh_.param("hybrid_collision_check_step",
+                          hybrid_config_.collision_check_step,
+                          hybrid_config_.collision_check_step);
+        private_nh_.param("hybrid_xy_resolution", hybrid_config_.xy_resolution,
+                          hybrid_config_.xy_resolution);
+        private_nh_.param("hybrid_yaw_bins", hybrid_config_.yaw_bins,
+                          hybrid_config_.yaw_bins);
+        private_nh_.param("hybrid_goal_position_tolerance",
+                          hybrid_config_.goal_position_tolerance,
+                          hybrid_config_.goal_position_tolerance);
+        private_nh_.param("hybrid_goal_yaw_tolerance",
+                          hybrid_config_.goal_yaw_tolerance,
+                          hybrid_config_.goal_yaw_tolerance);
+        private_nh_.param("hybrid_reverse_cost", hybrid_config_.reverse_cost,
+                          hybrid_config_.reverse_cost);
+        private_nh_.param("hybrid_direction_switch_cost",
+                          hybrid_config_.direction_switch_cost,
+                          hybrid_config_.direction_switch_cost);
+        private_nh_.param("hybrid_max_expansions", hybrid_config_.max_expansions,
+                          hybrid_config_.max_expansions);
+        hybrid_planner_ = std::make_unique<HybridAstarPlanner>(hybrid_config_);
         initial_guess_generator_ = std::make_unique<InitialGuessGenerator>(
             initial_guess_config_, *builder_);
         nlp_solver_ = std::make_unique<NlpSolver>(solver_config_, *builder_);
@@ -517,10 +548,7 @@ private:
     bool snapshotMatchesLocked(
         const sandbox_msgs::RecoverySnapshot& snapshot) const {
         const auto& input = locked_.build.input;
-        if (!locked_.active || locked_.recovery_id != snapshot.recovery_id ||
-            input.participant_ids != snapshot.nlp_vehicle_ids) {
-            return false;
-        }
+        if (!locked_.active || locked_.recovery_id != snapshot.recovery_id) return false;
         for (const NlpVehicleInput& locked_vehicle : input.vehicles) {
             const auto* vehicle = findVehicle(snapshot, locked_vehicle.id);
             if (vehicle == nullptr || vehicle->path_gen != locked_vehicle.path_gen) {
@@ -879,31 +907,79 @@ private:
         }
 
         if (!locked_.active) {
-            OptimizationInputBuildResult build = input_builder_->build(
-                snapshot, snapshot.nlp_vehicle_ids, "auto");
-            if (build.complete) {
-                locked_.active = true;
-                locked_.recovery_id = snapshot.recovery_id;
-                locked_.frame_id = snapshot.header.frame_id;
-                locked_.build = std::move(build);
+            const std::vector<int>& cycle_ids = snapshot.deadlock_cycle_ids.empty() ?
+                snapshot.nlp_vehicle_ids : snapshot.deadlock_cycle_ids;
+            const CandidateSelectionResult selection = candidate_selector_->evaluate(
+                snapshot, cycle_ids);
+            if (!selection.complete_snapshot) {
+                ROS_WARN_THROTTLE(1.0,
+                    "[nlp_recovery][auto] waiting for a fresh stopped snapshot: %s",
+                    selection.reason.c_str());
+                return;
+            }
+            locked_.active = true;
+            locked_.recovery_id = snapshot.recovery_id;
+            locked_.frame_id = snapshot.header.frame_id;
+            for (CandidateEvaluation candidate : selection.ranked) {
+                std::ostringstream attempt;
+                attempt << "V" << candidate.vehicle_id << " N="
+                        << candidate.positive_gain_count << " G="
+                        << candidate.total_positive_gain << " worst="
+                        << candidate.worst_gain << " reason=" << candidate.reason;
+                locked_.attempts.push_back(attempt.str());
+                ROS_INFO("[nlp_recovery][candidate] %s", attempt.str().c_str());
+                if (!candidate.eligible) continue;
+                NlpVehicleInput& vehicle = candidate.build.input.vehicles.front();
+                const std::string target_key = std::to_string(candidate.vehicle_id) + "@" +
+                    std::to_string(vehicle.path_gen) + "@" +
+                    std::to_string(static_cast<long long>(
+                        std::llround(vehicle.terminal.path_s * 1000.0)));
+                if (!attempted_recovery_targets_.insert(target_key).second) {
+                    ROS_WARN("[nlp_recovery][candidate] skip repeated target %s",
+                             target_key.c_str());
+                    continue;
+                }
+                const HybridAstarResult hybrid = hybrid_planner_->plan(
+                    vehicle, candidate.build.input.static_vehicles);
+                if (!hybrid.success) {
+                    ROS_WARN("[nlp_recovery][candidate] V%d Hybrid A* failed: %s",
+                             candidate.vehicle_id, hybrid.reason.c_str());
+                    continue;
+                }
+                vehicle.reference_path = hybrid.path;
+                locked_.build = std::move(candidate.build);
                 CaseSaveResult saved;
                 const PreparedGuess prepared = prepareInitialGuess(
-                    locked_.build, locked_.build.input.valid, &saved);
+                    locked_.build, true, &saved);
                 locked_.original_initial_guess = prepared.original;
                 locked_.actual_initial_guess = prepared.actual;
                 if (saved.success) locked_.case_directory = saved.case_directory;
                 writeDebugInput(locked_.build);
-                if (locked_.actual_initial_guess.generated) {
-                    locked_.solver_result = solveAndSave(
-                        locked_.build, locked_.actual_initial_guess, saved);
-                    submitLockedTrajectory();
+                if (!locked_.actual_initial_guess.generated) {
+                    ROS_WARN("[nlp_recovery][candidate] V%d initial guess failed: %s",
+                             candidate.vehicle_id,
+                             locked_.actual_initial_guess.reason.c_str());
+                    locked_.build = OptimizationInputBuildResult{};
+                    continue;
                 }
-                ROS_WARN("[nlp_recovery][auto] locked NLP_PREP input "
-                         "participants=%zu valid=%d trigger=%s input=%s",
-                         locked_.build.input.vehicles.size(),
-                         locked_.build.input.valid,
-                         locked_.build.input.trigger_reason.c_str(),
-                         locked_.build.reason.c_str());
+                locked_.solver_result = solveAndSave(
+                    locked_.build, locked_.actual_initial_guess, saved);
+                if (!locked_.solver_result.execution_publish_eligible) {
+                    ROS_WARN("[nlp_recovery][candidate] V%d NLP failed: %s",
+                             candidate.vehicle_id,
+                             locked_.solver_result.reason.c_str());
+                    locked_.build = OptimizationInputBuildResult{};
+                    locked_.actual_initial_guess = NlpInitialGuess{};
+                    locked_.original_initial_guess = NlpInitialGuess{};
+                    locked_.solver_result = NlpSolveResult{};
+                    continue;
+                }
+                submitLockedTrajectory();
+                break;
+            }
+            if (locked_.build.input.vehicles.empty()) {
+                ROS_ERROR("[nlp_recovery][auto] bounded candidate attempts exhausted: %s",
+                          selection.reason.c_str());
             }
         }
 
@@ -1021,6 +1097,7 @@ private:
         NlpInitialGuess original_initial_guess;
         NlpInitialGuess actual_initial_guess;
         NlpSolveResult solver_result;
+        std::vector<std::string> attempts;
     };
 
     ros::NodeHandle private_nh_;
@@ -1032,10 +1109,14 @@ private:
     CorridorConfig config_;
     std::unique_ptr<CorridorBuilder> builder_;
     std::unique_ptr<OptimizationInputBuilder> input_builder_;
+    std::unique_ptr<CandidateSelector> candidate_selector_;
+    std::unique_ptr<HybridAstarPlanner> hybrid_planner_;
     std::unique_ptr<InitialGuessGenerator> initial_guess_generator_;
     std::unique_ptr<NlpSolver> nlp_solver_;
     InitialGuessConfig initial_guess_config_;
     NlpSolverConfig solver_config_;
+    CandidateSelectionConfig candidate_config_;
+    HybridAstarConfig hybrid_config_;
     OperatingMode mode_ = OperatingMode::DEBUG;
     std::string mode_name_ = "debug";
     LockedTransaction locked_;
@@ -1049,6 +1130,7 @@ private:
     NlpInitialGuess latest_debug_original_guess_;
     NlpInitialGuess latest_debug_actual_guess_;
     NlpSolveResult latest_debug_solver_result_;
+    std::set<std::string> attempted_recovery_targets_;
 };
 
 }  // namespace forklift_nlp_recovery

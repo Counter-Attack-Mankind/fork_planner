@@ -197,6 +197,12 @@ int main() {
             std::vector<int>({0, 1, 2})) {
         return fail("upstream stopped blocker was omitted from NLP participants");
     }
+    if (associated_manager.directive().deadlock_cycle_ids !=
+            std::vector<int>({1, 2}) ||
+        associated_manager.directive().frozen_vehicle_ids !=
+            std::vector<int>({0, 1, 2})) {
+        return fail("original cycle and expanded frozen set were not separated");
+    }
 
     associated_vehicles[0].mission_phase = MissionPhase::TO_A1;
     associated_vehicles[0].path_s = 0.0;
@@ -213,8 +219,8 @@ int main() {
     parked_manager.restore(associated_state);
     parked_manager.update(associated_vehicles, {}, 0.10, false);
     if (parked_manager.directive().nlp_vehicle_ids !=
-        std::vector<int>({1, 2})) {
-        return fail("vehicle parked at a slot was not removed from NLP participants");
+        std::vector<int>({0, 1, 2, 3, 4})) {
+        return fail("parked or not-yet-departed waiters were omitted from frozen obstacles");
     }
 
     DeadlockManager ordinary_stop_manager(map, config);
@@ -255,6 +261,10 @@ int main() {
         three_cycle_manager.directive().nlp_vehicle_ids !=
             std::vector<int>({2, 5, 9})) {
         return fail("non-contiguous three-vehicle cycle did not enter NLP preparation");
+    }
+    if (three_cycle_manager.directive().deadlock_cycle_ids !=
+            std::vector<int>({2, 5, 9})) {
+        return fail("three-vehicle original cycle was not retained");
     }
     RuleEngine three_cycle_engine(map, cycle_config);
     three_cycle_engine.observeDeadlock(three_cycle, 0.10, false);

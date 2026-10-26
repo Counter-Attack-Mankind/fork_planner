@@ -32,11 +32,24 @@ solver_validation_tolerance: 1.0e-3
 # A positive override is used directly. Values <= 0 use hypot(length/2, width/2).
 vehicle_radius: 0.15
 safety_margin: 0.0
-shelf_inflation_reduction: 0.05
-boundary_inset_reduction: 0.05
 expansion_step: 0.02
-seed_search_step: 0.01
-seed_search_max_offset: 0.10
 rejoin_distance: 0.80
-max_width: 2.50
-max_height: 2.00
+exit_search_step: 0.01
+cusp_clearance: 0.05
+
+# Spatial-release ranking. 0.05 m is five path samples and is large enough not
+# to count one-sample boundary noise as a recovery benefit.
+stopped_speed_tolerance: 0.01
+sweep_step: 0.01
+minimum_effective_gain: 0.05
+maximum_negative_gain: 0.02
+
+hybrid_integration_step: 0.04
+hybrid_collision_check_step: 0.01
+hybrid_xy_resolution: 0.04
+hybrid_yaw_bins: 72
+hybrid_goal_position_tolerance: 0.04
+hybrid_goal_yaw_tolerance: 0.12
+hybrid_reverse_cost: 1.15
+hybrid_direction_switch_cost: 0.20
+hybrid_max_expansions: 120000

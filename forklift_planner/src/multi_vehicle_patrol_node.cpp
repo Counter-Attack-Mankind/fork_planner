@@ -2595,22 +2595,50 @@ private:
         snapshot.retreat_path_gen = recovery.retreat_path_gen;
         snapshot.pass_path_gen = recovery.pass_path_gen;
         snapshot.retreat_attempt = recovery.retreat_attempt;
+        snapshot.deadlock_cycle_ids = recovery.deadlock_cycle_ids;
+        snapshot.frozen_vehicle_ids = recovery.frozen_vehicle_ids;
         snapshot.nlp_vehicle_ids = recovery.nlp_vehicle_ids;
         snapshot.reason = recovery.reason;
         snapshot.vehicles.reserve(agents_.size());
-        for (const auto& vehicle : agents_) {
+        for (size_t vehicle_index = 0; vehicle_index < agents_.size(); ++vehicle_index) {
+            const auto& vehicle = agents_[vehicle_index];
             sandbox_msgs::RecoveryVehicleState state;
             state.id = vehicle.id;
             state.path_gen = vehicle.path_gen;
             state.path_s = vehicle.path_s;
             state.current_speed = vehicle.current_speed;
             state.pose_valid = recoveryPose(vehicle, state.pose);
+            const ros::Time now = ros::Time::now();
+            if (cfg_.real_mode && vehicle_index < rb_last_seen_.size() &&
+                rb_last_seen_[vehicle_index] > 0.0) {
+                state.pose_stamp = ros::Time(rb_last_seen_[vehicle_index]);
+                state.pose_fresh = state.pose_valid &&
+                    (cfg_.real_pose_timeout <= 0.0 ||
+                     now.toSec() - rb_last_seen_[vehicle_index] <= cfg_.real_pose_timeout);
+            } else {
+                state.pose_stamp = now;
+                state.pose_fresh = state.pose_valid;
+            }
+            // No measured steering feedback exists in the current chassis/object
+            // interfaces. Keep it explicitly unavailable instead of presenting
+            // a path-derived value as a real measurement.
+            state.steering_valid = false;
+            state.steering_estimated = false;
+            state.steering_angle = 0.0;
             state.parked_in_slot = vehicle.parkedInSlot(
                 std::max(0.005, cfg_.path_validation_step));
             state.mode = static_cast<int>(vehicle.mode);
+            state.mission_phase = static_cast<int>(vehicle.mission_phase);
             state.action = static_cast<int>(vehicle.action);
             state.blocker_id = vehicle.blocker_id;
+            state.blocker_reason = vehicle.reason;
             state.loaded = vehicle.loaded;
+            state.slot_departure_clear_s = vehicle.slot_departure_clear_s;
+            const double departure_tolerance = std::max(0.005, cfg_.path_validation_step);
+            state.departed_source_slot =
+                vehicle.mission_phase != MissionPhase::TO_A1 ||
+                (vehicle.slot_departure_clear_s > 0.0 &&
+                 vehicle.path_s + departure_tolerance >= vehicle.slot_departure_clear_s);
             const RoughPath& path = vehicle.track.path();
             state.path.reserve(path.size());
             state.path_types.reserve(path.size());
@@ -2646,12 +2674,13 @@ private:
             reason = "IPOPT did not report success";
             return false;
         }
-        if (message.vehicles.size() != recovery.nlp_vehicle_ids.size() ||
-            message.vehicles.empty()) {
-            reason = "participant set size mismatch";
+        if (message.vehicles.size() != 1) {
+            reason = "single-vehicle recovery requires exactly one trajectory";
             return false;
         }
-        std::set<int> expected(recovery.nlp_vehicle_ids.begin(), recovery.nlp_vehicle_ids.end());
+        const std::vector<int>& cycle_ids = recovery.deadlock_cycle_ids.empty() ?
+            recovery.nlp_vehicle_ids : recovery.deadlock_cycle_ids;
+        std::set<int> expected(cycle_ids.begin(), cycle_ids.end());
         std::set<int> received;
         size_t node_count = 0;
         for (const auto& trajectory : message.vehicles) {
@@ -2718,13 +2747,14 @@ private:
                 previous_time = point.time;
             }
         }
-        if (received != expected) {
-            reason = "participant set mismatch";
+        if (received.size() != 1) {
+            reason = "selected recovery vehicle identity is incomplete";
             return false;
         }
         for (const VehicleAgent& vehicle : agents_) {
-            if (expected.count(vehicle.id) == 0 && std::abs(vehicle.current_speed) > 1e-9) {
-                reason = "non-participant is not frozen";
+            if (received.count(vehicle.id) == 0 &&
+                std::abs(vehicle.current_speed) > 1e-9) {
+                reason = "non-selected vehicle is not frozen";
                 return false;
             }
         }
@@ -2887,8 +2917,26 @@ private:
             vehicle->real_pose_valid = false;
             vehicle->reason = "nlp_recovery_rejoined";
         }
-        if (!rule_engine_->completeNlpRecovery(nlp_execution_.recovery_id)) {
-            ROS_ERROR("[NLP_FINISH] transaction completion rejected; global freeze retained");
+        // Evaluate ordinary coordination without the NLP hold overlay. Preserve
+        // the recovery state so a remaining wait cycle can start a new
+        // transaction without releasing the global freeze.
+        const auto recovery_snapshot = rule_engine_->snapshot();
+        auto ordinary_snapshot = recovery_snapshot;
+        ordinary_snapshot.deadlock.candidate = {};
+        ordinary_snapshot.deadlock.transaction = {};
+        ordinary_snapshot.deadlock.directive = {};
+        rule_engine_->restore(ordinary_snapshot, true, true);
+        rule_engine_->decide(agents_, dt);
+        if (waitingCyclePresent()) {
+            rule_engine_->restore(recovery_snapshot, true, true);
+            nlp_execution_active_ = false;
+            if (!rule_engine_->restartNlpRecovery(
+                    nlp_execution_.recovery_id, agents_,
+                    "recovery_trajectory_finished_but_wait_cycle_remains")) {
+                ROS_ERROR("[NLP_FINISH] wait cycle remains; transaction restart rejected");
+            } else {
+                ROS_WARN("[NLP_FINISH] wait cycle remains; new frozen recovery transaction created");
+            }
             return;
         }
         nlp_execution_active_ = false;
@@ -3812,6 +3860,26 @@ public:
         for (VehicleAgent& v : agents_)
             if (v.id == id) return &v;
         return nullptr;
+    }
+
+    bool waitingCyclePresent() const {
+        std::map<int, const VehicleAgent*> waiting;
+        for (const VehicleAgent& vehicle : agents_) {
+            if (vehicle.mode == VehicleMode::ACTIVE &&
+                vehicle.action == VehicleAction::STOP && vehicle.blocker_id >= 0) {
+                waiting[vehicle.id] = &vehicle;
+            }
+        }
+        for (const auto& start : waiting) {
+            std::set<int> seen;
+            const VehicleAgent* current = start.second;
+            while (current != nullptr) {
+                if (!seen.insert(current->id).second) return seen.size() >= 2;
+                const auto next = waiting.find(current->blocker_id);
+                current = next == waiting.end() ? nullptr : next->second;
+            }
+        }
+        return false;
     }
 
     // 死锁看门狗(C-第1步):跟 blocker_id 等待图找一个「持续死锁环」——环内每辆都

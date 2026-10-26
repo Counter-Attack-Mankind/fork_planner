@@ -43,6 +43,8 @@ struct RecoveryDirective {
     int pass_path_gen = -1;
     double retreat_target_s = 0.0;
     double retreat_distance = 0.0;
+    std::vector<int> deadlock_cycle_ids;
+    std::vector<int> frozen_vehicle_ids;
     std::vector<int> nlp_vehicle_ids;
     std::string reason;
 
@@ -88,6 +90,8 @@ public:
         double retreat_hold_elapsed = 0.0;
         double retreat_clear_elapsed = 0.0; //两车独立计时器，判断2周期内是否有车没有失活，则判断死锁解除
         double pass_clear_elapsed = 0.0;
+        std::vector<int> deadlock_cycle_ids;
+        std::vector<int> frozen_vehicle_ids;
         std::vector<int> nlp_vehicle_ids;
         std::string reason;
     };
@@ -120,6 +124,9 @@ public:
     Snapshot snapshot() const;
     void restore(const Snapshot& snapshot);
     bool completeNlpRecovery(uint64_t recovery_id);
+    bool restartNlpRecovery(uint64_t recovery_id,
+                            const std::vector<VehicleAgent>& vehicles,
+                            const std::string& reason);
 
 private:
 
@@ -139,7 +146,8 @@ private:
     std::vector<int> nlpVehicleIds(
         const std::vector<VehicleAgent>& vehicles,
         const std::vector<int>& deadlock_vehicle_ids) const;
-    void enterNlpRecovery(const std::vector<int>& vehicle_ids,
+    void enterNlpRecovery(const std::vector<int>& deadlock_cycle_ids,
+                          const std::vector<int>& frozen_vehicle_ids,
                           const std::string& reason, bool emit_logs);
 
     const MapParam& map_param_;

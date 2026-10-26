@@ -11,8 +11,6 @@ CorridorBuilder makeBuilder(const MapParam& map_param,
                             const std::vector<ShelfBlock>& shelves = {}) {
     CorridorConfig config;
     config.vehicle_radius = 0.15;
-    config.shelf_inflation_reduction = 0.05;
-    config.boundary_inset_reduction = 0.05;
     return CorridorBuilder(map_param, shelves, config);
 }
 

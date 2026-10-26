@@ -25,14 +25,14 @@ sandbox_msgs::RecoveryVehicleState makeVehicle(int id, double y, int path_gen) {
     vehicle.pose.x = 0.46;
     vehicle.pose.y = y;
     vehicle.pose.theta = 0.0;
-    for (const double x : {0.45, 0.85, 1.25, 1.65}) {
+    for (const double x : {0.45, 0.85, 1.25, 1.65, 2.05, 2.45}) {
         geometry_msgs::Pose2D pose;
         pose.x = x;
         pose.y = y;
         pose.theta = 0.0;
         vehicle.path.push_back(pose);
     }
-    vehicle.path_types = {0, 0, 1, 1};
+    vehicle.path_types = {0, 0, 0, 0, 0, 0};
     return vehicle;
 }
 
@@ -98,7 +98,7 @@ TEST_F(OptimizationInputTest, BuildsTwoVehicleInputAndPreservesMetadata) {
     ASSERT_TRUE(preliminary.input.valid) << preliminary.reason;
     ASSERT_EQ(preliminary.input.vehicles.size(), 2U);
 
-    EXPECT_TRUE(preliminary.input.vehicles.front().corridor.empty());
+    EXPECT_EQ(preliminary.input.vehicles.front().corridor.size(), 1U);
     const fnr::Pose2d near_center = corridor.bodyCenter(
         preliminary.input.vehicles.front().initial_state.rear_axle_pose);
     const fnr::Pose2d near_rear{
@@ -120,10 +120,10 @@ TEST_F(OptimizationInputTest, BuildsTwoVehicleInputAndPreservesMetadata) {
                      0.07);
     EXPECT_EQ(result.input.vehicles[0].path_gen, 12);
     EXPECT_EQ(result.input.vehicles[0].terminal.path_gen, 12);
-    EXPECT_EQ(result.input.vehicles[0].original_path.size(), 4U);
-    EXPECT_TRUE(result.input.vehicles[0].corridor.empty());
-    ASSERT_EQ(result.input.static_vehicles.size(), 2U);
-    EXPECT_EQ(result.input.static_vehicles.front().id, 41);
+    EXPECT_EQ(result.input.vehicles[0].original_path.size(), 6U);
+    EXPECT_EQ(result.input.vehicles[0].corridor.size(), 1U);
+    ASSERT_EQ(result.input.static_vehicles.size(), 4U);
+    EXPECT_EQ(result.input.static_vehicles.front().id, 5);
     EXPECT_DOUBLE_EQ(result.input.static_vehicles.front().length,
                      result.input.vehicles.front().parameters.length);
     EXPECT_DOUBLE_EQ(result.input.static_vehicles.front().width,

@@ -4,9 +4,8 @@
 #include <string>
 #include <vector>
 
-#include <sandbox_msgs/RecoverySnapshot.h>
-
 #include "forklift_nlp_recovery/corridor_builder.h"
+#include <sandbox_msgs/RecoverySnapshot.h>
 
 namespace forklift_nlp_recovery {
 
@@ -28,6 +27,9 @@ struct VehicleParameters {
 struct InitialMotionState {
     Pose2d rear_axle_pose;
     double longitudinal_speed = 0.0;
+    bool steering_valid = false;
+    bool steering_estimated = false;
+    double steering_angle = 0.0;
 };
 
 struct NlpVehicleInput {
@@ -38,6 +40,9 @@ struct NlpVehicleInput {
     double path_s = 0.0;
     int path_gen = -1;
     std::vector<PathPoint> original_path;
+    // Hybrid A* output used only for NLP initialization. The frozen original
+    // path remains the source of the rejoin pose and path progress.
+    std::vector<PathPoint> reference_path;
     RejoinPoint terminal;
     std::vector<Aabb> corridor;
     std::vector<Pose2d> corridor_seeds;

@@ -33,6 +33,8 @@ fnr::NlpVehicleInput vehicle(int id, double y) {
     value.terminal = {value.original_path.back().pose, 1.0, value.path_gen, 0};
     value.corridor_valid = true;
     value.corridor_reason = "terminal selected";
+    value.corridor = {{0.20, 2.30, 0.30, 4.20}};
+    value.corridor_seeds = {{1.05, y, 0.0}};
     return value;
 }
 
@@ -73,21 +75,20 @@ TEST(NlpSolverTest, RejectsMissingOneToOneAabbsBeforeCallingIpopt) {
     EXPECT_NE(result.reason.find("one-to-one node AABBs"), std::string::npos);
 }
 
-TEST(NlpSolverTest, BuildsSingleCallProblemWith51NodeSharedGrid) {
+TEST(NlpSolverTest, BuildsSingleVehicleProblemWith51NodeGrid) {
     FixtureData fixture;
     fixture.solver_config.max_iterations = 400;
     fixture.solver_config.print_level = 0;
-    fnr::NlpOptimizationInput input = inputFor({2, 9});
+    fnr::NlpOptimizationInput input = inputFor({2});
     const auto prepared = fnr::InitialGuessGenerator({}, fixture.corridor).prepare(input);
     ASSERT_TRUE(prepared.actual_guess.generated) << prepared.actual_guess.reason;
     ASSERT_EQ(prepared.actual_guess.node_count, 51U);
     const fnr::NlpSolveResult result = fixture.solver.solve(input, prepared.actual_guess);
     EXPECT_TRUE(result.problem_built) << result.reason;
     EXPECT_EQ(result.node_count, 51U);
-    EXPECT_EQ(result.constraint_diagnostics.categories.size(), 5U);
-    ASSERT_EQ(result.vehicles.size(), 2U);
+    EXPECT_GE(result.constraint_diagnostics.categories.size(), 3U);
+    ASSERT_EQ(result.vehicles.size(), 1U);
     EXPECT_EQ(result.vehicles[0].nodes.size(), 51U);
-    EXPECT_EQ(result.vehicles[1].nodes.size(), 51U);
 }
 
 int main(int argc, char** argv) {

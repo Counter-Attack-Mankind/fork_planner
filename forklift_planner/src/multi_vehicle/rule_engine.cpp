@@ -900,7 +900,10 @@ bool RuleEngine::ordinaryRecoveryControls(int vehicle_id) const {
     const RecoveryDirective& recovery = deadlock_manager_.directive();
     return recovery.active() &&
         (vehicle_id == recovery.retreat_vehicle_id ||
-         vehicle_id == recovery.pass_vehicle_id);
+         vehicle_id == recovery.pass_vehicle_id ||
+         std::find(recovery.frozen_vehicle_ids.begin(),
+                   recovery.frozen_vehicle_ids.end(), vehicle_id) !=
+             recovery.frozen_vehicle_ids.end());
 }
 
 void RuleEngine::logA1AuxiliaryRetreat(const char* event) const {
@@ -2569,11 +2572,11 @@ void RuleEngine::applyRecoveryPolicy(
 
         if (motion == RecoveryMotion::HOLD)
         {
-            const int blocker_id =
-                vehicle.id ==
-                        recovery.retreat_vehicle_id
-                    ? recovery.pass_vehicle_id
-                    : recovery.retreat_vehicle_id;
+            int blocker_id = vehicle.id == recovery.retreat_vehicle_id ?
+                recovery.pass_vehicle_id : recovery.retreat_vehicle_id;
+            if (recovery.phase == RecoveryPhase::NLP_PREP) {
+                blocker_id = vehicle.blocker_id;
+            }
 
             applyActionRequest(
                 vehicle,
@@ -2598,7 +2601,12 @@ RuleEngine::MotionOverride RuleEngine::motionOverrideFor(int vehicle_id) const
     const RecoveryDirective& recovery = deadlock_manager_.directive();
 
     // Deadlock recovery 活跃期间，recovery pair 的纵向特殊运动只由 DeadlockManager 控制。
-    const bool recovery_vehicle =   recovery.active() &&    (vehicle_id == recovery.retreat_vehicle_id ||   vehicle_id == recovery.pass_vehicle_id);
+    const bool recovery_vehicle = recovery.active() &&
+        (vehicle_id == recovery.retreat_vehicle_id ||
+         vehicle_id == recovery.pass_vehicle_id ||
+         std::find(recovery.frozen_vehicle_ids.begin(),
+                   recovery.frozen_vehicle_ids.end(), vehicle_id) !=
+             recovery.frozen_vehicle_ids.end());
     if (recovery_vehicle)
         return MotionOverride{recovery.motionFor(vehicle_id),recovery.retreat_target_s,false};
 
@@ -2688,7 +2696,10 @@ void RuleEngine::applyRecoveryDirectiveToOutput(
     { 
         if (!recovery.active()) continue;
         if (vehicle.id != recovery.retreat_vehicle_id &&
-            vehicle.id != recovery.pass_vehicle_id) continue;
+            vehicle.id != recovery.pass_vehicle_id &&
+            std::find(recovery.frozen_vehicle_ids.begin(),
+                      recovery.frozen_vehicle_ids.end(), vehicle.id) ==
+                recovery.frozen_vehicle_ids.end()) continue;
         if (recovery.motionFor(vehicle.id) == RecoveryMotion::NORMAL) {
             continue;
         }

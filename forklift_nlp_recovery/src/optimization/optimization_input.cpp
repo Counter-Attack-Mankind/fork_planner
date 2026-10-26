@@ -1,5 +1,7 @@
 #include "forklift_nlp_recovery/optimization_input.h"
 
+#include <sandbox_msgs/RecoverySnapshot.h>
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -89,8 +91,7 @@ void OptimizationInputBuilder::collectStaticVehicleCandidates(
     const std::set<int> participants(input.participant_ids.begin(),
                                      input.participant_ids.end());
     for (const auto& vehicle : snapshot.vehicles) {
-        if (participants.count(vehicle.id) != 0 || !vehicle.pose_valid ||
-            vehicle.parked_in_slot) continue;
+        if (participants.count(vehicle.id) != 0 || !vehicle.pose_valid) continue;
 
         StaticVehicleObstacle obstacle;
         obstacle.id = vehicle.id;
@@ -158,6 +159,9 @@ OptimizationInputBuildResult OptimizationInputBuilder::build(
             vehicle->pose.x, vehicle->pose.y, vehicle->pose.theta};
         input_vehicle.initial_state.longitudinal_speed =
             vehicle->current_speed;
+        input_vehicle.initial_state.steering_valid = vehicle->steering_valid;
+        input_vehicle.initial_state.steering_estimated = vehicle->steering_estimated;
+        input_vehicle.initial_state.steering_angle = vehicle->steering_angle;
         input_vehicle.path_s = vehicle->path_s;
         input_vehicle.path_gen = vehicle->path_gen;
         input_vehicle.original_path = pathFromMessage(*vehicle);

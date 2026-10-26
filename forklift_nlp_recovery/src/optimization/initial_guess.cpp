@@ -74,35 +74,33 @@ bool buildReferenceMotion(const NlpVehicleInput& vehicle, ReferenceMotion& refer
         error = vehicle.corridor_reason;
         return false;
     }
-    if (vehicle.original_path.size() < 2) {
-        error = "original path has fewer than two points";
+    const std::vector<PathPoint>& path = vehicle.reference_path.empty() ?
+        vehicle.original_path : vehicle.reference_path;
+    if (path.size() < 2) {
+        error = "initial reference path has fewer than two points";
         return false;
     }
-    for (size_t i = 0; i < vehicle.original_path.size(); ++i) {
-        const PathPoint& point = vehicle.original_path[i];
+    for (size_t i = 0; i < path.size(); ++i) {
+        const PathPoint& point = path[i];
         if (!std::isfinite(point.s) || !std::isfinite(point.pose.x) ||
             !std::isfinite(point.pose.y) || !std::isfinite(point.pose.yaw) ||
-            (i > 0 && point.s + kEpsilon < vehicle.original_path[i - 1].s)) {
-            error = "original path contains invalid or non-monotonic geometry";
+            (i > 0 && point.s + kEpsilon < path[i - 1].s)) {
+            error = "initial reference path contains invalid or non-monotonic geometry";
             return false;
         }
     }
-    const double first_s = vehicle.original_path.front().s;
-    const double last_s = vehicle.original_path.back().s;
-    if (vehicle.path_s < first_s - kEpsilon || vehicle.path_s > last_s + kEpsilon) {
-        error = "current path_s is outside the original path";
-        return false;
-    }
-    if (vehicle.terminal.path_s < vehicle.path_s - kEpsilon ||
-        vehicle.terminal.path_s > last_s + kEpsilon ||
+    const bool hybrid_reference = !vehicle.reference_path.empty();
+    reference.path_begin = hybrid_reference ? path.front().s : vehicle.path_s;
+    reference.path_end = hybrid_reference ? path.back().s : vehicle.terminal.path_s;
+    if (reference.path_begin < path.front().s - kEpsilon ||
+        reference.path_end > path.back().s + kEpsilon ||
+        reference.path_end <= reference.path_begin + kEpsilon ||
         vehicle.terminal.path_gen != vehicle.path_gen) {
-        error = "terminal does not belong to the forward portion of the frozen path";
+        error = "initial reference endpoints do not match the frozen recovery target";
         return false;
     }
-    reference.path_begin = vehicle.path_s;
-    reference.path_end = vehicle.terminal.path_s;
-    reference.projected_start = interpolatePath(vehicle.original_path, reference.path_begin);
-    const PathPoint expected_terminal = interpolatePath(vehicle.original_path, reference.path_end);
+    reference.projected_start = interpolatePath(path, reference.path_begin);
+    const PathPoint expected_terminal = interpolatePath(path, reference.path_end);
     if (poseDistance(expected_terminal.pose, vehicle.terminal.pose) > 1e-4 ||
         angleDistance(expected_terminal.pose.yaw, vehicle.terminal.pose.yaw) > 1e-4) {
         error = "terminal pose does not match terminal path_s on the frozen path";
@@ -110,12 +108,16 @@ bool buildReferenceMotion(const NlpVehicleInput& vehicle, ReferenceMotion& refer
     }
     reference.connector_length = poseDistance(vehicle.initial_state.rear_axle_pose,
                                                reference.projected_start.pose);
+    if (hybrid_reference && reference.connector_length > 1e-4) {
+        error = "Hybrid A* reference does not start at the frozen rear-axle pose";
+        return false;
+    }
     reference.path_length = reference.path_end - reference.path_begin;
     appendDirectionSegment(reference, reference.connector_length, reference.projected_start.type);
     std::vector<double> boundaries{reference.path_begin, reference.path_end};
-    for (size_t i = 1; i < vehicle.original_path.size(); ++i) {
-        if (vehicle.original_path[i - 1].type == vehicle.original_path[i].type) continue;
-        const double transition = 0.5 * (vehicle.original_path[i - 1].s + vehicle.original_path[i].s);
+    for (size_t i = 1; i < path.size(); ++i) {
+        if (path[i - 1].type == path[i].type) continue;
+        const double transition = 0.5 * (path[i - 1].s + path[i].s);
         if (transition > reference.path_begin + kEpsilon &&
             transition < reference.path_end - kEpsilon) boundaries.push_back(transition);
     }
@@ -125,7 +127,7 @@ bool buildReferenceMotion(const NlpVehicleInput& vehicle, ReferenceMotion& refer
     for (size_t i = 1; i < boundaries.size(); ++i) {
         const double midpoint = 0.5 * (boundaries[i] + boundaries[i - 1]);
         appendDirectionSegment(reference, boundaries[i] - boundaries[i - 1],
-                               interpolatePath(vehicle.original_path, midpoint).type);
+                               interpolatePath(path, midpoint).type);
     }
     reference.direction_changes = reference.segments.empty() ? 0 : reference.segments.size() - 1;
     return true;
@@ -245,6 +247,8 @@ Pose2d discCenter(const Pose2d& rear, const VehicleParameters& parameters) {
 
 void sampleReferenceNode(const NlpVehicleInput& vehicle, const ReferenceMotion& reference,
                          double progress, InitialGuessNode& node) {
+    const std::vector<PathPoint>& path = vehicle.reference_path.empty() ?
+        vehicle.original_path : vehicle.reference_path;
     if (node.index == 0) {
         node.rear_axle_pose = vehicle.initial_state.rear_axle_pose;
         node.path_s = reference.path_begin;
@@ -260,7 +264,7 @@ void sampleReferenceNode(const NlpVehicleInput& vehicle, const ReferenceMotion& 
         node.path_type = reference.projected_start.type;
     } else {
         const double path_progress = std::max(0.0, progress - reference.connector_length);
-        const PathPoint sample = interpolatePath(vehicle.original_path,
+        const PathPoint sample = interpolatePath(path,
             std::min(reference.path_end, reference.path_begin + path_progress));
         node.rear_axle_pose = sample.pose;
         node.path_s = sample.s;
@@ -304,6 +308,13 @@ void recomputeDerived(VehicleInitialGuess& guess, const NlpVehicleInput& input, 
         } else {
             node.front_steer = 0.0;
         }
+    }
+    for (size_t i = 1; i < count; ++i) {
+        if (guess.nodes[i - 1].path_type == guess.nodes[i].path_type) continue;
+        guess.nodes[i - 1].signed_speed = 0.0;
+        guess.nodes[i].signed_speed = 0.0;
+        guess.nodes[i - 1].speed_source = GuessValueSource::TERMINAL_ZERO_ASSUMPTION;
+        guess.nodes[i].speed_source = GuessValueSource::TERMINAL_ZERO_ASSUMPTION;
     }
     if (waiting_begin < count) {
         const double waiting_steer = waiting_begin > 0 ?
@@ -568,6 +579,13 @@ InitialGuessPreparationResult InitialGuessGenerator::prepare(NlpOptimizationInpu
             prepared.actual_guess.reason = original.reason;
             return prepared;
         }
+        const size_t minimum_nodes = 5 + 4 * references[i].direction_changes;
+        if (config_.node_count < minimum_nodes) {
+            original.reason = "V" + std::to_string(vehicle.id) +
+                ": initial_guess_nodes is too small for Hybrid A* direction changes";
+            prepared.actual_guess.reason = original.reason;
+            return prepared;
+        }
         maximum_time = std::max(maximum_time, estimated_times[i]);
     }
     original.node_count = config_.node_count;
@@ -617,45 +635,44 @@ InitialGuessPreparationResult InitialGuessGenerator::prepare(NlpOptimizationInpu
     for (size_t vehicle_index = 0; vehicle_index < input.vehicles.size(); ++vehicle_index) {
         NlpVehicleInput& source = input.vehicles[vehicle_index];
         VehicleInitialGuess& vehicle = actual.vehicles[vehicle_index];
-        source.corridor.clear();
-        source.corridor_seeds.clear();
+        if (source.corridor.size() != 1 || source.corridor_seeds.size() != 1) {
+            vehicle.valid = false;
+            vehicle.reason = "single recovery STC is unavailable";
+            source.corridor_valid = false;
+            source.corridor_reason = vehicle.reason;
+            success = false;
+            if (failures.tellp() > 0) failures << "; ";
+            failures << "V" << source.id << ": " << vehicle.reason;
+            continue;
+        }
+        const Aabb single_stc = source.corridor.front();
+        const Pose2d single_seed = source.corridor_seeds.front();
+        source.corridor.assign(vehicle.nodes.size(), single_stc);
+        source.corridor_seeds.assign(vehicle.nodes.size(), single_seed);
         for (size_t node = 0; node < vehicle.nodes.size(); ++node) {
             InitialGuessNode& value = vehicle.nodes[node];
-            const Pose2d requested = value.disc_center;
-            Pose2d legal = requested;
-            std::string reason;
-            if (!corridor_builder_.pointLegal(requested)) {
-                if (node == 0 || node + 1 == vehicle.nodes.size()) {
-                    reason = "fixed endpoint seed is illegal";
-                } else if (corridor_builder_.findLegalSeed(requested, legal, reason)) {
-                    value.seed_offset_x = legal.x - requested.x;
-                    value.seed_offset_y = legal.y - requested.y;
-                    value.rear_axle_pose.x += value.seed_offset_x;
-                    value.rear_axle_pose.y += value.seed_offset_y;
-                    ++vehicle.diagnostics.shifted_seed_nodes;
-                    vehicle.diagnostics.max_seed_offset = std::max(vehicle.diagnostics.max_seed_offset,
-                        std::hypot(value.seed_offset_x, value.seed_offset_y));
-                }
-            }
-            Aabb box;
-            if (!reason.empty() || !corridor_builder_.generateAabb(legal, box, reason)) {
+            const Pose2d center = value.disc_center;
+            const bool contained = center.x >= single_stc.min_x - config_.containment_tolerance &&
+                center.x <= single_stc.max_x + config_.containment_tolerance &&
+                center.y >= single_stc.min_y - config_.containment_tolerance &&
+                center.y <= single_stc.max_y + config_.containment_tolerance;
+            if (!contained) {
                 if (failures.tellp() > 0) failures << "; ";
-                failures << "V" << source.id << " node " << node << ": " << reason;
+                failures << "V" << source.id << " node " << node
+                         << ": Hybrid A* reference leaves the single STC";
                 success = false;
                 vehicle.valid = false;
-                vehicle.reason = reason;
+                vehicle.reason = "Hybrid A* reference leaves the single STC";
                 break;
             }
-            source.corridor_seeds.push_back(legal);
-            source.corridor.push_back(box);
         }
         if (source.corridor.size() == vehicle.nodes.size()) {
             recomputeDerived(vehicle, source, actual.average_dt, waiting_begins[vehicle_index]);
             vehicle.one_to_one_aabbs_valid = true;
             vehicle.valid = true;
-            vehicle.reason = "one AABB generated for every NLP node";
+            vehicle.reason = "single STC mapped to every NLP node";
             source.corridor_valid = true;
-            source.corridor_reason = "one-to-one node AABBs generated";
+            source.corridor_reason = "single STC mapped to all NLP nodes";
             updateVehicleDiagnostics(vehicle, source, actual.average_dt, config_.containment_tolerance);
         } else {
             source.corridor_valid = false;

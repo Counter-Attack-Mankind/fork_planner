@@ -16,6 +16,14 @@ int32 pass_vehicle_id
 int32 retreat_path_gen
 int32 pass_path_gen
 int32 retreat_attempt
+# Vehicles in the confirmed directed wait cycle, in cycle order.
+int32[] deadlock_cycle_ids
+# Vehicles held for this transaction. This may include upstream waiters that
+# are not members of deadlock_cycle_ids.
+int32[] frozen_vehicle_ids
+# Kept for wire/source compatibility with the original recovery prototype.
+# It is identical to frozen_vehicle_ids; the recovery optimizer must not treat
+# it as the original wait cycle.
 int32[] nlp_vehicle_ids
 string reason
 

@@ -20,8 +20,8 @@ CorridorBuilder::CorridorBuilder(const MapParam& map_param,
     const double geometric_radius = std::hypot(map_param_.vehicle_length * 0.5,
                                                map_param_.vehicle_width * 0.5);
     vehicle_radius_ = config_.vehicle_radius > 0.0 ? config_.vehicle_radius : geometric_radius;
-    boundary_clearance_ = std::max(0.0, vehicle_radius_ + config_.safety_margin - config_.boundary_inset_reduction);
-    shelf_inflation_ = std::max(0.0, vehicle_radius_ + config_.safety_margin - config_.shelf_inflation_reduction);
+    boundary_clearance_ = std::max(0.0, vehicle_radius_ + config_.safety_margin);
+    shelf_inflation_ = boundary_clearance_;
     original_shelves_.reserve(shelves.size());
     for (const ShelfBlock& shelf : shelves) {
         original_shelves_.push_back({shelf.x, shelf.x_max(), shelf.y, shelf.y_max()});
@@ -92,33 +92,36 @@ bool CorridorBuilder::aabbLegal(const Aabb& box) const {
     return true;
 }
 
-bool CorridorBuilder::generateAabb(const Pose2d& seed, Aabb& box, std::string& reason) const {
+bool CorridorBuilder::rawAabbLegal(const Aabb& box) const {
+    if (box.min_x < -kEpsilon || box.max_x > map_param_.field_width + kEpsilon ||
+        box.min_y < -kEpsilon || box.max_y > map_param_.field_height + kEpsilon) return false;
+    for (const Aabb& shelf : original_shelves_) {
+        const bool overlap = box.max_x > shelf.min_x + kEpsilon &&
+            box.min_x < shelf.max_x - kEpsilon &&
+            box.max_y > shelf.min_y + kEpsilon &&
+            box.min_y < shelf.max_y - kEpsilon;
+        if (overlap) return false;
+    }
+    return true;
+}
+
+bool CorridorBuilder::expandRawAabb(const Pose2d& seed, Aabb& raw,
+                                    std::string& reason) const {
     if (!pointLegal(seed)) {
-        std::ostringstream out;
-        out << "seed (" << seed.x << ", " << seed.y
-            << ") is inside an inflated shelf or outside the inset map boundary";
-        reason = out.str();
+        reason = "disc center seed is not legal with the configured clearance";
         return false;
     }
-    box = {seed.x, seed.x, seed.y, seed.y};
+    raw = {seed.x, seed.x, seed.y, seed.y};
     bool open[4] = {true, true, true, true};
     while (open[0] || open[1] || open[2] || open[3]) {
         for (int direction = 0; direction < 4; ++direction) {
             if (!open[direction]) continue;
-            Aabb candidate = box;
-            const double limit = direction < 2 ? config_.max_height : config_.max_width;
-            const double size = direction < 2 ? box.height() : box.width();
-            const double room = limit - size;
-            if (room <= kEpsilon) {
-                open[direction] = false;
-                continue;
-            }
-            const double delta = std::min(config_.expansion_step, room);
-            if (direction == 0) candidate.max_y += delta;
-            if (direction == 1) candidate.min_y -= delta;
-            if (direction == 2) candidate.min_x -= delta;
-            if (direction == 3) candidate.max_x += delta;
-            if (aabbLegal(candidate)) box = candidate;
+            Aabb candidate = raw;
+            if (direction == 0) candidate.max_y += config_.expansion_step;
+            if (direction == 1) candidate.min_y -= config_.expansion_step;
+            if (direction == 2) candidate.min_x -= config_.expansion_step;
+            if (direction == 3) candidate.max_x += config_.expansion_step;
+            if (rawAabbLegal(candidate)) raw = candidate;
             else open[direction] = false;
         }
     }
@@ -126,37 +129,24 @@ bool CorridorBuilder::generateAabb(const Pose2d& seed, Aabb& box, std::string& r
     return true;
 }
 
-bool CorridorBuilder::findLegalSeed(const Pose2d& requested, Pose2d& legal,
-                                    std::string& reason) const {
-    if (pointLegal(requested)) {
-        legal = requested;
-        reason.clear();
-        return true;
-    }
-    if (!(config_.seed_search_step > 0.0) || config_.seed_search_max_offset < 0.0) {
-        reason = "seed search parameters are invalid";
+bool CorridorBuilder::generateAabb(const Pose2d& seed, Aabb& box, std::string& reason) const {
+    if (!(config_.expansion_step > 0.0)) {
+        reason = "expansion_step must be positive";
         return false;
     }
-    for (double offset = config_.seed_search_step;
-         offset <= config_.seed_search_max_offset + kEpsilon; offset += config_.seed_search_step) {
-        const Pose2d candidates[] = {
-            {requested.x + offset, requested.y, requested.yaw},
-            {requested.x - offset, requested.y, requested.yaw},
-            {requested.x, requested.y + offset, requested.yaw},
-            {requested.x, requested.y - offset, requested.yaw}};
-        for (const Pose2d& candidate : candidates) {
-            if (pointLegal(candidate)) {
-                legal = candidate;
-                reason.clear();
-                return true;
-            }
-        }
+    Aabb raw;
+    if (!expandRawAabb(seed, raw, reason)) return false;
+    box = {raw.min_x + boundary_clearance_, raw.max_x - boundary_clearance_,
+           raw.min_y + boundary_clearance_, raw.max_y - boundary_clearance_};
+    if (box.min_x > box.max_x || box.min_y > box.max_y ||
+        seed.x < box.min_x - kEpsilon || seed.x > box.max_x + kEpsilon ||
+        seed.y < box.min_y - kEpsilon || seed.y > box.max_y + kEpsilon ||
+        !aabbLegal(box)) {
+        reason = "expanded free-space AABB cannot contain the fixed disc center after inset";
+        return false;
     }
-    std::ostringstream out;
-    out << "no legal cardinal seed within " << config_.seed_search_max_offset
-        << " m of (" << requested.x << ", " << requested.y << ")";
-    reason = out.str();
-    return false;
+    reason.clear();
+    return true;
 }
 
 std::vector<PathPoint> CorridorBuilder::parameterizePath(
@@ -191,7 +181,6 @@ PathPoint CorridorBuilder::interpolate(const std::vector<PathPoint>& path, doubl
 
 CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<PathPoint>& path,
                                       double current_s, int path_gen) const {
-    (void)start;
     CorridorResult result;
     if (path.size() < 2) {
         result.reason = "path has fewer than two points";
@@ -202,9 +191,65 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
         result.reason = "current path_s is outside the frozen path";
         return result;
     }
-    const double terminal_s = std::min(current_s + config_.rejoin_distance, path.back().s);
+    const Pose2d center = bodyCenter(start);
+    Aabb stc;
+    if (!generateAabb(center, stc, result.reason)) return result;
+    const auto inside = [&](double s) {
+        const Pose2d sample = bodyCenter(interpolate(path, s).pose);
+        return sample.x >= stc.min_x - kEpsilon && sample.x <= stc.max_x + kEpsilon &&
+               sample.y >= stc.min_y - kEpsilon && sample.y <= stc.max_y + kEpsilon;
+    };
+    if (!inside(current_s)) {
+        result.reason = "current body-disc center is outside the generated STC";
+        return result;
+    }
+    const double step = std::max(1e-4, std::min(config_.exit_search_step,
+                                                map_param_.path_resolution));
+    double inside_s = current_s;
+    double outside_s = -1.0;
+    for (double s = std::min(path.back().s, current_s + step);
+         s <= path.back().s + kEpsilon; s = std::min(path.back().s, s + step)) {
+        if (!inside(s)) {
+            outside_s = s;
+            break;
+        }
+        inside_s = s;
+        if (s >= path.back().s - kEpsilon) break;
+    }
+    if (outside_s < 0.0) {
+        result.reason = "frozen path has no body-center exit from the single STC";
+        return result;
+    }
+    for (int iteration = 0; iteration < 24; ++iteration) {
+        const double mid = 0.5 * (inside_s + outside_s);
+        if (inside(mid)) inside_s = mid;
+        else outside_s = mid;
+    }
+    const double terminal_s = inside_s - config_.rejoin_distance;
+    if (terminal_s <= current_s + step) {
+        result.reason = "STC exit does not leave the configured rejoin distance";
+        return result;
+    }
     const PathPoint terminal = interpolate(path, terminal_s);
+    const Pose2d terminal_center = bodyCenter(terminal.pose);
+    const double face_margin = std::min({terminal_center.x - stc.min_x,
+        stc.max_x - terminal_center.x, terminal_center.y - stc.min_y,
+        stc.max_y - terminal_center.y});
+    if (face_margin <= kEpsilon) {
+        result.reason = "rejoin terminal has no positive STC face margin";
+        return result;
+    }
+    for (size_t i = 1; i < path.size(); ++i) {
+        if (path[i - 1].type == path[i].type) continue;
+        const double cusp_s = 0.5 * (path[i - 1].s + path[i].s);
+        if (std::abs(cusp_s - terminal_s) < config_.cusp_clearance) {
+            result.reason = "rejoin terminal is too close to a direction change";
+            return result;
+        }
+    }
     result.terminal = {terminal.pose, terminal.s, path_gen, terminal.type};
+    result.boxes.push_back(stc);
+    result.seeds.push_back(center);
     result.success = true;
     result.reason = "ok";
     return result;

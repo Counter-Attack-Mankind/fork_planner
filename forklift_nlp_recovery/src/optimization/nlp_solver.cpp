@@ -111,6 +111,19 @@ casadi::MX squaredDistance(const casadi::MX& first, const casadi::MX& second) {
     return dx * dx + dy * dy;
 }
 
+casadi::MX squaredDistanceToObb(const casadi::MX& center,
+                                const StaticVehicleObstacle& obstacle) {
+    const casadi::MX dx = center(0) - obstacle.disc_center.x;
+    const casadi::MX dy = center(1) - obstacle.disc_center.y;
+    const double c = std::cos(obstacle.rear_axle_pose.yaw);
+    const double s = std::sin(obstacle.rear_axle_pose.yaw);
+    const casadi::MX local_x = c * dx + s * dy;
+    const casadi::MX local_y = -s * dx + c * dy;
+    const casadi::MX outside_x = fmax(fabs(local_x) - obstacle.length * 0.5, 0.0);
+    const casadi::MX outside_y = fmax(fabs(local_y) - obstacle.width * 0.5, 0.0);
+    return outside_x * outside_x + outside_y * outside_y;
+}
+
 std::string yamlQuote(const std::string& value) {
     std::string escaped;
     escaped.reserve(value.size() + 2);
@@ -172,9 +185,10 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
         result.reason = "valid optimization input and generated initial guess are required";
         return result;
     }
-    if (input.vehicles.empty() || initial_guess.node_count < 2 ||
+    if (input.vehicles.size() != 1 || initial_guess.vehicles.size() != 1 ||
+        initial_guess.node_count < 2 ||
         initial_guess.total_time <= 0.0) {
-        result.reason = "empty vehicle set or invalid common time grid";
+        result.reason = "single active vehicle and a valid time grid are required";
         return result;
     }
     if (config_.min_time_scale <= 0.0 ||
@@ -263,6 +277,10 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                 lower_bounds[base + 1] = upper_bounds[base + 1] = start.y;
                 lower_bounds[base + 2] = upper_bounds[base + 2] = start.yaw;
                 lower_bounds[base + 3] = upper_bounds[base + 3] = 0.0;
+                if (vehicle.initial_state.steering_valid) {
+                    lower_bounds[base + 4] = upper_bounds[base + 4] =
+                        vehicle.initial_state.steering_angle;
+                }
             } else if (node + 1 == nodes) {
                 lower_bounds[base] = upper_bounds[base] = vehicle.terminal.pose.x;
                 lower_bounds[base + 1] = upper_bounds[base + 1] = vehicle.terminal.pose.y;
@@ -369,15 +387,12 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
     }
     for (const SymbolicVehicle& vehicle : symbolic_vehicles) {
         for (const StaticVehicleObstacle& obstacle : input.static_vehicles) {
-            const double required = vehicle.input->parameters.disc_radius +
-                                    obstacle.disc_radius;
-            const casadi::DM fixed_center(std::vector<double>{obstacle.disc_center.x,
-                                                               obstacle.disc_center.y});
+            const double required = vehicle.input->parameters.disc_radius;
             for (size_t node = 0; node < nodes; ++node) {
                 const casadi::MX center = symbolicCenter(
                     vehicle.state(casadi::Slice(), node),
                     vehicle.input->parameters.rear_axle_to_center);
-                constraints.add(squaredDistance(center, fixed_center),
+                constraints.add(squaredDistanceToObb(center, obstacle),
                     required * required, kInfinity,
                     {NlpConstraintCategory::STATIC_DISC, vehicle.input->id,
                      obstacle.id, node, "node", required});
@@ -386,8 +401,8 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                     vehicle.state(casadi::Slice(), node),
                     vehicle.control(casadi::Slice(), node), dt * 0.5,
                     vehicle.input->parameters.wheel_base);
-                constraints.add(squaredDistance(symbolicCenter(
-                    midpoint, vehicle.input->parameters.rear_axle_to_center), fixed_center),
+                constraints.add(squaredDistanceToObb(symbolicCenter(
+                    midpoint, vehicle.input->parameters.rear_axle_to_center), obstacle),
                     required * required, kInfinity,
                     {NlpConstraintCategory::STATIC_DISC, vehicle.input->id,
                      obstacle.id, node, "midpoint", required});
@@ -546,7 +561,7 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << "total_time: " << result.total_time << '\n'
            << "average_dt: " << result.average_dt << '\n'
            << "collision_models:\n"
-           << "  optimization_constraints: body_center_discs\n"
+           << "  optimization_constraints: active_disc_static_obb\n"
            << "  independent_validation: obb_sat\n"
            << "validation:\n"
            << "  collision_geometry: obb_sat\n"

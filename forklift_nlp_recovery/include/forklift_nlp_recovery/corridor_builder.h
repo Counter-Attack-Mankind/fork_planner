@@ -38,15 +38,11 @@ struct PointLegalityViolation {
 };
 
 struct CorridorConfig {
-    double boundary_inset_reduction = 0.0;
     double vehicle_radius = 0.0;
-    double shelf_inflation_reduction = 0.0;
     double expansion_step = 0.02;
-    double seed_search_step = 0.01;
-    double seed_search_max_offset = 0.10;
     double rejoin_distance = 0.80;
-    double max_width = 2.50;
-    double max_height = 2.00;
+    double exit_search_step = 0.01;
+    double cusp_clearance = 0.05;
     double safety_margin = 0.0;
 };
 
@@ -74,6 +70,8 @@ public:
     double vehicleRadius() const { return vehicle_radius_; }
     double boundaryClearance() const { return boundary_clearance_; }
     double shelfInflation() const { return shelf_inflation_; }
+    double fieldWidth() const { return map_param_.field_width; }
+    double fieldHeight() const { return map_param_.field_height; }
     const std::vector<Aabb>& originalShelves() const {return original_shelves_;}
 
     Pose2d bodyCenter(const Pose2d& rear_axle_pose) const;
@@ -83,8 +81,6 @@ public:
                                 PointLegalityViolation& violation) const;
     bool aabbLegal(const Aabb& box) const;
     bool generateAabb(const Pose2d& seed, Aabb& box, std::string& reason) const;
-    bool findLegalSeed(const Pose2d& requested, Pose2d& legal,
-                       std::string& reason) const;
     // start and path are rear-axle poses; only internal geometry is body-centered.
     CorridorResult build(const Pose2d& start, const std::vector<PathPoint>& path,
                          double current_s, int path_gen) const;
@@ -94,6 +90,8 @@ public:
 
 private:
     PathPoint interpolate(const std::vector<PathPoint>& path, double s) const;
+    bool rawAabbLegal(const Aabb& box) const;
+    bool expandRawAabb(const Pose2d& seed, Aabb& raw, std::string& reason) const;
 
     MapParam map_param_;
     CorridorConfig config_;
