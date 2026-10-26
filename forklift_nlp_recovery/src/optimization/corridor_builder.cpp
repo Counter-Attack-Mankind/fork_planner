@@ -8,6 +8,7 @@ namespace forklift_nlp_recovery {
 namespace {
 
 constexpr double kEpsilon = 1e-9;
+constexpr double kMapXExtension = 0.01;  // 左右边界各外扩 1 cm
 
 double normalizeAngle(double angle) { return std::atan2(std::sin(angle), std::cos(angle)); }
 
@@ -52,8 +53,8 @@ bool CorridorBuilder::pointLegal(const Pose2d& point) const {
 bool CorridorBuilder::diagnosePointViolation(
     const Pose2d& point, PointLegalityViolation& violation) const {
     violation = PointLegalityViolation{};
-    const double min_x = boundary_clearance_;
-    const double max_x = map_param_.field_width - boundary_clearance_;
+    const double min_x = -kMapXExtension + boundary_clearance_;
+    const double max_x = map_param_.field_width + kMapXExtension - boundary_clearance_;
     const double min_y = boundary_clearance_;
     const double max_y = map_param_.field_height - boundary_clearance_;
     const double outside_x = std::max({min_x - point.x, point.x - max_x, 0.0});
@@ -87,8 +88,8 @@ bool CorridorBuilder::diagnosePointViolation(
 }
 
 bool CorridorBuilder::aabbLegal(const Aabb& box) const {
-    if (box.min_x < boundary_clearance_ - kEpsilon ||
-        box.max_x > map_param_.field_width - boundary_clearance_ + kEpsilon ||
+    if (box.min_x < -kMapXExtension + boundary_clearance_ - kEpsilon ||
+        box.max_x > map_param_.field_width + kMapXExtension - boundary_clearance_ + kEpsilon ||
         box.min_y < boundary_clearance_ - kEpsilon ||
         box.max_y > map_param_.field_height - boundary_clearance_ + kEpsilon) return false;
     for (const Aabb& shelf : original_shelves_) {
@@ -103,7 +104,7 @@ bool CorridorBuilder::aabbLegal(const Aabb& box) const {
 }
 
 bool CorridorBuilder::rawAabbLegal(const Aabb& box) const {
-    if (box.min_x < -kEpsilon || box.max_x > map_param_.field_width + kEpsilon ||
+    if (box.min_x < -kMapXExtension - kEpsilon ||  box.max_x > map_param_.field_width + kMapXExtension + kEpsilon ||
         box.min_y < -kEpsilon || box.max_y > map_param_.field_height + kEpsilon) return false;
     for (const Aabb& shelf : original_shelves_) {
         const bool overlap = box.max_x > shelf.min_x + kEpsilon &&
