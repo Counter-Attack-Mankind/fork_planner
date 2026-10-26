@@ -33,7 +33,6 @@ solver_validation_tolerance: 1.0e-3
 vehicle_radius: 0.15
 safety_margin: 0.0
 expansion_step: 0.02
-rejoin_distance: 0.80
 exit_search_step: 0.01
 cusp_clearance: 0.05
 

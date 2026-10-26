@@ -40,7 +40,6 @@ struct PointLegalityViolation {
 struct CorridorConfig {
     double vehicle_radius = 0.0;
     double expansion_step = 0.02;
-    double rejoin_distance = 0.80;
     double exit_search_step = 0.01;
     double cusp_clearance = 0.05;
     double safety_margin = 0.0;

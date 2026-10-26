@@ -225,20 +225,9 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
         if (inside(mid)) inside_s = mid;
         else outside_s = mid;
     }
-    const double terminal_s = inside_s - config_.rejoin_distance;
-    if (terminal_s <= current_s + step) {
-        result.reason = "STC exit does not leave the configured rejoin distance";
-        return result;
-    }
+    const double terminal_s = inside_s;
     const PathPoint terminal = interpolate(path, terminal_s);
     const Pose2d terminal_center = bodyCenter(terminal.pose);
-    const double face_margin = std::min({terminal_center.x - stc.min_x,
-        stc.max_x - terminal_center.x, terminal_center.y - stc.min_y,
-        stc.max_y - terminal_center.y});
-    if (face_margin <= kEpsilon) {
-        result.reason = "rejoin terminal has no positive STC face margin";
-        return result;
-    }
     for (size_t i = 1; i < path.size(); ++i) {
         if (path[i - 1].type == path[i].type) continue;
         const double cusp_s = 0.5 * (path[i - 1].s + path[i].s);

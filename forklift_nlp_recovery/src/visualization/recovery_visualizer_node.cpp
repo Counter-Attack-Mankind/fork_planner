@@ -171,8 +171,6 @@ public:
         private_nh_.param("vehicle_radius", config_.vehicle_radius,
                           config_.vehicle_radius);
         private_nh_.param("expansion_step", config_.expansion_step, config_.expansion_step);
-        private_nh_.param("rejoin_distance", config_.rejoin_distance,
-                          config_.rejoin_distance);
         private_nh_.param("exit_search_step", config_.exit_search_step,
                           config_.exit_search_step);
         private_nh_.param("cusp_clearance", config_.cusp_clearance,
