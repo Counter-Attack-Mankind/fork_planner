@@ -44,6 +44,11 @@ struct NlpVehicleInput {
     // path remains the source of the rejoin pose and path progress.
     std::vector<PathPoint> reference_path;
     RejoinPoint terminal;
+    bool raw_aabb_valid = false;
+    Aabb raw_aabb;
+    bool stc_valid = false;
+    Aabb safe_stc;
+    bool terminal_valid = false;
     std::vector<Aabb> corridor;
     std::vector<Pose2d> corridor_seeds;
     bool corridor_valid = false;

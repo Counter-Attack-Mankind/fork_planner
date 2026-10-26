@@ -38,11 +38,9 @@ struct PointLegalityViolation {
 };
 
 struct CorridorConfig {
-    double vehicle_radius = 0.0;
     double expansion_step = 0.02;
     double exit_search_step = 0.01;
     double cusp_clearance = 0.05;
-    double safety_margin = 0.0;
 };
 
 struct RejoinPoint {
@@ -55,6 +53,11 @@ struct RejoinPoint {
 struct CorridorResult {
     bool success = false;
     std::string reason;
+    bool raw_aabb_valid = false;
+    Aabb raw_aabb;
+    bool stc_valid = false;
+    Aabb safe_stc;
+    bool terminal_valid = false;
     std::vector<Aabb> boxes;
     std::vector<Pose2d> seeds;  // body-center seeds used by AABB geometry
     RejoinPoint terminal;
@@ -82,7 +85,7 @@ public:
     bool generateAabb(const Pose2d& seed, Aabb& box, std::string& reason) const;
     // start and path are rear-axle poses; only internal geometry is body-centered.
     CorridorResult build(const Pose2d& start, const std::vector<PathPoint>& path,
-                         double current_s, int path_gen) const;
+                         double current_s, int path_gen, int vehicle_id = -1) const;
 
     static std::vector<PathPoint> parameterizePath(
         const std::vector<Pose2d>& poses, const std::vector<uint8_t>& types);

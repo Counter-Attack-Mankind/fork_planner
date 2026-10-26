@@ -147,12 +147,6 @@ OptimizationInputBuildResult OptimizationInputBuilder::build(
                                         " has no valid rear-axle pose");
             continue;
         }
-        if (vehicle->path.size() < 2) {
-            structural_errors.push_back("participant V" + std::to_string(id) +
-                                        " has fewer than two path points");
-            continue;
-        }
-
         NlpVehicleInput input_vehicle;
         input_vehicle.id = id;
         input_vehicle.initial_state.rear_axle_pose = {
@@ -170,9 +164,14 @@ OptimizationInputBuildResult OptimizationInputBuilder::build(
         const CorridorResult corridor = corridor_builder_.build(
             input_vehicle.initial_state.rear_axle_pose,
             input_vehicle.original_path, input_vehicle.path_s,
-            input_vehicle.path_gen);
+            input_vehicle.path_gen, id);
         input_vehicle.corridor_valid = corridor.success;
         input_vehicle.corridor_reason = corridor.reason;
+        input_vehicle.raw_aabb_valid = corridor.raw_aabb_valid;
+        input_vehicle.raw_aabb = corridor.raw_aabb;
+        input_vehicle.stc_valid = corridor.stc_valid;
+        input_vehicle.safe_stc = corridor.safe_stc;
+        input_vehicle.terminal_valid = corridor.terminal_valid;
         input_vehicle.terminal = corridor.terminal;
         input_vehicle.corridor = corridor.boxes;
         input_vehicle.corridor_seeds = corridor.seeds;
@@ -246,9 +245,26 @@ bool writeOptimizationInputDebugFile(const OptimizationInputBuildResult& result,
         out << "    path_gen: " << vehicle.path_gen << "\n";
         out << "    corridor_valid: " << vehicle.corridor_valid << "\n";
         out << "    corridor_reason: " << quoted(vehicle.corridor_reason) << "\n";
-        out << "    terminal_rear_axle: ";
-        writePose(out, vehicle.terminal.pose);
-        out << "\n    terminal_path_s: " << vehicle.terminal.path_s << "\n";
+        out << "    raw_aabb_valid: " << vehicle.raw_aabb_valid << "\n";
+        out << "    stc_valid: " << vehicle.stc_valid << "\n";
+        out << "    terminal_valid: " << vehicle.terminal_valid << "\n";
+        if (vehicle.raw_aabb_valid) {
+            out << "    raw_aabb: {min_x: " << vehicle.raw_aabb.min_x
+                << ", max_x: " << vehicle.raw_aabb.max_x
+                << ", min_y: " << vehicle.raw_aabb.min_y
+                << ", max_y: " << vehicle.raw_aabb.max_y << "}\n";
+        }
+        if (vehicle.stc_valid) {
+            out << "    safe_stc: {min_x: " << vehicle.safe_stc.min_x
+                << ", max_x: " << vehicle.safe_stc.max_x
+                << ", min_y: " << vehicle.safe_stc.min_y
+                << ", max_y: " << vehicle.safe_stc.max_y << "}\n";
+        }
+        if (vehicle.terminal_valid) {
+            out << "    terminal_rear_axle: ";
+            writePose(out, vehicle.terminal.pose);
+            out << "\n    terminal_path_s: " << vehicle.terminal.path_s << "\n";
+        }
         out << "    terminal_path_gen: " << vehicle.terminal.path_gen << "\n";
         out << "    terminal_path_type: "
             << static_cast<int>(vehicle.terminal.type) << "\n";

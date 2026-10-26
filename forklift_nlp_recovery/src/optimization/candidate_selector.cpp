@@ -173,8 +173,7 @@ CandidateSelectionResult CandidateSelector::evaluate(
     std::vector<double> before(deadlock_cycle_ids.size(), 0.0);
     for (size_t i = 0; i < deadlock_cycle_ids.size(); ++i) {
         const auto* vehicle = findVehicle(snapshot, deadlock_cycle_ids[i]);
-        if (vehicle == nullptr || !vehicle->pose_valid || !vehicle->pose_fresh ||
-            vehicle->path.size() < 2) {
+        if (vehicle == nullptr || !vehicle->pose_valid || !vehicle->pose_fresh) {
             result.reason = "deadlock cycle snapshot is incomplete or stale";
             return result;
         }

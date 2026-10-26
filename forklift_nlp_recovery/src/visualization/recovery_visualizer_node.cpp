@@ -168,14 +168,11 @@ public:
         private_nh_.param("solver_validation_tolerance",
                           solver_config_.validation_tolerance,
                           solver_config_.validation_tolerance);
-        private_nh_.param("vehicle_radius", config_.vehicle_radius,
-                          config_.vehicle_radius);
         private_nh_.param("expansion_step", config_.expansion_step, config_.expansion_step);
         private_nh_.param("exit_search_step", config_.exit_search_step,
                           config_.exit_search_step);
         private_nh_.param("cusp_clearance", config_.cusp_clearance,
                           config_.cusp_clearance);
-        private_nh_.param("safety_margin", config_.safety_margin, config_.safety_margin);
         builder_ = std::make_unique<CorridorBuilder>(
             map_param_, map_->shelf_blocks(), config_);
         VehicleParameters vehicle_parameters;
@@ -431,20 +428,9 @@ private:
             markers.markers.push_back(cube);
             ++id;
         }
-        id = 0;
-
-        for (const auto& shelf : builder_->originalShelves()) 
-            addRoundedRectangle(markers,"shelves_inflated",id++,shelf,builder_->shelfInflation(),0.09,0.012,color(0.95f, 0.15f, 0.15f, 0.9f));
-
-
         const Aabb field{0.0, map_param_.field_width, 0.0, map_param_.field_height};
-        const double c = builder_->boundaryClearance();
-        const Aabb inset{c, map_param_.field_width - c,
-                         c, map_param_.field_height - c};
         addRectangle(markers, "map_boundary", 0, field, 0.02, 0.02,
                      color(0.1f, 0.1f, 0.1f, 1.0f));
-        addRectangle(markers, "map_boundary_inset", 0, inset, 0.03, 0.01,
-                     color(0.95f, 0.45f, 0.05f, 0.9f));
     }
 
     void addVehicleAnalysis(visualization_msgs::MarkerArray& markers,
@@ -476,6 +462,26 @@ private:
         }
         markers.markers.push_back(path_marker);
 
+        if (vehicle.raw_aabb_valid) {
+            addRectangle(markers, name + "_raw_aabb", id_offset,
+                         vehicle.raw_aabb, 0.14, 0.025,
+                         color(0.0f, 0.75f, 1.0f, 1.0f));
+            addText(markers, name + "_raw_aabb_text", id_offset,
+                    (vehicle.raw_aabb.min_x + vehicle.raw_aabb.max_x) * 0.5,
+                    (vehicle.raw_aabb.min_y + vehicle.raw_aabb.max_y) * 0.5,
+                    0.17, "V" + std::to_string(vehicle.id) + " raw AABB",
+                    color(0.0f, 0.75f, 1.0f, 1.0f), 0.055);
+        }
+        if (vehicle.stc_valid) {
+            addRectangle(markers, name + "_safe_stc", id_offset,
+                         vehicle.safe_stc, 0.16, 0.025,
+                         color(0.85f, 0.1f, 0.95f, 1.0f));
+            addText(markers, name + "_safe_stc_text", id_offset,
+                    (vehicle.safe_stc.min_x + vehicle.safe_stc.max_x) * 0.5,
+                    (vehicle.safe_stc.min_y + vehicle.safe_stc.max_y) * 0.5,
+                    0.19, "V" + std::to_string(vehicle.id) + " safe STC",
+                    color(0.85f, 0.1f, 0.95f, 1.0f), 0.055);
+        }
         if (!vehicle.corridor_valid) {
             addText(markers, name + "_failure", id_offset, start.x, start.y + 0.15, 0.3,
                     name + " FAILED: " + vehicle.corridor_reason,
@@ -484,15 +490,7 @@ private:
                               name.c_str(), vehicle.corridor_reason.c_str());
             return;
         }
-        for (size_t i = 0; i < vehicle.corridor.size(); ++i) {
-            addRectangle(markers, name + "_aabb", id_offset + static_cast<int>(i),
-                         vehicle.corridor[i], 0.15, 0.018, rgba);
-            const auto& box = vehicle.corridor[i];
-            addText(markers, name + "_aabb_id", id_offset + static_cast<int>(i),
-                    (box.min_x + box.max_x) * 0.5,
-                    (box.min_y + box.max_y) * 0.5, 0.18,
-                    name + "[" + std::to_string(i) + "]", rgba, 0.055);
-        }
+        if (!vehicle.terminal_valid) return;
         addSolidPoint(markers, name + "_terminal_point", id_offset,
                       vehicle.terminal.pose, color(0.0f, 1.0f, 0.0f, 1.0f));
         addArrow(markers, name + "_terminal_arrow", id_offset,
@@ -545,9 +543,8 @@ private:
 
     bool snapshotMatchesLocked(
         const sandbox_msgs::RecoverySnapshot& snapshot) const {
-        const auto& input = locked_.build.input;
         if (!locked_.active || locked_.recovery_id != snapshot.recovery_id) return false;
-        for (const NlpVehicleInput& locked_vehicle : input.vehicles) {
+        for (const NlpVehicleInput& locked_vehicle : locked_.geometry_vehicles) {
             const auto* vehicle = findVehicle(snapshot, locked_vehicle.id);
             if (vehicle == nullptr || vehicle->path_gen != locked_vehicle.path_gen) {
                 return false;
@@ -919,6 +916,10 @@ private:
             locked_.recovery_id = snapshot.recovery_id;
             locked_.frame_id = snapshot.header.frame_id;
             for (CandidateEvaluation candidate : selection.ranked) {
+                if (candidate.build.input.vehicles.size() == 1) {
+                    locked_.geometry_vehicles.push_back(
+                        candidate.build.input.vehicles.front());
+                }
                 std::ostringstream attempt;
                 attempt << "V" << candidate.vehicle_id << " N="
                         << candidate.positive_gain_count << " G="
@@ -945,7 +946,7 @@ private:
                     continue;
                 }
                 vehicle.reference_path = hybrid.path;
-                locked_.build = std::move(candidate.build);
+                locked_.build = candidate.build;
                 CaseSaveResult saved;
                 const PreparedGuess prepared = prepareInitialGuess(
                     locked_.build, true, &saved);
@@ -995,30 +996,37 @@ private:
         }
 
         for (const auto& vehicle : snapshot.vehicles) {
-            const auto& ids = locked_.build.input.participant_ids;
-            if (std::find(ids.begin(), ids.end(), vehicle.id) == ids.end()) {
+            const auto found = std::find_if(
+                locked_.geometry_vehicles.begin(), locked_.geometry_vehicles.end(),
+                [&](const NlpVehicleInput& geometry) { return geometry.id == vehicle.id; });
+            if (found == locked_.geometry_vehicles.end()) {
                 addOrangeVehicle(markers, vehicle);
             }
         }
         std::ostringstream ids;
         const auto& input = locked_.build.input;
-        for (size_t i = 0; i < input.vehicles.size(); ++i) {
+        for (size_t i = 0; i < locked_.geometry_vehicles.size(); ++i) {
             if (i != 0) ids << ",";
-            ids << "V" << input.vehicles[i].id;
-            addVehicleAnalysis(markers, input.vehicles[i],
-                               "nlp_V" + std::to_string(input.vehicles[i].id),
+            const NlpVehicleInput& vehicle = locked_.geometry_vehicles[i];
+            ids << "V" << vehicle.id;
+            addVehicleAnalysis(markers, vehicle,
+                               "nlp_V" + std::to_string(vehicle.id),
                                1000 + static_cast<int>(i) * 1000,
                                analysisColor(i));
         }
+        const std::string input_reason = locked_.build.input.vehicles.empty() ?
+            "geometry-only" : locked_.build.reason;
         addText(markers, "auto_status", 0, map_param_.field_width * 0.5,
                 map_param_.field_height - 0.12, 0.3,
-                "NLP_PREP locked: " + ids.str() + " " + input.trigger_reason +
-                    " input=" + locked_.build.reason,
+                "NLP_PREP geometry: " + ids.str() + " " + snapshot.reason +
+                    " input=" + input_reason,
                 color(1.0f, 0.2f, 0.2f, 1.0f), 0.06);
-        appendRecoveryStageMarkers(markers, map_param_.frame_id,
-            map_param_.field_width, map_param_.field_height,
-            initial_guess_config_.containment_tolerance, input,
-            locked_.original_initial_guess, locked_.actual_initial_guess, "auto");
+        if (!input.vehicles.empty()) {
+            appendRecoveryStageMarkers(markers, map_param_.frame_id,
+                map_param_.field_width, map_param_.field_height,
+                initial_guess_config_.containment_tolerance, input,
+                locked_.original_initial_guess, locked_.actual_initial_guess, "auto");
+        }
         addOptimizedResult(markers, locked_.solver_result, "auto");
     }
 
@@ -1037,7 +1045,7 @@ private:
                                identity != last_debug_case_identity_;
         CaseSaveResult saved;
         PreparedGuess prepared;
-        if (build.complete) {
+        if (build.complete && build.input.valid) {
             prepared = prepareInitialGuess(build, save_case, &saved);
             latest_debug_original_guess_ = prepared.original;
             latest_debug_actual_guess_ = prepared.actual;
@@ -1096,6 +1104,7 @@ private:
         NlpInitialGuess actual_initial_guess;
         NlpSolveResult solver_result;
         std::vector<std::string> attempts;
+        std::vector<NlpVehicleInput> geometry_vehicles;
     };
 
     ros::NodeHandle private_nh_;

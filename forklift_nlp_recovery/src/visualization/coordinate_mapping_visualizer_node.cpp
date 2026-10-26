@@ -200,10 +200,6 @@ public:
         frame_ = map_param.frame_id;
 
         CorridorConfig corridor_config;
-        private_nh_.param("vehicle_radius", corridor_config.vehicle_radius,
-                          corridor_config.vehicle_radius);
-        private_nh_.param("safety_margin", corridor_config.safety_margin,
-                          corridor_config.safety_margin);
         private_nh_.param("expansion_step", corridor_config.expansion_step,
                           corridor_config.expansion_step);
         private_nh_.param("route", route_, std::string("a1_to_b"));

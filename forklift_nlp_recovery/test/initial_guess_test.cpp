@@ -60,7 +60,6 @@ fnr::NlpOptimizationInput inputFor(const std::vector<fnr::NlpVehicleInput>& vehi
 fnr::CorridorBuilder builder(const std::vector<ShelfBlock>& shelves = {}) {
     MapParam map;
     fnr::CorridorConfig config;
-    config.vehicle_radius = 0.05;
     return fnr::CorridorBuilder(map, shelves, config);
 }
 

@@ -11,16 +11,26 @@ constexpr double kEpsilon = 1e-9;
 
 double normalizeAngle(double angle) { return std::atan2(std::sin(angle), std::cos(angle)); }
 
+std::string vehicleLabel(int vehicle_id) {
+    return vehicle_id >= 0 ? "V" + std::to_string(vehicle_id) : "V?";
+}
+
+std::string aabbText(const Aabb& box) {
+    std::ostringstream out;
+    out << "[" << box.min_x << "," << box.max_x << "]x["
+        << box.min_y << "," << box.max_y << "]";
+    return out.str();
+}
+
 }  // namespace
 
 CorridorBuilder::CorridorBuilder(const MapParam& map_param,
                                  const std::vector<ShelfBlock>& shelves,
                                  const CorridorConfig& config)
     : map_param_(map_param), config_(config) {
-    const double geometric_radius = std::hypot(map_param_.vehicle_length * 0.5,
-                                               map_param_.vehicle_width * 0.5);
-    vehicle_radius_ = config_.vehicle_radius > 0.0 ? config_.vehicle_radius : geometric_radius;
-    boundary_clearance_ = std::max(0.0, vehicle_radius_ + config_.safety_margin);
+    vehicle_radius_ = std::hypot(map_param_.vehicle_length * 0.5,
+                                 map_param_.vehicle_width * 0.5);
+    boundary_clearance_ = vehicle_radius_;
     shelf_inflation_ = boundary_clearance_;
     original_shelves_.reserve(shelves.size());
     for (const ShelfBlock& shelf : shelves) {
@@ -180,27 +190,86 @@ PathPoint CorridorBuilder::interpolate(const std::vector<PathPoint>& path, doubl
 }
 
 CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<PathPoint>& path,
-                                      double current_s, int path_gen) const {
+                                      double current_s, int path_gen, int vehicle_id) const {
     CorridorResult result;
+    const std::string vehicle = vehicleLabel(vehicle_id);
+    const Pose2d center = bodyCenter(start);
+    result.seeds.push_back(center);
+    if (!(config_.expansion_step > 0.0)) {
+        std::ostringstream reason;
+        reason << "stage=raw_aabb_expansion vehicle=" << vehicle
+               << " disc_center=(" << center.x << "," << center.y
+               << ") expansion_step=" << config_.expansion_step;
+        result.reason = reason.str();
+        return result;
+    }
+    PointLegalityViolation violation;
+    if (!pointLegal(center)) {
+        diagnosePointViolation(center, violation);
+        std::ostringstream reason;
+        reason << "stage=seed_check vehicle=" << vehicle << " disc_center=("
+               << center.x << "," << center.y << ") radius=" << vehicle_radius_
+               << " violation=" << violation.type;
+        if (violation.shelf_index >= 0) reason << " shelf=" << violation.shelf_index;
+        reason << " geometry_distance=" << violation.distance;
+        result.reason = reason.str();
+        return result;
+    }
+    std::string expansion_reason;
+    if (!expandRawAabb(center, result.raw_aabb, expansion_reason)) {
+        std::ostringstream reason;
+        reason << "stage=raw_aabb_expansion vehicle=" << vehicle
+               << " disc_center=(" << center.x << "," << center.y << ") "
+               << expansion_reason;
+        result.reason = reason.str();
+        return result;
+    }
+    result.raw_aabb_valid = true;
+    result.safe_stc = {result.raw_aabb.min_x + vehicle_radius_,
+                       result.raw_aabb.max_x - vehicle_radius_,
+                       result.raw_aabb.min_y + vehicle_radius_,
+                       result.raw_aabb.max_y - vehicle_radius_};
+    const Aabb& stc = result.safe_stc;
+    if (stc.min_x > stc.max_x || stc.min_y > stc.max_y ||
+        center.x < stc.min_x - kEpsilon || center.x > stc.max_x + kEpsilon ||
+        center.y < stc.min_y - kEpsilon || center.y > stc.max_y + kEpsilon ||
+        !aabbLegal(stc)) {
+        std::ostringstream reason;
+        reason << "stage=stc_inset vehicle=" << vehicle << " disc_center=("
+               << center.x << "," << center.y << ") radius=" << vehicle_radius_
+               << " raw_aabb=" << aabbText(result.raw_aabb)
+               << " inset_aabb=" << aabbText(stc);
+        result.reason = reason.str();
+        return result;
+    }
+    result.stc_valid = true;
+    result.boxes.push_back(stc);
     if (path.size() < 2) {
-        result.reason = "path has fewer than two points";
+        result.reason = "stage=terminal_search vehicle=" + vehicle +
+                        " path has fewer than two points safe_stc=" + aabbText(stc);
         return result;
     }
     if (!std::isfinite(current_s) || current_s < path.front().s - kEpsilon ||
         current_s > path.back().s + kEpsilon) {
-        result.reason = "current path_s is outside the frozen path";
+        std::ostringstream reason;
+        reason << "stage=terminal_search vehicle=" << vehicle
+               << " current_s=" << current_s << " path_range=["
+               << path.front().s << "," << path.back().s << "]"
+               << " safe_stc=" << aabbText(stc);
+        result.reason = reason.str();
         return result;
     }
-    const Pose2d center = bodyCenter(start);
-    Aabb stc;
-    if (!generateAabb(center, stc, result.reason)) return result;
     const auto inside = [&](double s) {
         const Pose2d sample = bodyCenter(interpolate(path, s).pose);
         return sample.x >= stc.min_x - kEpsilon && sample.x <= stc.max_x + kEpsilon &&
                sample.y >= stc.min_y - kEpsilon && sample.y <= stc.max_y + kEpsilon;
     };
     if (!inside(current_s)) {
-        result.reason = "current body-disc center is outside the generated STC";
+        std::ostringstream reason;
+        reason << "stage=terminal_search vehicle=" << vehicle
+               << " disc_center=(" << center.x << "," << center.y
+               << ") is outside safe_stc=" << aabbText(stc);
+        result.reason = reason.str();
         return result;
     }
     const double step = std::max(1e-4, std::min(config_.exit_search_step,
@@ -217,7 +286,11 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
         if (s >= path.back().s - kEpsilon) break;
     }
     if (outside_s < 0.0) {
-        result.reason = "frozen path has no body-center exit from the single STC";
+        std::ostringstream reason;
+        reason << "stage=terminal_search vehicle=" << vehicle
+               << " no body-center exit from safe_stc=" << aabbText(stc)
+               << " current_s=" << current_s << " path_end_s=" << path.back().s;
+        result.reason = reason.str();
         return result;
     }
     for (int iteration = 0; iteration < 24; ++iteration) {
@@ -227,18 +300,21 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
     }
     const double terminal_s = inside_s;
     const PathPoint terminal = interpolate(path, terminal_s);
-    const Pose2d terminal_center = bodyCenter(terminal.pose);
     for (size_t i = 1; i < path.size(); ++i) {
         if (path[i - 1].type == path[i].type) continue;
         const double cusp_s = 0.5 * (path[i - 1].s + path[i].s);
         if (std::abs(cusp_s - terminal_s) < config_.cusp_clearance) {
-            result.reason = "rejoin terminal is too close to a direction change";
+            std::ostringstream reason;
+            reason << "stage=terminal_search vehicle=" << vehicle
+                   << " terminal_s=" << terminal_s << " cusp_s=" << cusp_s
+                   << " cusp_distance=" << std::abs(cusp_s - terminal_s)
+                   << " safe_stc=" << aabbText(stc);
+            result.reason = reason.str();
             return result;
         }
     }
     result.terminal = {terminal.pose, terminal.s, path_gen, terminal.type};
-    result.boxes.push_back(stc);
-    result.seeds.push_back(center);
+    result.terminal_valid = true;
     result.success = true;
     result.reason = "ok";
     return result;
