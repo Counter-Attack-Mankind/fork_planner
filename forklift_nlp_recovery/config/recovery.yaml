@@ -33,7 +33,7 @@ solver_validation_tolerance: 1.0e-3
 expansion_step: 0.02
 exit_search_step: 0.01
 cusp_clearance: 0.05
-stc_inset_reduction: 0.03  # m
+stc_inset_reduction: 0.05  # m
 max_start_correction: 0.02  # m
 
 # Spatial-release ranking. 0.05 m is five path samples and is large enough not

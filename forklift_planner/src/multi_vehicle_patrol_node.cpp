@@ -1176,8 +1176,10 @@ private:
             const auto live_motion =
                 rule_engine_->motionOverrideFor(agents_[i].id);
             if (live_motion.motion != frame.agents[i].planned_motion ||
-                (live_motion.motion == forklift_planner::multi_vehicle::
-                                           RecoveryMotion::RETREAT &&
+                ((live_motion.motion == forklift_planner::multi_vehicle::
+                                            RecoveryMotion::RETREAT ||
+                  live_motion.motion == forklift_planner::multi_vehicle::
+                                            RecoveryMotion::FORWARD) &&
                  std::abs(live_motion.target_s -
                           frame.agents[i].planned_motion_target_s) > 1e-9)) {
                 force_horizon_refresh_ = true;
@@ -1972,6 +1974,10 @@ private:
             } else {
                 next_s[i] = std::min(v.track.length(),
                                      v.path_s + next_speed[i] * dt);
+                if (recovery_motion == forklift_planner::multi_vehicle::
+                                           RecoveryMotion::FORWARD) {
+                    next_s[i] = std::min(motion_override.target_s, next_s[i]);
+                }
             }
             planned_s[i] = next_s[i];
         }
@@ -3445,7 +3451,11 @@ private:
                 : std::max(0.0, rb_prev_path_s_[i] - 0.10);
             const double hi = progress_direction < 0
                 ? rb_prev_path_s_[i]
-                : std::min(v.track.length(), rb_prev_path_s_[i] + 0.50);
+                : std::min(
+                      recovery_motion == forklift_planner::multi_vehicle::
+                                             RecoveryMotion::FORWARD
+                          ? motion_override.target_s : v.track.length(),
+                      rb_prev_path_s_[i] + 0.50);
             bool motion_heading_valid = false;
             double motion_heading = 0.0;
             if (rb_motion_pose_valid_[i]) {

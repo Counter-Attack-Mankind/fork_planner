@@ -52,6 +52,7 @@ const char* recoveryMotionName(multi_vehicle::RecoveryMotion motion) {
         case multi_vehicle::RecoveryMotion::NORMAL: return "NORMAL";
         case multi_vehicle::RecoveryMotion::HOLD: return "HOLD";
         case multi_vehicle::RecoveryMotion::RETREAT: return "RETREAT";
+        case multi_vehicle::RecoveryMotion::FORWARD: return "FORWARD";
     }
     return "UNKNOWN";
 }

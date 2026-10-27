@@ -30,6 +30,7 @@ enum class RecoveryMotion {
     NORMAL,
     HOLD,
     RETREAT,
+    FORWARD,
 };
 
 //DeadlockManager 对外发布的“当前死锁恢复指令”
@@ -116,10 +117,10 @@ public:
 
     const RecoveryDirective& directive() const { return directive_; }
 
-    bool retreatSweepClear(const VehicleAgent& retreat,
-                           const VehicleAgent& passer,
-                           const std::vector<VehicleAgent>& vehicles,
-                           double target_s) const;
+    bool pathSweepClear(const VehicleAgent& moving,
+                        const VehicleAgent& protected_vehicle,
+                        const std::vector<VehicleAgent>& vehicles,
+                        double target_s) const;
 
     Snapshot snapshot() const;
     void restore(const Snapshot& snapshot);

@@ -388,6 +388,8 @@ void MarkerPublisher::addLabelMarker(visualization_msgs::MarkerArray& arr,
         const RecoveryMotion motion = recovery.motionFor(v.id);
         if (motion == RecoveryMotion::RETREAT) {
             displayed_action = "RETREAT";
+        } else if (motion == RecoveryMotion::FORWARD) {
+            displayed_action = "FORWARD";
         } else if (motion == RecoveryMotion::HOLD) {
             displayed_action = "HOLD";
         } else if (recovery.phase == RecoveryPhase::PASS &&

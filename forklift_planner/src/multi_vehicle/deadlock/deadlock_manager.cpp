@@ -166,27 +166,25 @@ const DeadlockPairGeometry* DeadlockManager::geometryFor(
     return nullptr;
 }
 
-//检查 retreat 车辆从当前位置一路倒到 target_s 的整个车身扫掠区域，会不会撞到任何其他车辆。
-//判断向后退，是否会撞到其他车
-bool DeadlockManager::retreatSweepClear(
-    const VehicleAgent& retreat, const VehicleAgent& passer,
+// 检查车辆从当前位置沿原路径到 target_s 的整个车身扫掠区域。
+bool DeadlockManager::pathSweepClear(
+    const VehicleAgent& moving, const VehicleAgent& protected_vehicle,
     const std::vector<VehicleAgent>& vehicles, double target_s) const {
     //确定采样步长，在0.005m和0.01m之间
     const double sweep_step = std::max(
         0.005, std::min(0.01, config_.path_validation_step));
-    //创建匿名函数，从当前 path_s 一直采样到 target_s，检查后退车辆沿途每一个采样位置是否会和其他车辆车身重叠；
-    //只要有一个位置发生碰撞，就返回 false；全部位置都安全，返回 true
-    return sampleInterval(retreat.path_s, target_s, sweep_step,
-                          [&](double retreat_s) {
-        const OBB body = makeBody(retreat.track.poseAtS(retreat_s),
+    // sampleInterval 同时支持 s- 和 s+，沿途任一 OBB 重叠即不可行。
+    return sampleInterval(moving.path_s, target_s, sweep_step,
+                          [&](double moving_s) {
+        const OBB body = makeBody(moving.track.poseAtS(moving_s),
                                   map_param_, 0.0);
         for (const VehicleAgent& other : vehicles) {
-            if (other.id == retreat.id || other.track.empty() ||
+            if (other.id == moving.id || other.track.empty() ||
                 other.mode == VehicleMode::NEED_TASK) {
                 continue;
             }
-            const double other_s = other.id == passer.id
-                                       ? passer.path_s
+            const double other_s = other.id == protected_vehicle.id
+                                       ? protected_vehicle.path_s
                                        : vehiclePoseS(other);
             const OBB obstacle = makeBody(other.track.poseAtS(other_s),
                                           map_param_, 0.0);
@@ -438,7 +436,7 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                 // 计算下一次后退到的s
                 const double next_target_s = std::max(0.0,retreat->path_s -config_.deadlock_retreat_distance);
 
-                if (!retreatSweepClear(*retreat,*passer,vehicles,next_target_s))
+                if (!pathSweepClear(*retreat,*passer,vehicles,next_target_s))
                 {
                     const std::vector<int> cycle_ids{retreat->id, passer->id};
                     enterNlpRecovery(cycle_ids, nlpVehicleIds(vehicles, cycle_ids),
@@ -479,7 +477,8 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
         //如果处在死锁恢复阶段---真正执行的状态机
         if (transaction_.phase == RecoveryPhase::RETREAT) {
             // 每一拍都重新检查：从当前实际位置继续退到本次 target 是否仍然安全，不安全则直接退出
-            if (!retreatSweepClear(*retreat, *passer, vehicles,transaction_.retreat_target_s)) 
+            if (!pathSweepClear(*retreat, *passer, vehicles,
+                                transaction_.retreat_target_s))
             {   
                 const std::vector<int> cycle_ids{retreat->id, passer->id};
                 enterNlpRecovery(cycle_ids, nlpVehicleIds(vehicles, cycle_ids),
@@ -651,12 +650,12 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
     double target_s = return_to_b_start
         ? 0.0
         : std::max(0.0, retreat->path_s - config_.deadlock_retreat_distance);
-    bool sweep_clear = retreatSweepClear(*retreat, *passer, vehicles, target_s);
+    bool sweep_clear = pathSweepClear(*retreat, *passer, vehicles, target_s);
     if (return_to_b_start && !sweep_clear) {
         return_to_b_start = false;
         target_s = std::max(
             0.0, retreat->path_s - config_.deadlock_retreat_distance);
-        sweep_clear = retreatSweepClear(*retreat, *passer, vehicles, target_s);
+        sweep_clear = pathSweepClear(*retreat, *passer, vehicles, target_s);
     }
     if (!sweep_clear)
     {
