@@ -4,6 +4,7 @@
 #include <casadi/casadi.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -105,25 +106,6 @@ double oppositeDirectionDistance(const std::vector<double>& speeds,
     return distance;
 }
 
-casadi::MX squaredDistance(const casadi::MX& first, const casadi::MX& second) {
-    const casadi::MX dx = first(0) - second(0);
-    const casadi::MX dy = first(1) - second(1);
-    return dx * dx + dy * dy;
-}
-
-casadi::MX squaredDistanceToObb(const casadi::MX& center,
-                                const StaticVehicleObstacle& obstacle) {
-    const casadi::MX dx = center(0) - obstacle.disc_center.x;
-    const casadi::MX dy = center(1) - obstacle.disc_center.y;
-    const double c = std::cos(obstacle.rear_axle_pose.yaw);
-    const double s = std::sin(obstacle.rear_axle_pose.yaw);
-    const casadi::MX local_x = c * dx + s * dy;
-    const casadi::MX local_y = -s * dx + c * dy;
-    const casadi::MX outside_x = fmax(fabs(local_x) - obstacle.length * 0.5, 0.0);
-    const casadi::MX outside_y = fmax(fabs(local_y) - obstacle.width * 0.5, 0.0);
-    return outside_x * outside_x + outside_y * outside_y;
-}
-
 std::string yamlQuote(const std::string& value) {
     std::string escaped;
     escaped.reserve(value.size() + 2);
@@ -167,6 +149,164 @@ struct ConstraintData {
         metadata.push_back(constraint_metadata);
     }
 };
+
+struct Vector2 {
+    double x = 0.0;
+    double y = 0.0;
+};
+
+struct ObcaDualGuess {
+    std::array<double, 4> lambda{};
+    std::array<double, 4> mu{};
+};
+
+double dot(const Vector2& first, const Vector2& second) {
+    return first.x * second.x + first.y * second.y;
+}
+
+double projectionRadius(double half_length, double half_width,
+                        const Vector2& longitudinal, const Vector2& lateral,
+                        const Vector2& axis) {
+    return half_length * std::abs(dot(longitudinal, axis)) +
+           half_width * std::abs(dot(lateral, axis));
+}
+
+std::array<double, 4> axisCoefficients(const Vector2& axis,
+                                       const Vector2& first,
+                                       const Vector2& second) {
+    const double first_component = dot(axis, first);
+    const double second_component = dot(axis, second);
+    return {std::max(0.0, first_component), std::max(0.0, -first_component),
+            std::max(0.0, second_component), std::max(0.0, -second_component)};
+}
+
+ObcaDualGuess initialObcaDual(const Pose2d& rear, const VehicleParameters& moving,
+                              const StaticVehicleObstacle& obstacle) {
+    const Pose2d moving_center = bodyCenter(rear, moving.rear_axle_to_center);
+    const Pose2d obstacle_center = bodyCenter(obstacle.rear_axle_pose,
+                                              obstacle.rear_axle_to_center);
+    const Vector2 moving_longitudinal{std::cos(rear.yaw), std::sin(rear.yaw)};
+    const Vector2 moving_lateral{-moving_longitudinal.y, moving_longitudinal.x};
+    const Vector2 obstacle_longitudinal{std::cos(obstacle.rear_axle_pose.yaw),
+                                        std::sin(obstacle.rear_axle_pose.yaw)};
+    const Vector2 obstacle_lateral{-obstacle_longitudinal.y,
+                                   obstacle_longitudinal.x};
+    const Vector2 delta{moving_center.x - obstacle_center.x,
+                        moving_center.y - obstacle_center.y};
+    const Vector2 candidates[] = {
+        moving_longitudinal, {-moving_longitudinal.x, -moving_longitudinal.y},
+        moving_lateral, {-moving_lateral.x, -moving_lateral.y},
+        obstacle_longitudinal, {-obstacle_longitudinal.x, -obstacle_longitudinal.y},
+        obstacle_lateral, {-obstacle_lateral.x, -obstacle_lateral.y}};
+    Vector2 normal = candidates[0];
+    double best_separation = -kInfinity;
+    for (const Vector2& candidate : candidates) {
+        const double separation = dot(delta, candidate) - projectionRadius(
+            0.5 * moving.length, 0.5 * moving.width, moving_longitudinal,
+            moving_lateral, candidate) - projectionRadius(
+            0.5 * obstacle.length, 0.5 * obstacle.width, obstacle_longitudinal,
+            obstacle_lateral, candidate);
+        if (separation > best_separation) {
+            best_separation = separation;
+            normal = candidate;
+        }
+    }
+    ObcaDualGuess guess;
+    guess.lambda = axisCoefficients(normal, obstacle_longitudinal, obstacle_lateral);
+    const Vector2 local_normal{dot(normal, moving_longitudinal),
+                               dot(normal, moving_lateral)};
+    guess.mu = axisCoefficients({-local_normal.x, -local_normal.y},
+                                {1.0, 0.0}, {0.0, 1.0});
+    return guess;
+}
+
+Pose2d midpointPose(const InitialGuessNode& first, const InitialGuessNode& second) {
+    return {0.5 * (first.rear_axle_pose.x + second.rear_axle_pose.x),
+            0.5 * (first.rear_axle_pose.y + second.rear_axle_pose.y),
+            first.rear_axle_pose.yaw + 0.5 * normalizeAngle(
+                second.rear_axle_pose.yaw - first.rear_axle_pose.yaw)};
+}
+
+void addStaticObca(const casadi::MX& state, const Pose2d& initial_rear,
+                   const NlpVehicleInput& moving,
+                   const StaticVehicleObstacle& obstacle, size_t node,
+                   const std::string& sample_name,
+                   std::vector<casadi::MX>& variables,
+                   std::vector<double>& initial_values,
+                   std::vector<double>& lower_bounds,
+                   std::vector<double>& upper_bounds,
+                   std::vector<NlpConstraintMetadata>& variable_metadata,
+                   ConstraintData& constraints) {
+    const std::string suffix = "_V" + std::to_string(moving.id) + "_O" +
+        std::to_string(obstacle.id) + "_N" + std::to_string(node) + "_" + sample_name;
+    const casadi::MX lambda = casadi::MX::sym("obca_lambda" + suffix, 4);
+    const casadi::MX mu = casadi::MX::sym("obca_mu" + suffix, 4);
+    variables.push_back(lambda);
+    variables.push_back(mu);
+    const ObcaDualGuess dual_guess = initialObcaDual(initial_rear, moving.parameters,
+                                                      obstacle);
+    for (size_t index = 0; index < 4; ++index) {
+        initial_values.push_back(dual_guess.lambda[index]);
+        lower_bounds.push_back(0.0);
+        upper_bounds.push_back(kInfinity);
+        variable_metadata.push_back({NlpConstraintCategory::VARIABLE_BOUND,
+            moving.id, obstacle.id, node, sample_name + "_lambda_" + std::to_string(index)});
+    }
+    for (size_t index = 0; index < 4; ++index) {
+        initial_values.push_back(dual_guess.mu[index]);
+        lower_bounds.push_back(0.0);
+        upper_bounds.push_back(kInfinity);
+        variable_metadata.push_back({NlpConstraintCategory::VARIABLE_BOUND,
+            moving.id, obstacle.id, node, sample_name + "_mu_" + std::to_string(index)});
+    }
+
+    const double obstacle_cos = std::cos(obstacle.rear_axle_pose.yaw);
+    const double obstacle_sin = std::sin(obstacle.rear_axle_pose.yaw);
+    const double obstacle_center_x = obstacle.rear_axle_pose.x +
+        obstacle.rear_axle_to_center * obstacle_cos;
+    const double obstacle_center_y = obstacle.rear_axle_pose.y +
+        obstacle.rear_axle_to_center * obstacle_sin;
+    const double obstacle_longitudinal_b = obstacle_cos * obstacle_center_x +
+        obstacle_sin * obstacle_center_y + 0.5 * obstacle.length;
+    const double obstacle_longitudinal_negative_b = -obstacle_cos * obstacle_center_x -
+        obstacle_sin * obstacle_center_y + 0.5 * obstacle.length;
+    const double obstacle_lateral_b = -obstacle_sin * obstacle_center_x +
+        obstacle_cos * obstacle_center_y + 0.5 * obstacle.width;
+    const double obstacle_lateral_negative_b = obstacle_sin * obstacle_center_x -
+        obstacle_cos * obstacle_center_y + 0.5 * obstacle.width;
+    const casadi::MX normal_x = obstacle_cos * (lambda(0) - lambda(1)) -
+        obstacle_sin * (lambda(2) - lambda(3));
+    const casadi::MX normal_y = obstacle_sin * (lambda(0) - lambda(1)) +
+        obstacle_cos * (lambda(2) - lambda(3));
+    const casadi::MX heading = state(2);
+    const casadi::MX local_normal_x = cos(heading) * normal_x + sin(heading) * normal_y;
+    const casadi::MX local_normal_y = -sin(heading) * normal_x + cos(heading) * normal_y;
+    constraints.add(mu(0) - mu(1) + local_normal_x, 0.0, 0.0,
+        {NlpConstraintCategory::STATIC_OBCA, moving.id, obstacle.id, node,
+         sample_name + "_stationarity_x"});
+    constraints.add(mu(2) - mu(3) + local_normal_y, 0.0, 0.0,
+        {NlpConstraintCategory::STATIC_OBCA, moving.id, obstacle.id, node,
+         sample_name + "_stationarity_y"});
+    constraints.add(normal_x * normal_x + normal_y * normal_y, 1.0, 1.0,
+        {NlpConstraintCategory::STATIC_OBCA, moving.id, obstacle.id, node,
+         sample_name + "_normalization"});
+
+    const casadi::MX center = symbolicCenter(state, moving.parameters.rear_axle_to_center);
+    const casadi::MX separation =
+        -0.5 * moving.parameters.length * (mu(0) + mu(1)) -
+        0.5 * moving.parameters.width * (mu(2) + mu(3)) +
+        lambda(0) * (obstacle_cos * center(0) + obstacle_sin * center(1) -
+                     obstacle_longitudinal_b) +
+        lambda(1) * (-obstacle_cos * center(0) - obstacle_sin * center(1) -
+                     obstacle_longitudinal_negative_b) +
+        lambda(2) * (-obstacle_sin * center(0) + obstacle_cos * center(1) -
+                     obstacle_lateral_b) +
+        lambda(3) * (obstacle_sin * center(0) - obstacle_cos * center(1) -
+                     obstacle_lateral_negative_b);
+    constraints.add(separation, 0.0, kInfinity,
+        {NlpConstraintCategory::STATIC_OBCA, moving.id, obstacle.id, node,
+         sample_name + "_separation"});
+}
 
 }  // namespace
 
@@ -225,7 +365,8 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
         const VehicleInitialGuess* guess = findGuess(initial_guess, vehicle.id);
         if (guess == nullptr || guess->nodes.size() != nodes ||
             vehicle.parameters.wheel_base <= 0.0 ||
-            vehicle.parameters.disc_radius <= 0.0 ||
+            vehicle.parameters.length <= 0.0 ||
+            vehicle.parameters.width <= 0.0 ||
             vehicle.parameters.max_speed <= 0.0 ||
             vehicle.parameters.max_accel <= 0.0 ||
             vehicle.parameters.max_decel <= 0.0 ||
@@ -348,64 +489,27 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
         symbolic_vehicles.push_back({state, control, &vehicle, guess});
     }
 
-    for (size_t first = 0; first < symbolic_vehicles.size(); ++first) {
-        for (size_t second = first + 1; second < symbolic_vehicles.size(); ++second) {
-            const auto& first_vehicle = symbolic_vehicles[first];
-            const auto& second_vehicle = symbolic_vehicles[second];
-            const double required = first_vehicle.input->parameters.disc_radius +
-                                    second_vehicle.input->parameters.disc_radius;
-            for (size_t node = 0; node < nodes; ++node) {
-                const casadi::MX first_center = symbolicCenter(
-                    first_vehicle.state(casadi::Slice(), node),
-                    first_vehicle.input->parameters.rear_axle_to_center);
-                const casadi::MX second_center = symbolicCenter(
-                    second_vehicle.state(casadi::Slice(), node),
-                    second_vehicle.input->parameters.rear_axle_to_center);
-                constraints.add(squaredDistance(first_center, second_center),
-                    required * required, kInfinity,
-                    {NlpConstraintCategory::PARTICIPANT_DISC,
-                     first_vehicle.input->id, second_vehicle.input->id,
-                     node, "node", required});
-                if (node + 1 == nodes) continue;
-                const casadi::MX first_mid = integrateRk4(
-                    first_vehicle.state(casadi::Slice(), node),
-                    first_vehicle.control(casadi::Slice(), node), dt * 0.5,
-                    first_vehicle.input->parameters.wheel_base);
-                const casadi::MX second_mid = integrateRk4(
-                    second_vehicle.state(casadi::Slice(), node),
-                    second_vehicle.control(casadi::Slice(), node), dt * 0.5,
-                    second_vehicle.input->parameters.wheel_base);
-                constraints.add(squaredDistance(
-                    symbolicCenter(first_mid, first_vehicle.input->parameters.rear_axle_to_center),
-                    symbolicCenter(second_mid, second_vehicle.input->parameters.rear_axle_to_center)),
-                    required * required, kInfinity,
-                    {NlpConstraintCategory::PARTICIPANT_DISC,
-                     first_vehicle.input->id, second_vehicle.input->id,
-                     node, "midpoint", required});
-            }
-        }
-    }
     for (const SymbolicVehicle& vehicle : symbolic_vehicles) {
         for (const StaticVehicleObstacle& obstacle : input.static_vehicles) {
-            const double required = vehicle.input->parameters.disc_radius;
+            if (obstacle.length <= 0.0 || obstacle.width <= 0.0) {
+                result.reason = "static vehicle OBB geometry is invalid for V" +
+                    std::to_string(obstacle.id);
+                return result;
+            }
             for (size_t node = 0; node < nodes; ++node) {
-                const casadi::MX center = symbolicCenter(
-                    vehicle.state(casadi::Slice(), node),
-                    vehicle.input->parameters.rear_axle_to_center);
-                constraints.add(squaredDistanceToObb(center, obstacle),
-                    required * required, kInfinity,
-                    {NlpConstraintCategory::STATIC_DISC, vehicle.input->id,
-                     obstacle.id, node, "node", required});
+                addStaticObca(vehicle.state(casadi::Slice(), node),
+                    vehicle.guess->nodes[node].rear_axle_pose, *vehicle.input,
+                    obstacle, node, "node", variables, initial_values,
+                    lower_bounds, upper_bounds, variable_metadata, constraints);
                 if (node + 1 == nodes) continue;
                 const casadi::MX midpoint = integrateRk4(
                     vehicle.state(casadi::Slice(), node),
                     vehicle.control(casadi::Slice(), node), dt * 0.5,
                     vehicle.input->parameters.wheel_base);
-                constraints.add(squaredDistanceToObb(symbolicCenter(
-                    midpoint, vehicle.input->parameters.rear_axle_to_center), obstacle),
-                    required * required, kInfinity,
-                    {NlpConstraintCategory::STATIC_DISC, vehicle.input->id,
-                     obstacle.id, node, "midpoint", required});
+                addStaticObca(midpoint, midpointPose(vehicle.guess->nodes[node],
+                    vehicle.guess->nodes[node + 1]), *vehicle.input, obstacle,
+                    node, "midpoint", variables, initial_values, lower_bounds,
+                    upper_bounds, variable_metadata, constraints);
             }
         }
     }
@@ -561,7 +665,7 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << "total_time: " << result.total_time << '\n'
            << "average_dt: " << result.average_dt << '\n'
            << "collision_models:\n"
-           << "  optimization_constraints: active_disc_static_obb\n"
+           << "  optimization_constraints: active_obb_static_obb_obca\n"
            << "  independent_validation: obb_sat\n"
            << "validation:\n"
            << "  collision_geometry: obb_sat\n"
@@ -654,13 +758,9 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
                << "      lower_bound: " << yamlNumber(violation.lower_bound) << '\n'
                << "      upper_bound: " << yamlNumber(violation.upper_bound) << '\n'
                << "      violation: " << yamlNumber(violation.violation) << '\n';
-        if (violation.metadata.category == NlpConstraintCategory::PARTICIPANT_DISC ||
-            violation.metadata.category == NlpConstraintCategory::STATIC_DISC) {
-            report << "      actual_center_distance_m: "
-                   << yamlNumber(violation.actual_distance) << '\n'
-                   << "      required_center_distance_m: "
-                   << yamlNumber(violation.required_distance) << '\n'
-                   << "      distance_shortfall_m: "
+        if (violation.metadata.category == NlpConstraintCategory::STATIC_OBCA &&
+            violation.metadata.component.find("separation") != std::string::npos) {
+            report << "      separation_shortfall_m: "
                    << yamlNumber(violation.distance_shortfall) << '\n';
         }
     }

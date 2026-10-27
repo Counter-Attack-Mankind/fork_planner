@@ -9,8 +9,7 @@ namespace forklift_nlp_recovery {
 enum class NlpConstraintCategory {
     RK4,
     AABB_NODE,
-    PARTICIPANT_DISC,
-    STATIC_DISC,
+    STATIC_OBCA,
     VARIABLE_BOUND
 };
 
@@ -20,7 +19,6 @@ struct NlpConstraintMetadata {
     int other_vehicle_id = -1;
     size_t node_index = 0;
     std::string component;
-    double required_distance = 0.0;
 };
 
 struct NlpConstraintDiagnosticsInput {
@@ -48,8 +46,6 @@ struct NlpConstraintViolation {
     double lower_bound = 0.0;
     double upper_bound = 0.0;
     double violation = 0.0;
-    double actual_distance = 0.0;
-    double required_distance = 0.0;
     double distance_shortfall = 0.0;
 };
 

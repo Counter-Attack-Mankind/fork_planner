@@ -245,6 +245,45 @@ Pose2d discCenter(const Pose2d& rear, const VehicleParameters& parameters) {
             rear.y + parameters.rear_axle_to_center * std::sin(rear.yaw), rear.yaw};
 }
 
+struct Obb {
+    Pose2d center;
+    double half_length = 0.0;
+    double half_width = 0.0;
+};
+
+Obb vehicleObb(const Pose2d& rear, double length, double width, double center_offset) {
+    Pose2d center = rear;
+    center.x += center_offset * std::cos(rear.yaw);
+    center.y += center_offset * std::sin(rear.yaw);
+    return {center, 0.5 * length, 0.5 * width};
+}
+
+double projectionRadius(const Obb& box, double axis_x, double axis_y) {
+    const double longitudinal_x = std::cos(box.center.yaw);
+    const double longitudinal_y = std::sin(box.center.yaw);
+    const double lateral_x = -longitudinal_y;
+    const double lateral_y = longitudinal_x;
+    return box.half_length * std::abs(axis_x * longitudinal_x + axis_y * longitudinal_y) +
+           box.half_width * std::abs(axis_x * lateral_x + axis_y * lateral_y);
+}
+
+double obbSatSeparationMargin(const Obb& first, const Obb& second) {
+    const double dx = second.center.x - first.center.x;
+    const double dy = second.center.y - first.center.y;
+    const double axes[4][2] = {{std::cos(first.center.yaw), std::sin(first.center.yaw)},
+                               {-std::sin(first.center.yaw), std::cos(first.center.yaw)},
+                               {std::cos(second.center.yaw), std::sin(second.center.yaw)},
+                               {-std::sin(second.center.yaw), std::cos(second.center.yaw)}};
+    double margin = -std::numeric_limits<double>::infinity();
+    for (const auto& axis : axes) {
+        const double center_distance = std::abs(dx * axis[0] + dy * axis[1]);
+        const double extent = projectionRadius(first, axis[0], axis[1]) +
+                              projectionRadius(second, axis[0], axis[1]);
+        margin = std::max(margin, center_distance - extent);
+    }
+    return margin;
+}
+
 void sampleReferenceNode(const NlpVehicleInput& vehicle, const ReferenceMotion& reference,
                          double progress, InitialGuessNode& node) {
     const std::vector<PathPoint>& path = vehicle.reference_path.empty() ?
@@ -416,8 +455,8 @@ void filterStaticVehicles(NlpOptimizationInput& input) {
 }
 
 void updateGlobalDiagnostics(NlpInitialGuess& guess, const NlpOptimizationInput& input) {
-    guess.diagnostics.minimum_participant_clearance = std::numeric_limits<double>::infinity();
-    guess.diagnostics.minimum_static_clearance = std::numeric_limits<double>::infinity();
+    guess.diagnostics.minimum_static_obb_separation_margin =
+        std::numeric_limits<double>::infinity();
     for (const VehicleInitialGuess& vehicle : guess.vehicles) {
         const auto& d = vehicle.diagnostics;
         guess.diagnostics.max_kinematic_position_residual = std::max(
@@ -429,53 +468,34 @@ void updateGlobalDiagnostics(NlpInitialGuess& guess, const NlpOptimizationInput&
         guess.diagnostics.max_aabb_violation = std::max(guess.diagnostics.max_aabb_violation,
                                                         d.max_aabb_violation);
     }
-    for (size_t first = 0; first < guess.vehicles.size(); ++first) {
-        for (size_t second = first + 1; second < guess.vehicles.size(); ++second) {
-            const double required = input.vehicles[first].parameters.disc_radius +
-                                    input.vehicles[second].parameters.disc_radius;
-            for (size_t node = 0; node < guess.node_count; ++node) {
-                const double distance = poseDistance(guess.vehicles[first].nodes[node].disc_center,
-                                                     guess.vehicles[second].nodes[node].disc_center);
-                const double clearance = distance - required;
-                guess.diagnostics.minimum_participant_clearance = std::min(
-                    guess.diagnostics.minimum_participant_clearance, clearance);
-                if (clearance < 0.0) {
-                    ++guess.diagnostics.participant_collision_nodes;
-                    guess.diagnostics.collisions.push_back({node, guess.time_grid[node],
-                        guess.vehicles[first].id, guess.vehicles[second].id, false,
-                        distance, required, clearance});
-                }
-            }
-        }
-    }
     for (size_t participant = 0; participant < guess.vehicles.size(); ++participant) {
+        const VehicleParameters& parameters = input.vehicles[participant].parameters;
         for (const StaticVehicleObstacle& obstacle : input.static_vehicles) {
-            const double required = input.vehicles[participant].parameters.disc_radius + obstacle.disc_radius;
+            const Obb frozen = vehicleObb(obstacle.rear_axle_pose, obstacle.length,
+                obstacle.width, obstacle.rear_axle_to_center);
             for (size_t node = 0; node < guess.node_count; ++node) {
-                const double distance = poseDistance(guess.vehicles[participant].nodes[node].disc_center,
-                                                     obstacle.disc_center);
-                const double clearance = distance - required;
-                guess.diagnostics.minimum_static_clearance = std::min(
-                    guess.diagnostics.minimum_static_clearance, clearance);
+                const Obb moving = vehicleObb(
+                    guess.vehicles[participant].nodes[node].rear_axle_pose,
+                    parameters.length, parameters.width,
+                    parameters.rear_axle_to_center);
+                const double clearance = obbSatSeparationMargin(moving, frozen);
+                guess.diagnostics.minimum_static_obb_separation_margin = std::min(
+                    guess.diagnostics.minimum_static_obb_separation_margin, clearance);
                 if (clearance < 0.0) {
-                    ++guess.diagnostics.static_collision_nodes;
+                    ++guess.diagnostics.static_obb_collision_nodes;
                     guess.diagnostics.collisions.push_back({node, guess.time_grid[node],
-                        guess.vehicles[participant].id, obstacle.id, true,
-                        distance, required, clearance});
+                        guess.vehicles[participant].id, obstacle.id, true, clearance});
                 }
             }
         }
     }
-    if (!std::isfinite(guess.diagnostics.minimum_participant_clearance))
-        guess.diagnostics.minimum_participant_clearance = 0.0;
-    if (!std::isfinite(guess.diagnostics.minimum_static_clearance))
-        guess.diagnostics.minimum_static_clearance = 0.0;
+    if (!std::isfinite(guess.diagnostics.minimum_static_obb_separation_margin))
+        guess.diagnostics.minimum_static_obb_separation_margin = 0.0;
     const bool dynamics_close = guess.diagnostics.max_kinematic_position_residual <= 1e-3 &&
                                 guess.diagnostics.max_kinematic_heading_residual <= 1e-3;
     guess.constraints_satisfied = guess.diagnostics.bound_violation_nodes == 0 &&
         guess.diagnostics.aabb_violation_nodes == 0 &&
-        guess.diagnostics.participant_collision_nodes == 0 &&
-        guess.diagnostics.static_collision_nodes == 0 && dynamics_close;
+        guess.diagnostics.static_obb_collision_nodes == 0 && dynamics_close;
 }
 
 std::string isoTimestamp() {

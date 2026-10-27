@@ -82,9 +82,7 @@ struct InitialCollision {
     int vehicle_a_id = -1;
     int vehicle_b_id = -1;
     bool vehicle_b_is_static = false;
-    double center_distance = 0.0;
-    double required_distance = 0.0;
-    double clearance = 0.0;
+    double separation_margin = 0.0;
 };
 
 struct NlpInitialGuessDiagnostics {
@@ -93,10 +91,8 @@ struct NlpInitialGuessDiagnostics {
     size_t bound_violation_nodes = 0;
     size_t aabb_violation_nodes = 0;
     double max_aabb_violation = 0.0;
-    size_t participant_collision_nodes = 0;
-    size_t static_collision_nodes = 0;
-    double minimum_participant_clearance = 0.0;
-    double minimum_static_clearance = 0.0;
+    size_t static_obb_collision_nodes = 0;
+    double minimum_static_obb_separation_margin = 0.0;
     std::vector<InitialCollision> collisions;
 };
 

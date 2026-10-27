@@ -696,16 +696,14 @@ private:
         ROS_INFO("[nlp_recovery][initial_guess] vehicles=%zu N=%zu "
                  "T_init=%.3f dt=%.3f "
                  "status=%s max_pos_res=%.6f max_yaw_res=%.6f bounds=%zu "
-                 "vehicle_collisions=%zu static_collisions=%zu min_clear=(%.6f,%.6f)",
+                 "static_obb_collisions=%zu min_static_obb_margin=%.6f",
                  guess.vehicles.size(), guess.node_count, guess.total_time, guess.average_dt,
                  guess.constraints_satisfied ? "valid" : "constraint_violation",
                  guess.diagnostics.max_kinematic_position_residual,
                  guess.diagnostics.max_kinematic_heading_residual,
                  guess.diagnostics.bound_violation_nodes,
-                 guess.diagnostics.participant_collision_nodes,
-                 guess.diagnostics.static_collision_nodes,
-                 guess.diagnostics.minimum_participant_clearance,
-                 guess.diagnostics.minimum_static_clearance);
+                 guess.diagnostics.static_obb_collision_nodes,
+                 guess.diagnostics.minimum_static_obb_separation_margin);
         for (const VehicleInitialGuess& vehicle : guess.vehicles) {
             const auto& d = vehicle.diagnostics;
             ROS_INFO("[nlp_recovery][initial_guess] V%d length=%.3f estimate=%.3f "

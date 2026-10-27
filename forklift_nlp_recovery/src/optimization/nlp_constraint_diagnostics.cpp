@@ -9,11 +9,10 @@
 namespace forklift_nlp_recovery {
 namespace {
 
-constexpr std::array<NlpConstraintCategory, 5> kCategories{
+constexpr std::array<NlpConstraintCategory, 4> kCategories{
     NlpConstraintCategory::RK4,
     NlpConstraintCategory::AABB_NODE,
-    NlpConstraintCategory::PARTICIPANT_DISC,
-    NlpConstraintCategory::STATIC_DISC,
+    NlpConstraintCategory::STATIC_OBCA,
     NlpConstraintCategory::VARIABLE_BOUND};
 
 double boundViolation(double value, double lower, double upper) {
@@ -22,11 +21,6 @@ double boundViolation(double value, double lower, double upper) {
     if (std::isfinite(lower)) violation = std::max(violation, lower - value);
     if (std::isfinite(upper)) violation = std::max(violation, value - upper);
     return std::max(0.0, violation);
-}
-
-bool isDiscConstraint(NlpConstraintCategory category) {
-    return category == NlpConstraintCategory::PARTICIPANT_DISC ||
-           category == NlpConstraintCategory::STATIC_DISC;
 }
 
 NlpConstraintCategoryDiagnostics& categoryDiagnostics(
@@ -56,11 +50,9 @@ void appendDiagnostics(NlpConstraintDiagnostics& result,
         diagnostic.lower_bound = lower[index];
         diagnostic.upper_bound = upper[index];
         diagnostic.violation = violation;
-        if (isDiscConstraint(metadata[index].category)) {
-            diagnostic.actual_distance = std::sqrt(std::max(0.0, values[index]));
-            diagnostic.required_distance = metadata[index].required_distance;
-            diagnostic.distance_shortfall = std::max(
-                0.0, diagnostic.required_distance - diagnostic.actual_distance);
+        if (metadata[index].category == NlpConstraintCategory::STATIC_OBCA &&
+            metadata[index].component.find("separation") != std::string::npos) {
+            diagnostic.distance_shortfall = violation;
             category.max_distance_shortfall = std::max(
                 category.max_distance_shortfall, diagnostic.distance_shortfall);
         }
@@ -77,8 +69,7 @@ const char* nlpConstraintCategoryName(NlpConstraintCategory category) {
     switch (category) {
         case NlpConstraintCategory::RK4: return "rk4";
         case NlpConstraintCategory::AABB_NODE: return "aabb_node";
-        case NlpConstraintCategory::PARTICIPANT_DISC: return "participant_disc";
-        case NlpConstraintCategory::STATIC_DISC: return "static_disc";
+        case NlpConstraintCategory::STATIC_OBCA: return "static_obca";
         case NlpConstraintCategory::VARIABLE_BOUND: return "variable_bound";
     }
     return "unknown";

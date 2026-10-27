@@ -55,17 +55,38 @@ Pose2d bodyCenter(const Pose2d& rear, double offset) {
             rear.y + offset * std::sin(rear.yaw), rear.yaw};
 }
 
-bool discIntersectsObb(const Pose2d& center, double radius,
-                       const StaticVehicleObstacle& obstacle) {
-    const double dx = center.x - obstacle.disc_center.x;
-    const double dy = center.y - obstacle.disc_center.y;
-    const double c = std::cos(obstacle.rear_axle_pose.yaw);
-    const double s = std::sin(obstacle.rear_axle_pose.yaw);
-    const double local_x = c * dx + s * dy;
-    const double local_y = -s * dx + c * dy;
-    const double outside_x = std::max(std::abs(local_x) - obstacle.length * 0.5, 0.0);
-    const double outside_y = std::max(std::abs(local_y) - obstacle.width * 0.5, 0.0);
-    return outside_x * outside_x + outside_y * outside_y <= radius * radius + kEpsilon;
+struct Obb {
+    Pose2d center;
+    double half_length = 0.0;
+    double half_width = 0.0;
+};
+
+Obb vehicleObb(const Pose2d& rear, double length, double width, double center_offset) {
+    return {bodyCenter(rear, center_offset), 0.5 * length, 0.5 * width};
+}
+
+double projectionRadius(const Obb& box, double axis_x, double axis_y) {
+    const double longitudinal_x = std::cos(box.center.yaw);
+    const double longitudinal_y = std::sin(box.center.yaw);
+    const double lateral_x = -longitudinal_y;
+    const double lateral_y = longitudinal_x;
+    return box.half_length * std::abs(axis_x * longitudinal_x + axis_y * longitudinal_y) +
+           box.half_width * std::abs(axis_x * lateral_x + axis_y * lateral_y);
+}
+
+bool overlaps(const Obb& first, const Obb& second) {
+    const double dx = second.center.x - first.center.x;
+    const double dy = second.center.y - first.center.y;
+    const double axes[4][2] = {{std::cos(first.center.yaw), std::sin(first.center.yaw)},
+                               {-std::sin(first.center.yaw), std::cos(first.center.yaw)},
+                               {std::cos(second.center.yaw), std::sin(second.center.yaw)},
+                               {-std::sin(second.center.yaw), std::cos(second.center.yaw)}};
+    for (const auto& axis : axes) {
+        const double distance = std::abs(dx * axis[0] + dy * axis[1]);
+        if (distance > projectionRadius(first, axis[0], axis[1]) +
+            projectionRadius(second, axis[0], axis[1]) + kEpsilon) return false;
+    }
+    return true;
 }
 
 bool poseLegal(const Pose2d& rear, const NlpVehicleInput& vehicle,
@@ -75,8 +96,12 @@ bool poseLegal(const Pose2d& rear, const NlpVehicleInput& vehicle,
     const Aabb& stc = vehicle.corridor.front();
     if (center.x < stc.min_x - kEpsilon || center.x > stc.max_x + kEpsilon ||
         center.y < stc.min_y - kEpsilon || center.y > stc.max_y + kEpsilon) return false;
+    const Obb moving = vehicleObb(rear, vehicle.parameters.length,
+        vehicle.parameters.width, vehicle.parameters.rear_axle_to_center);
     for (const auto& obstacle : obstacles) {
-        if (discIntersectsObb(center, vehicle.parameters.disc_radius, obstacle)) return false;
+        const Obb frozen = vehicleObb(obstacle.rear_axle_pose, obstacle.length,
+            obstacle.width, obstacle.rear_axle_to_center);
+        if (overlaps(moving, frozen)) return false;
     }
     return true;
 }
@@ -154,6 +179,7 @@ HybridAstarResult HybridAstarPlanner::plan(
     if (vehicle.corridor.size() != 1 || config_.integration_step <= 0.0 ||
         config_.collision_check_step <= 0.0 || config_.xy_resolution <= 0.0 ||
         config_.yaw_bins < 8 || config_.max_expansions <= 0 ||
+        vehicle.parameters.length <= 0.0 || vehicle.parameters.width <= 0.0 ||
         vehicle.parameters.wheel_base <= 0.0 ||
         vehicle.parameters.max_steer_angle <= 0.0) {
         result.reason = "invalid Hybrid A* input or configuration";

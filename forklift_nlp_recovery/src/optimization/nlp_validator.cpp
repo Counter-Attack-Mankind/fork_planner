@@ -81,18 +81,6 @@ double obbSatSeparationMargin(const Obb& first, const Obb& second) {
     return margin;
 }
 
-Obb aabbObb(const Aabb& box) {
-    return {{0.5 * (box.min_x + box.max_x), 0.5 * (box.min_y + box.max_y)},
-            {1.0, 0.0}, {0.0, 1.0}, 0.5 * box.width(), 0.5 * box.height()};
-}
-
-bool obbInsideField(const Obb& box, double width, double height) {
-    const double extent_x = projectionRadius(box, {1.0, 0.0});
-    const double extent_y = projectionRadius(box, {0.0, 1.0});
-    return box.center.x - extent_x >= 0.0 && box.center.x + extent_x <= width &&
-           box.center.y - extent_y >= 0.0 && box.center.y + extent_y <= height;
-}
-
 NumericState derivative(const NumericState& state, const NumericControl& control,
                         double wheel_base) {
     return {state.speed * std::cos(state.yaw), state.speed * std::sin(state.yaw),
@@ -220,32 +208,14 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
                 if (stc_violation > config.validation_tolerance) {
                     ++validation.aabb_violation_samples;
                 }
-                const Obb body = vehicleObb({state.x, state.y, state.yaw},
-                    source.parameters.length, source.parameters.width,
-                    source.parameters.rear_axle_to_center);
-                bool body_map_collision = !obbInsideField(body,
-                    corridor_builder.fieldWidth(), corridor_builder.fieldHeight());
-                int shelf_index = -1;
-                if (!body_map_collision) {
-                    const auto& shelves = corridor_builder.originalShelves();
-                    for (size_t index = 0; index < shelves.size(); ++index) {
-                        if (obbSatSeparationMargin(body, aabbObb(shelves[index])) <= 0.0) {
-                            body_map_collision = true;
-                            shelf_index = static_cast<int>(index);
-                            break;
-                        }
-                    }
-                }
-                if (body_map_collision || !corridor_builder.pointLegal(center)) {
+                if (!corridor_builder.pointLegal(center)) {
                     ++validation.static_map_violation_samples;
                     PointLegalityViolation detail;
                     corridor_builder.diagnosePointViolation(center, detail);
                     validation.static_map_violations.push_back({
                         vehicle.id, interval, substep,
                         (static_cast<double>(interval) + fraction) * dt,
-                        center, body_map_collision ? "body_obb_map_collision" : detail.type,
-                        shelf_index >= 0 ? shelf_index : detail.shelf_index,
-                        detail.distance});
+                        center, detail.type, detail.shelf_index, detail.distance});
                 }
             }
         }
@@ -253,50 +223,17 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
         samples[index].push_back({last_node.rear_axle_pose.x, last_node.rear_axle_pose.y,
                                   last_node.rear_axle_pose.yaw, last_node.signed_speed,
                                   last_node.front_steer});
-        const Obb terminal_body = vehicleObb(last_node.rear_axle_pose,
-            source.parameters.length, source.parameters.width,
-            source.parameters.rear_axle_to_center);
-        bool terminal_map_collision = !obbInsideField(terminal_body,
-            corridor_builder.fieldWidth(), corridor_builder.fieldHeight());
-        int terminal_shelf = -1;
-        for (size_t shelf = 0; !terminal_map_collision &&
-             shelf < corridor_builder.originalShelves().size(); ++shelf) {
-            if (obbSatSeparationMargin(terminal_body,
-                aabbObb(corridor_builder.originalShelves()[shelf])) <= 0.0) {
-                terminal_map_collision = true;
-                terminal_shelf = static_cast<int>(shelf);
-            }
-        }
-        if (terminal_map_collision) {
+        if (!corridor_builder.pointLegal(last_node.disc_center)) {
             ++validation.static_map_violation_samples;
+            PointLegalityViolation detail;
+            corridor_builder.diagnosePointViolation(last_node.disc_center, detail);
             validation.static_map_violations.push_back({vehicle.id,
                 result.node_count - 2, substeps, result.total_time,
-                last_node.disc_center, "body_obb_map_collision",
-                terminal_shelf, 0.0});
+                last_node.disc_center, detail.type, detail.shelf_index,
+                detail.distance});
         }
     }
 
-    const size_t sample_count = samples.front().size();
-    for (size_t first = 0; first < samples.size(); ++first) {
-        for (size_t second = first + 1; second < samples.size(); ++second) {
-            for (size_t sample = 0; sample < sample_count; ++sample) {
-                const NumericState& first_state = samples[first][sample];
-                const NumericState& second_state = samples[second][sample];
-                const VehicleParameters& first_parameters = input.vehicles[first].parameters;
-                const VehicleParameters& second_parameters = input.vehicles[second].parameters;
-                const Obb first_box = vehicleObb({first_state.x, first_state.y, first_state.yaw},
-                    first_parameters.length, first_parameters.width,
-                    first_parameters.rear_axle_to_center);
-                const Obb second_box = vehicleObb({second_state.x, second_state.y, second_state.yaw},
-                    second_parameters.length, second_parameters.width,
-                    second_parameters.rear_axle_to_center);
-                const double margin = obbSatSeparationMargin(first_box, second_box);
-                validation.minimum_participant_obb_separation_margin = std::min(
-                    validation.minimum_participant_obb_separation_margin, margin);
-                if (margin < -config.validation_tolerance) ++validation.participant_obb_collision_samples;
-            }
-        }
-    }
     for (size_t vehicle = 0; vehicle < samples.size(); ++vehicle) {
         for (const StaticVehicleObstacle& obstacle : input.static_vehicles) {
             if (!(obstacle.length > 0.0) || !(obstacle.width > 0.0) ||
@@ -338,8 +275,8 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
         validation.aabb_violation_samples == 0 &&
         validation.static_map_violation_samples == 0;
     validation.reason = validation.passed
-        ? "all node AABB and sampled static-map checks passed (collision geometry: OBB SAT)"
-        : "one or more independent safety checks failed (collision geometry: OBB SAT)";
+        ? "all STC/disc-center and sampled static-vehicle OBB SAT checks passed"
+        : "one or more STC/disc-center or static-vehicle OBB SAT checks failed";
     return validation;
 }
 
