@@ -118,6 +118,11 @@ RecoveryMotion RecoveryDirective::motionFor(int vehicle_id) const {
         if (vehicle_id == retreat_vehicle_id)
             return RecoveryMotion::HOLD;
     }
+    else if (phase == RecoveryPhase::PASS && hold_retreat_at_b_start)
+    {
+        if (vehicle_id == retreat_vehicle_id)
+            return RecoveryMotion::HOLD;
+    }
     else if (phase == RecoveryPhase::UNRESOLVED)
     {
         if (vehicle_id == retreat_vehicle_id ||
@@ -210,6 +215,8 @@ void DeadlockManager::refreshDirective() {
 
    
     directive_.retreat_distance = transaction_.retreat_distance;
+    directive_.hold_retreat_at_b_start =
+        transaction_.hold_retreat_at_b_start;
     directive_.deadlock_cycle_ids = transaction_.deadlock_cycle_ids;
     directive_.frozen_vehicle_ids = transaction_.frozen_vehicle_ids;
     directive_.nlp_vehicle_ids = transaction_.nlp_vehicle_ids;
@@ -375,7 +382,11 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                         << " retreat=V" << retreat->id
                         << " pass=V" << passer->id
                         << " attempt=" << transaction_.retreat_attempt
-                        << " hold=" << config_.rolling_refresh_period;
+                        << " hold=" << config_.rolling_refresh_period
+                        << " hold_at_b_start="
+                        << (transaction_.hold_retreat_at_b_start ? 1 : 0)
+                        << " pass_conflict_exit_s="
+                        << transaction_.pass_conflict_exit_s;
                 emit("RETREAT_HOLD_DONE", details.str(), emit_logs);
                 emit("PASS_START", details.str(), emit_logs);
             } else {
@@ -390,6 +401,32 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
             //判断车辆是否失活的标志位
             const bool retreat_active = retreat->action != VehicleAction::STOP;
             const bool passer_active =  passer->action != VehicleAction::STOP;
+            if (transaction_.hold_retreat_at_b_start) {
+                const OBB retreat_body = makeBody(
+                    retreat->track.poseAtS(retreat->path_s), map_param_, 0.0);
+                const OBB passer_body = makeBody(
+                    passer->track.poseAtS(passer->path_s), map_param_, 0.0);
+                const double passer_rear_s = std::max(
+                    0.0, passer->path_s - map_param_.body_rear_ext());
+                if (passer_rear_s >
+                        transaction_.pass_conflict_exit_s + tolerance &&
+                    !overlaps(retreat_body, passer_body)) {
+                    clearSuccessfulRecovery(
+                        retreat, passer, "passer_cleared_b_start_conflict",
+                        emit_logs);
+                    return;
+                }
+                if (!passer_active) {
+                    const std::vector<int> cycle_ids{
+                        retreat->id, passer->id};
+                    enterNlpRecovery(
+                        cycle_ids, nlpVehicleIds(vehicles, cycle_ids),
+                        "b_start_hold_passer_stopped", emit_logs);
+                    return;
+                }
+                refreshDirective();
+                return;
+            }
             //分别统计两辆车连续保持非 STOP 的时间，某车持续2个决策周期没被停下，则证明死锁解除
             if (retreat_active) 
                 transaction_.retreat_clear_elapsed += std::max(0.0, dt);
@@ -490,6 +527,24 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
             // 已经到达本次固定退让目标，则低优先级车强制静止 2 秒。
             if (retreat->path_s <=transaction_.retreat_target_s + tolerance) 
             {
+                const bool returned_to_b_start =
+                    retreat->slot_departure_clear_s > 0.0 &&
+                    std::abs(transaction_.retreat_target_s) <= tolerance &&
+                    transaction_.pass_conflict_exit_s >= 0.0;
+                if (returned_to_b_start) {
+                    VehicleAgent source_retreat = *retreat;
+                    source_retreat.path_s = 0.0;
+                    const double pass_check_s = std::min(
+                        passer->track.length(),
+                        std::max(passer->path_s,
+                                 transaction_.pass_conflict_exit_s +
+                                     map_param_.body_rear_ext() + tolerance));
+                    const std::vector<VehicleAgent> pair{
+                        source_retreat, *passer};
+                    transaction_.hold_retreat_at_b_start =
+                        pathSweepClear(*passer, source_retreat, pair,
+                                       pass_check_s);
+                }
                 transaction_.phase = RecoveryPhase::RETREAT_HOLD;
                 transaction_.retreat_hold_elapsed = 0.0;
                 transaction_.retreat_clear_elapsed = 0.0;
@@ -504,7 +559,9 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                 << " pass=V" << passer->id
                 << " attempt=" << transaction_.retreat_attempt
                 << " target_s=" << transaction_.retreat_target_s
-                << " actual_s=" << retreat->path_s;
+                << " actual_s=" << retreat->path_s
+                << " hold_at_b_start="
+                << (transaction_.hold_retreat_at_b_start ? 1 : 0);
                 emit("RETREAT_DONE", details.str(), emit_logs);
                 emit("RETREAT_HOLD_START", details.str(), emit_logs);
             }
@@ -615,6 +672,7 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
     transaction_.pass_vehicle_id = passer->id;
     transaction_.retreat_path_gen = retreat->path_gen;
     transaction_.pass_path_gen = passer->path_gen;
+    transaction_.pass_conflict_exit_s = geometry->priority_conflict_exit_s;
 
     const double tolerance = std::max(0.005, config_.path_validation_step);
     // 若已经在路径起点，不再退；B 起点仍执行一个完整滚动周期的静止观察。

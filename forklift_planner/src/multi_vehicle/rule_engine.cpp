@@ -2801,6 +2801,14 @@ void RuleEngine::observeDeadlock(std::vector<VehicleAgent>& vehicles,
             geometry.path_gen_a = a.path_gen;
             geometry.path_gen_b = b.path_gen;
             geometry.preferred_priority_vehicle_id = priorityWinner(a, b);
+            const std::vector<ConflictZone> zones = findConflictZones(a, b);
+            for (const ConflictZone& zone : zones) {
+                const double exit_s =
+                    geometry.preferred_priority_vehicle_id == a.id
+                        ? zone.s_self_exit : zone.s_other_exit;
+                geometry.priority_conflict_exit_s = std::max(
+                    geometry.priority_conflict_exit_s, exit_s);
+            }
             geometry_items.push_back(std::move(geometry));
         }
     }

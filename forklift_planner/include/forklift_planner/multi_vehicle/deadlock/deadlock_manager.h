@@ -44,6 +44,7 @@ struct RecoveryDirective {
     int pass_path_gen = -1;
     double retreat_target_s = 0.0;
     double retreat_distance = 0.0;
+    bool hold_retreat_at_b_start = false;
     std::vector<int> deadlock_cycle_ids;
     std::vector<int> frozen_vehicle_ids;
     std::vector<int> nlp_vehicle_ids;
@@ -64,6 +65,7 @@ struct DeadlockPairGeometry {
     int path_gen_a = -1;
     int path_gen_b = -1;
     int preferred_priority_vehicle_id = -1;
+    double priority_conflict_exit_s = -1.0;
 };
 
 
@@ -91,6 +93,8 @@ public:
         double retreat_hold_elapsed = 0.0;
         double retreat_clear_elapsed = 0.0; //两车独立计时器，判断2周期内是否有车没有失活，则判断死锁解除
         double pass_clear_elapsed = 0.0;
+        double pass_conflict_exit_s = -1.0;
+        bool hold_retreat_at_b_start = false;
         std::vector<int> deadlock_cycle_ids;
         std::vector<int> frozen_vehicle_ids;
         std::vector<int> nlp_vehicle_ids;
