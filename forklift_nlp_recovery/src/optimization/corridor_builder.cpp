@@ -8,6 +8,7 @@ namespace forklift_nlp_recovery {
 namespace {
 
 constexpr double kEpsilon = 1e-9;
+constexpr double kMaxStartCorrection = 0.01;
 constexpr double kMapXExtension = 0.01;  // 左右边界各外扩 1 cm
 
 double normalizeAngle(double angle) { return std::atan2(std::sin(angle), std::cos(angle)); }
@@ -118,11 +119,11 @@ bool CorridorBuilder::rawAabbLegal(const Aabb& box) const {
 
 bool CorridorBuilder::expandRawAabb(const Pose2d& seed, Aabb& raw,
                                     std::string& reason) const {
-    if (!pointLegal(seed)) {
-        reason = "disc center seed is not legal with the configured clearance";
+    raw = {seed.x, seed.x, seed.y, seed.y};
+    if (!rawAabbLegal(raw)) {
+        reason = "raw seed point intersects a shelf or lies outside the map";
         return false;
     }
-    raw = {seed.x, seed.x, seed.y, seed.y};
     bool open[4] = {true, true, true, true};
     while (open[0] || open[1] || open[2] || open[3]) {
         for (int direction = 0; direction < 4; ++direction) {
@@ -204,18 +205,6 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
         result.reason = reason.str();
         return result;
     }
-    PointLegalityViolation violation;
-    if (!pointLegal(center)) {
-        diagnosePointViolation(center, violation);
-        std::ostringstream reason;
-        reason << "stage=seed_check vehicle=" << vehicle << " disc_center=("
-               << center.x << "," << center.y << ") radius=" << vehicle_radius_
-               << " violation=" << violation.type;
-        if (violation.shelf_index >= 0) reason << " shelf=" << violation.shelf_index;
-        reason << " geometry_distance=" << violation.distance;
-        result.reason = reason.str();
-        return result;
-    }
     std::string expansion_reason;
     if (!expandRawAabb(center, result.raw_aabb, expansion_reason)) {
         std::ostringstream reason;
@@ -232,8 +221,6 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
                        result.raw_aabb.max_y - vehicle_radius_};
     const Aabb& stc = result.safe_stc;
     if (stc.min_x > stc.max_x || stc.min_y > stc.max_y ||
-        center.x < stc.min_x - kEpsilon || center.x > stc.max_x + kEpsilon ||
-        center.y < stc.min_y - kEpsilon || center.y > stc.max_y + kEpsilon ||
         !aabbLegal(stc)) {
         std::ostringstream reason;
         reason << "stage=stc_inset vehicle=" << vehicle << " disc_center=("
@@ -260,24 +247,68 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
         result.reason = reason.str();
         return result;
     }
-    const auto inside = [&](double s) {
-        const Pose2d sample = bodyCenter(interpolate(path, s).pose);
-        return sample.x >= stc.min_x - kEpsilon && sample.x <= stc.max_x + kEpsilon &&
-               sample.y >= stc.min_y - kEpsilon && sample.y <= stc.max_y + kEpsilon;
+    const auto pointInside = [&](const Pose2d& point) {
+        return point.x >= stc.min_x - kEpsilon && point.x <= stc.max_x + kEpsilon &&
+               point.y >= stc.min_y - kEpsilon && point.y <= stc.max_y + kEpsilon;
     };
-    if (!inside(current_s)) {
-        std::ostringstream reason;
-        reason << "stage=terminal_search vehicle=" << vehicle
-               << " disc_center=(" << center.x << "," << center.y
-               << ") is outside safe_stc=" << aabbText(stc);
-        result.reason = reason.str();
-        return result;
+    const auto inside = [&](double s) {
+        return pointInside(bodyCenter(interpolate(path, s).pose));
+    };
+    double optimization_start_s = current_s;
+    Pose2d optimization_start_pose = start;
+    uint8_t optimization_start_type = interpolate(path, current_s).type;
+    if (!pointInside(center)) {
+        const double search_end = std::min(path.back().s, current_s + kMaxStartCorrection);
+        const double search_step = std::max(1e-4, std::min({0.001,
+            config_.exit_search_step, map_param_.path_resolution}));
+        double outside_s = current_s;
+        double entry_s = -1.0;
+        for (double s = current_s; s <= search_end + kEpsilon;
+             s = std::min(search_end, s + search_step)) {
+            if (inside(s)) {
+                entry_s = s;
+                break;
+            }
+            outside_s = s;
+            if (s >= search_end - kEpsilon) break;
+        }
+        if (entry_s > current_s + kEpsilon && outside_s < entry_s - kEpsilon) {
+            for (int iteration = 0; iteration < 24; ++iteration) {
+                const double mid = 0.5 * (outside_s + entry_s);
+                if (inside(mid)) entry_s = mid;
+                else outside_s = mid;
+            }
+        }
+        if (entry_s >= 0.0) {
+            const PathPoint entry = interpolate(path, entry_s);
+            if (std::hypot(entry.pose.x - start.x, entry.pose.y - start.y) <=
+                kMaxStartCorrection + kEpsilon) {
+                optimization_start_s = entry.s;
+                optimization_start_pose = entry.pose;
+                optimization_start_type = entry.type;
+            } else {
+                entry_s = -1.0;
+            }
+        }
+        if (entry_s < 0.0) {
+            std::ostringstream reason;
+            reason << "stage=start_search vehicle=" << vehicle << " disc_center=("
+                   << center.x << "," << center.y << ") is outside safe_stc="
+                   << aabbText(stc) << " and no valid path entry exists within "
+                   << kMaxStartCorrection << " m";
+            result.reason = reason.str();
+            return result;
+        }
+        result.optimization_start_corrected = true;
     }
+    result.optimization_start = {optimization_start_pose, optimization_start_s,
+                                 optimization_start_type};
+    result.optimization_start_valid = true;
     const double step = std::max(1e-4, std::min(config_.exit_search_step,
                                                 map_param_.path_resolution));
-    double inside_s = current_s;
+    double inside_s = optimization_start_s;
     double outside_s = -1.0;
-    for (double s = std::min(path.back().s, current_s + step);
+    for (double s = std::min(path.back().s, optimization_start_s + step);
          s <= path.back().s + kEpsilon; s = std::min(path.back().s, s + step)) {
         if (!inside(s)) {
             outside_s = s;
@@ -290,7 +321,8 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
         std::ostringstream reason;
         reason << "stage=terminal_search vehicle=" << vehicle
                << " no body-center exit from safe_stc=" << aabbText(stc)
-               << " current_s=" << current_s << " path_end_s=" << path.back().s;
+               << " current_s=" << optimization_start_s
+               << " path_end_s=" << path.back().s;
         result.reason = reason.str();
         return result;
     }

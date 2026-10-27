@@ -2708,8 +2708,21 @@ private:
                 return false;
             }
             const auto& first = trajectory.points.front();
-            if (std::hypot(first.x - start.x, first.y - start.y) > 1e-4 ||
-                std::abs(normalizeAngle(first.yaw - start.theta)) > 1e-4 ||
+            const double start_shift = std::hypot(first.x - start.x, first.y - start.y);
+            const bool corrected_start = trajectory.initial_state_corrected;
+            bool start_matches = start_shift <= 1e-4 &&
+                std::abs(normalizeAngle(first.yaw - start.theta)) <= 1e-4;
+            if (corrected_start &&
+                trajectory.initial_path_s >= vehicle->path_s - 1e-9 &&
+                trajectory.initial_path_s <= vehicle->path_s + 0.01 + 1e-9 &&
+                trajectory.initial_path_s <= vehicle->track.length() + 1e-9 &&
+                start_shift <= 0.01 + 1e-9) {
+                const RoughWp expected_start = vehicle->track.poseAtS(trajectory.initial_path_s);
+                start_matches = std::hypot(first.x - expected_start.x,
+                    first.y - expected_start.y) <= 1e-4 &&
+                    std::abs(normalizeAngle(first.yaw - expected_start.theta)) <= 1e-4;
+            }
+            if (!start_matches ||
                 std::abs(first.velocity) > 1e-4) {
                 reason = "trajectory start does not match the frozen vehicle state";
                 return false;

@@ -149,22 +149,29 @@ OptimizationInputBuildResult OptimizationInputBuilder::build(
         }
         NlpVehicleInput input_vehicle;
         input_vehicle.id = id;
-        input_vehicle.initial_state.rear_axle_pose = {
+        input_vehicle.frozen_initial_state.rear_axle_pose = {
             vehicle->pose.x, vehicle->pose.y, vehicle->pose.theta};
-        input_vehicle.initial_state.longitudinal_speed =
+        input_vehicle.frozen_initial_state.longitudinal_speed =
             vehicle->current_speed;
-        input_vehicle.initial_state.steering_valid = vehicle->steering_valid;
-        input_vehicle.initial_state.steering_estimated = vehicle->steering_estimated;
-        input_vehicle.initial_state.steering_angle = vehicle->steering_angle;
-        input_vehicle.path_s = vehicle->path_s;
+        input_vehicle.frozen_initial_state.steering_valid = vehicle->steering_valid;
+        input_vehicle.frozen_initial_state.steering_estimated = vehicle->steering_estimated;
+        input_vehicle.frozen_initial_state.steering_angle = vehicle->steering_angle;
+        input_vehicle.frozen_path_s = vehicle->path_s;
+        input_vehicle.initial_state = input_vehicle.frozen_initial_state;
+        input_vehicle.path_s = input_vehicle.frozen_path_s;
         input_vehicle.path_gen = vehicle->path_gen;
         input_vehicle.original_path = pathFromMessage(*vehicle);
         input_vehicle.parameters = vehicle_parameters_;
 
         const CorridorResult corridor = corridor_builder_.build(
-            input_vehicle.initial_state.rear_axle_pose,
-            input_vehicle.original_path, input_vehicle.path_s,
+            input_vehicle.frozen_initial_state.rear_axle_pose,
+            input_vehicle.original_path, input_vehicle.frozen_path_s,
             input_vehicle.path_gen, id);
+        if (corridor.optimization_start_valid) {
+            input_vehicle.initial_state.rear_axle_pose = corridor.optimization_start.pose;
+            input_vehicle.path_s = corridor.optimization_start.s;
+            input_vehicle.initial_state_corrected = corridor.optimization_start_corrected;
+        }
         input_vehicle.corridor_valid = corridor.success;
         input_vehicle.corridor_reason = corridor.reason;
         input_vehicle.raw_aabb_valid = corridor.raw_aabb_valid;
@@ -237,8 +244,12 @@ bool writeOptimizationInputDebugFile(const OptimizationInputBuildResult& result,
     else out << "\nvehicles:\n";
     for (const NlpVehicleInput& vehicle : input.vehicles) {
         out << "  - id: " << vehicle.id << "\n";
-        out << "    initial_rear_axle: ";
+        out << "    frozen_initial_rear_axle: ";
+        writePose(out, vehicle.frozen_initial_state.rear_axle_pose);
+        out << "\n    frozen_path_s: " << vehicle.frozen_path_s << "\n";
+        out << "    optimization_initial_rear_axle: ";
         writePose(out, vehicle.initial_state.rear_axle_pose);
+        out << "\n    initial_state_corrected: " << vehicle.initial_state_corrected;
         out << "\n    initial_speed: "
             << vehicle.initial_state.longitudinal_speed << "\n";
         out << "    path_s: " << vehicle.path_s << "\n";

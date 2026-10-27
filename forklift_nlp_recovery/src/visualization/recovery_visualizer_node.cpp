@@ -437,7 +437,16 @@ private:
                             const NlpVehicleInput& vehicle,
                             const std::string& name, int id_offset,
                             const std_msgs::ColorRGBA& rgba) {
+        const Pose2d& frozen_start = vehicle.frozen_initial_state.rear_axle_pose;
         const Pose2d& start = vehicle.initial_state.rear_axle_pose;
+        addBody(markers, name + "_frozen_body", id_offset, frozen_start,
+                color(rgba.r, rgba.g, rgba.b, 0.30f));
+        addSolidPoint(markers, name + "_frozen_start_point", id_offset, frozen_start,
+                      color(1.0f, 0.45f, 0.0f, 1.0f));
+        addText(markers, name + "_frozen_start_text", id_offset,
+                frozen_start.x, frozen_start.y, 0.22,
+                poseText("V" + std::to_string(vehicle.id) + " frozen rear", frozen_start),
+                color(1.0f, 0.45f, 0.0f, 1.0f));
         addDisc(markers, name + "_disc", id_offset, start,
                 color(rgba.r, rgba.g, rgba.b, 0.20f));
         addDiscCenter(markers, name + "_disc_center", id_offset, start,
@@ -620,6 +629,8 @@ private:
             sandbox_msgs::NlpRecoveryVehicleTrajectory vehicle;
             vehicle.id = solved.id;
             vehicle.path_gen = found->path_gen;
+            vehicle.initial_state_corrected = found->initial_state_corrected;
+            vehicle.initial_path_s = found->path_s;
             vehicle.terminal_path_s = found->terminal.path_s;
             vehicle.points.reserve(solved.nodes.size());
             for (const auto& node : solved.nodes) {

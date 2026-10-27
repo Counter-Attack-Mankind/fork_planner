@@ -36,7 +36,10 @@ struct NlpVehicleInput {
     int id = -1;
     // Rear-axle state remains the optimization reference. Corridor boxes and
     // seeds are body-disc-center geometry produced by CorridorBuilder.
+    InitialMotionState frozen_initial_state;
+    double frozen_path_s = 0.0;
     InitialMotionState initial_state;
+    bool initial_state_corrected = false;
     double path_s = 0.0;
     int path_gen = -1;
     std::vector<PathPoint> original_path;

@@ -57,6 +57,9 @@ struct CorridorResult {
     Aabb raw_aabb;
     bool stc_valid = false;
     Aabb safe_stc;
+    bool optimization_start_valid = false;
+    bool optimization_start_corrected = false;
+    PathPoint optimization_start;
     bool terminal_valid = false;
     std::vector<Aabb> boxes;
     std::vector<Pose2d> seeds;  // body-center seeds used by AABB geometry
