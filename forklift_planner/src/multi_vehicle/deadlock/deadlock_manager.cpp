@@ -416,9 +416,14 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                         emit_logs);
                     return;
                 }
-                if (!passer_active) {
-                    const std::vector<int> cycle_ids{
-                        retreat->id, passer->id};
+                // 特殊 PASS：优先车连续停止满 4 秒才进入 NLP
+                if (!passer_active)
+                    transaction_.pass_clear_elapsed += std::max(0.0, dt);
+                else
+                    transaction_.pass_clear_elapsed = 0.0;
+                if (transaction_.pass_clear_elapsed + 1e-9 >=
+                    2.0 * config_.rolling_refresh_period) {
+                    const std::vector<int> cycle_ids{retreat->id, passer->id};
                     enterNlpRecovery(
                         cycle_ids, nlpVehicleIds(vehicles, cycle_ids),
                         "b_start_hold_passer_stopped", emit_logs);
