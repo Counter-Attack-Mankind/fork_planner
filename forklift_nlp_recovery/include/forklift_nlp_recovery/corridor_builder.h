@@ -41,6 +41,8 @@ struct CorridorConfig {
     double expansion_step = 0.02;
     double exit_search_step = 0.01;
     double cusp_clearance = 0.05;
+    double stc_inset_reduction = 0.03;
+    double max_start_correction = 0.02;
 };
 
 struct RejoinPoint {

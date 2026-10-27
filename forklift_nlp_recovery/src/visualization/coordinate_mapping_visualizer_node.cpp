@@ -202,6 +202,10 @@ public:
         CorridorConfig corridor_config;
         private_nh_.param("expansion_step", corridor_config.expansion_step,
                           corridor_config.expansion_step);
+        private_nh_.param("stc_inset_reduction", corridor_config.stc_inset_reduction,
+                          corridor_config.stc_inset_reduction);
+        private_nh_.param("max_start_correction", corridor_config.max_start_correction,
+                          corridor_config.max_start_correction);
         private_nh_.param("route", route_, std::string("a1_to_b"));
         private_nh_.param("slot_id", slot_id_, 0);
         private_nh_.param("catalog_file", catalog_file_, std::string());

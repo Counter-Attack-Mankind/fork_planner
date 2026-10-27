@@ -173,6 +173,10 @@ public:
                           config_.exit_search_step);
         private_nh_.param("cusp_clearance", config_.cusp_clearance,
                           config_.cusp_clearance);
+        private_nh_.param("stc_inset_reduction", config_.stc_inset_reduction,
+                          config_.stc_inset_reduction);
+        private_nh_.param("max_start_correction", config_.max_start_correction,
+                          config_.max_start_correction);
         builder_ = std::make_unique<CorridorBuilder>(
             map_param_, map_->shelf_blocks(), config_);
         VehicleParameters vehicle_parameters;

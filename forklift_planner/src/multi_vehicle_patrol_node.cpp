@@ -77,6 +77,9 @@ public:
         pp_ = PlannerParam::fromROSParam(param_nh);
         cfg_ = forklift_planner::multi_vehicle::MultiVehicleConfig::fromROSParam(
             param_nh);
+        param_nh.param("/forklift_nlp_recovery/max_start_correction",
+                       nlp_max_start_correction_, nlp_max_start_correction_);
+        nlp_max_start_correction_ = std::max(0.0, nlp_max_start_correction_);
         nh_.param("one_shot", one_shot_, one_shot_);
         const std::string planner_package =
             ros::package::getPath("forklift_planner");
@@ -2714,9 +2717,10 @@ private:
                 std::abs(normalizeAngle(first.yaw - start.theta)) <= 1e-4;
             if (corrected_start &&
                 trajectory.initial_path_s >= vehicle->path_s - 1e-9 &&
-                trajectory.initial_path_s <= vehicle->path_s + 0.01 + 1e-9 &&
+                trajectory.initial_path_s <= vehicle->path_s +
+                    nlp_max_start_correction_ + 1e-9 &&
                 trajectory.initial_path_s <= vehicle->track.length() + 1e-9 &&
-                start_shift <= 0.01 + 1e-9) {
+                start_shift <= nlp_max_start_correction_ + 1e-9) {
                 const RoughWp expected_start = vehicle->track.poseAtS(trajectory.initial_path_s);
                 start_matches = std::hypot(first.x - expected_start.x,
                     first.y - expected_start.y) <= 1e-4 &&
@@ -3704,6 +3708,7 @@ private:
     bool nlp_recovery_frozen_ = false;
     bool nlp_execution_active_ = false;
     double nlp_execution_elapsed_ = 0.0;
+    double nlp_max_start_correction_ = 0.02;
     sandbox_msgs::NlpRecoveryTrajectory nlp_execution_;
     uint64_t sim_plan_id_ = 0;
     double sim_plan_start_time_ = 0.0;

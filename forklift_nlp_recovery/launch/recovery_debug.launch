@@ -8,6 +8,8 @@
   <param name="/use_sim_time" value="false"/>
   <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
   <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml"/>
+  <rosparam command="load" file="$(find forklift_nlp_recovery)/config/recovery.yaml"
+            ns="/forklift_nlp_recovery"/>
 
   <param name="/forklift_planner/multi_vehicle/real_mode" value="$(arg real_mode)"/>
 
@@ -22,10 +24,7 @@
   <node pkg="forklift_nlp_recovery"
         type="recovery_visualizer_node"
         name="forklift_nlp_recovery"
-        output="screen">
-    <rosparam command="load"
-              file="$(find forklift_nlp_recovery)/config/recovery.yaml"/>
-  </node>
+        output="screen"/>
 
   <!-- RViz -->
   <node if="$(arg start_rviz)"
