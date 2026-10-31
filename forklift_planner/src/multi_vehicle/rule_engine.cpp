@@ -2873,13 +2873,6 @@ void RuleEngine::decide(std::vector<VehicleAgent>& vehicles, double dt,
             }
             continue;
         }
-        if (v.ttc_stop_hold_remaining > 1e-9) {
-            v.requested_action = VehicleAction::STOP;
-            if (v.reason.rfind("dynamic_speed_STOP_", 0) != 0) {
-                v.reason = "ttc_stop_hold";
-            }
-            continue;
-        }
         v.blocker_id = -1;
         v.requested_action = VehicleAction::NOMINAL;
         v.reason = "clear";

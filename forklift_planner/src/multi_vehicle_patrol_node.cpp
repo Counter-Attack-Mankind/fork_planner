@@ -3119,18 +3119,13 @@ private:
             vehicle->real_pose_valid = false;
             vehicle->reason = "nlp_recovery_rejoined";
         }
-        // Evaluate ordinary coordination without the NLP hold overlay. Preserve
-        // the recovery state so a remaining wait cycle can start a new
-        // transaction without releasing the global freeze.
-        const auto recovery_snapshot = rule_engine_->snapshot();
-        auto ordinary_snapshot = recovery_snapshot;
-        ordinary_snapshot.deadlock.candidate = {};
-        ordinary_snapshot.deadlock.transaction = {};
-        ordinary_snapshot.deadlock.directive = {};
-        rule_engine_->restore(ordinary_snapshot, true, true);
+        for (VehicleAgent& vehicle : agents_) vehicle.blocker_id = -1;
+        // Rebuild the complete ordinary waiting graph from the recovered
+        // vehicle state while the current NLP transaction still owns the
+        // global freeze. Recovery HOLD only preserves STOP; ordinary TTC,
+        // A1, slot and clearance rules create every blocker edge afresh.
         rule_engine_->decide(agents_, dt);
         if (waitingCyclePresent()) {
-            rule_engine_->restore(recovery_snapshot, true, true);
             nlp_execution_active_ = false;
             if (!rule_engine_->restartNlpRecovery(
                     nlp_execution_.recovery_id, agents_,
@@ -3139,6 +3134,11 @@ private:
             } else {
                 ROS_WARN("[NLP_FINISH] wait cycle remains; new frozen recovery transaction created");
             }
+            return;
+        }
+        if (!rule_engine_->completeNlpRecovery(nlp_execution_.recovery_id)) {
+            nlp_execution_active_ = false;
+            ROS_ERROR("[NLP_FINISH] wait graph is acyclic but transaction completion was rejected");
             return;
         }
         nlp_execution_active_ = false;
