@@ -154,6 +154,9 @@ private:
     void enterNlpRecovery(const std::vector<int>& deadlock_cycle_ids,
                           const std::vector<int>& frozen_vehicle_ids,
                           const std::string& reason, bool emit_logs);
+    bool waitingCycleConfirmed(
+        const std::vector<const VehicleAgent*>& cycle, double dt,
+        bool emit_logs, std::vector<int>& cycle_ids);
 
     const MapParam& map_param_;
     const MultiVehicleConfig& config_;

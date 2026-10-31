@@ -334,6 +334,62 @@ bool DeadlockManager::completeNlpRecovery(uint64_t recovery_id) {
     return true;
 }
 
+bool DeadlockManager::waitingCycleConfirmed(
+    const std::vector<const VehicleAgent*>& cycle, double dt, bool emit_logs,
+    std::vector<int>& cycle_ids) {
+    std::vector<int> cycle_path_gens;
+    std::vector<double> cycle_s;
+    cycle_ids.reserve(cycle.size());
+    cycle_path_gens.reserve(cycle.size());
+    cycle_s.reserve(cycle.size());
+    for (const VehicleAgent* vehicle : cycle) {
+        cycle_ids.push_back(vehicle->id);
+        cycle_path_gens.push_back(vehicle->path_gen);
+        cycle_s.push_back(vehicle->path_s);
+    }
+
+    const double progress_epsilon = std::max(0.005, config_.path_validation_step);
+    const bool same_candidate = candidate_.valid &&
+        candidate_.vehicle_ids == cycle_ids &&
+        candidate_.path_gens == cycle_path_gens;
+    bool progressed = !same_candidate || candidate_.anchor_s.size() != cycle_s.size();
+    if (!progressed) {
+        for (size_t i = 0; i < cycle_s.size(); ++i) {
+            if (std::abs(cycle_s[i] - candidate_.anchor_s[i]) > progress_epsilon) {
+                progressed = true;
+                break;
+            }
+        }
+    }
+    if (progressed) {
+        candidate_ = {};
+        candidate_.valid = true;
+        candidate_.vehicle_ids = cycle_ids;
+        candidate_.path_gens = cycle_path_gens;
+        candidate_.anchor_s = cycle_s;
+        candidate_.duration = dt;
+        std::ostringstream details;
+        details << "cycle=" << vehicleListText(cycle_ids);
+        for (const VehicleAgent* vehicle : cycle) {
+            details << " V" << vehicle->id << "_gen=" << vehicle->path_gen
+                    << "_s=" << vehicle->path_s
+                    << "_reason=" << vehicle->reason
+                    << "_blocker=V" << vehicle->blocker_id;
+        }
+        emit("CANDIDATE", details.str(), emit_logs);
+        return false;
+    }
+
+    candidate_.duration += dt;
+    if (candidate_.duration + 1e-9 < config_.deadlock_confirm_time) return false;
+
+    std::ostringstream confirmed;
+    confirmed << "cycle=" << vehicleListText(cycle_ids)
+              << " duration=" << candidate_.duration;
+    emit("CONFIRMED", confirmed.str(), emit_logs);
+    return true;
+}
+
 void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const std::vector<DeadlockPairGeometry>& pair_geometry,double dt, bool emit_logs) 
 {
     if (!config_.deadlock_enabled) {
@@ -416,17 +472,19 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
                         emit_logs);
                     return;
                 }
-                // 特殊 PASS：优先车连续停止满 4 秒才进入 NLP
-                if (!passer_active)
-                    transaction_.pass_clear_elapsed += std::max(0.0, dt);
-                else
-                    transaction_.pass_clear_elapsed = 0.0;
-                if (transaction_.pass_clear_elapsed + 1e-9 >=
-                    2.0 * config_.rolling_refresh_period) {
-                    const std::vector<int> cycle_ids{retreat->id, passer->id};
-                    enterNlpRecovery(
-                        cycle_ids, nlpVehicleIds(vehicles, cycle_ids),
-                        "b_start_hold_passer_stopped", emit_logs);
+                const std::vector<const VehicleAgent*> cycle =
+                    findWaitingCycle(vehicles);
+                if (cycle.empty()) {
+                    candidate_ = {};
+                    refreshDirective();
+                    return;
+                }
+                std::vector<int> cycle_ids;
+                if (waitingCycleConfirmed(cycle, dt, emit_logs, cycle_ids)) {
+                    enterNlpRecovery(cycle_ids,
+                                     nlpVehicleIds(vehicles, cycle_ids),
+                                     "wait_cycle_during_b_start_hold",
+                                     emit_logs);
                     return;
                 }
                 refreshDirective();
@@ -592,58 +650,7 @@ void DeadlockManager::update(const std::vector<VehicleAgent>& vehicles, const st
     }
 
     std::vector<int> cycle_ids;
-    std::vector<int> cycle_path_gens;
-    std::vector<double> cycle_s;
-    cycle_ids.reserve(cycle.size());
-    cycle_path_gens.reserve(cycle.size());
-    cycle_s.reserve(cycle.size());
-    for (const VehicleAgent* vehicle : cycle) {
-        cycle_ids.push_back(vehicle->id);
-        cycle_path_gens.push_back(vehicle->path_gen);
-        cycle_s.push_back(vehicle->path_s);
-    }
-
-    const double progress_epsilon = std::max(0.005, config_.path_validation_step);
-    const bool same_candidate = candidate_.valid &&
-        candidate_.vehicle_ids == cycle_ids &&
-        candidate_.path_gens == cycle_path_gens;
-    bool progressed = !same_candidate ||
-        candidate_.anchor_s.size() != cycle_s.size();
-    if (!progressed) {
-        for (size_t i = 0; i < cycle_s.size(); ++i) {
-            if (std::abs(cycle_s[i] - candidate_.anchor_s[i]) >
-                progress_epsilon) {
-                progressed = true;
-                break;
-            }
-        }
-    }
-    if (progressed) {
-        candidate_ = {};
-        candidate_.valid = true;
-        candidate_.vehicle_ids = cycle_ids;
-        candidate_.path_gens = cycle_path_gens;
-        candidate_.anchor_s = cycle_s;
-        candidate_.duration = dt;
-        std::ostringstream details;
-        details << "cycle=" << vehicleListText(cycle_ids);
-        for (const VehicleAgent* vehicle : cycle) {
-            details << " V" << vehicle->id << "_gen=" << vehicle->path_gen
-                    << "_s=" << vehicle->path_s
-                    << "_reason=" << vehicle->reason
-                    << "_blocker=V" << vehicle->blocker_id;
-        }
-        emit("CANDIDATE", details.str(), emit_logs);
-        return;
-    }
-
-    candidate_.duration += dt;
-    if (candidate_.duration + 1e-9 < config_.deadlock_confirm_time) return;
-
-    std::ostringstream confirmed;
-    confirmed << "cycle=" << vehicleListText(cycle_ids)
-              << " duration=" << candidate_.duration;
-    emit("CONFIRMED", confirmed.str(), emit_logs);
+    if (!waitingCycleConfirmed(cycle, dt, emit_logs, cycle_ids)) return;
 
     if (cycle.size() >= 3) {
         enterNlpRecovery(cycle_ids, nlpVehicleIds(vehicles, cycle_ids),

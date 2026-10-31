@@ -90,6 +90,63 @@ int main() {
         return fail("successful fixed retreat incorrectly triggered NLP preparation");
     }
 
+    MultiVehicleConfig special_pass_config = config;
+    special_pass_config.deadlock_confirm_time = 0.20;
+    VehicleAgent held_at_b = retreat;
+    held_at_b.path_s = 0.0;
+    VehicleAgent stopped_passer = passer;
+    stopped_passer.path_s = 0.0;
+    stopped_passer.blocker_id = 2;
+    VehicleAgent third_party = retreat;
+    third_party.id = 2;
+    third_party.blocker_id = -1;
+    third_party.track.set(RoughPath{
+        RoughWp{0.0, 10.0, 0.0, WpType::FORWARD},
+        RoughWp{4.0, 10.0, 0.0, WpType::FORWARD}});
+    std::vector<VehicleAgent> special_pass_vehicles{
+        held_at_b, stopped_passer, third_party};
+    DeadlockManager::Snapshot special_pass_state;
+    special_pass_state.transaction.phase = RecoveryPhase::PASS;
+    special_pass_state.transaction.retreat_vehicle_id = held_at_b.id;
+    special_pass_state.transaction.pass_vehicle_id = stopped_passer.id;
+    special_pass_state.transaction.retreat_path_gen = held_at_b.path_gen;
+    special_pass_state.transaction.pass_path_gen = stopped_passer.path_gen;
+    special_pass_state.transaction.pass_conflict_exit_s = 0.50;
+    special_pass_state.transaction.hold_retreat_at_b_start = true;
+    DeadlockManager special_pass_manager(map, special_pass_config);
+    special_pass_manager.restore(special_pass_state);
+    for (int i = 0; i < 50; ++i) {
+        special_pass_manager.update(special_pass_vehicles, {}, 0.10, false);
+    }
+    if (special_pass_manager.directive().phase != RecoveryPhase::PASS ||
+        special_pass_manager.directive().motionFor(held_at_b.id) !=
+            RecoveryMotion::HOLD ||
+        special_pass_manager.directive().nlpTakeover()) {
+        return fail("third-party STOP incorrectly ended B-start special PASS");
+    }
+
+    special_pass_vehicles[1].path_s = 4.0;
+    special_pass_manager.update(special_pass_vehicles, {}, 0.10, false);
+    if (special_pass_manager.directive().phase != RecoveryPhase::NONE) {
+        return fail("passer clearing the original conflict did not end special PASS");
+    }
+
+    special_pass_vehicles[1].path_s = 0.0;
+    special_pass_vehicles[1].blocker_id = third_party.id;
+    special_pass_vehicles[2].blocker_id = stopped_passer.id;
+    DeadlockManager persistent_cycle_manager(map, special_pass_config);
+    persistent_cycle_manager.restore(special_pass_state);
+    persistent_cycle_manager.update(special_pass_vehicles, {}, 0.10, false);
+    if (persistent_cycle_manager.directive().nlpTakeover()) {
+        return fail("special PASS wait cycle skipped confirmation time");
+    }
+    persistent_cycle_manager.update(special_pass_vehicles, {}, 0.10, false);
+    if (!persistent_cycle_manager.directive().nlpTakeover() ||
+        persistent_cycle_manager.directive().deadlock_cycle_ids !=
+            std::vector<int>({1, 2})) {
+        return fail("persistent wait cycle during special PASS did not enter NLP");
+    }
+
     VehicleAgent non_b_retreat = retreat;
     non_b_retreat.path_s = 1.40;
     non_b_retreat.slot_departure_clear_s = 0.0;
