@@ -1163,9 +1163,9 @@ bool TaskAllocator::getPickupLegTrack(int slot, PathTrack& out) const {
     return true;
 }
 
+// 禁用某指定库位
 bool TaskAllocator::dispatchTargetEnabled(int slot) const {
-    return slot >= 0 && slot < static_cast<int>(map_.slots().size()) &&
-           map_.slots().at(static_cast<size_t>(slot)).row_id != 1;
+    return slot >= 0 && slot < static_cast<int>(map_.slots().size()) && map_.slots().at(static_cast<size_t>(slot)).row_id != 1;
 }
 
 double TaskAllocator::slotDepartureClearS(const PathTrack& track,

@@ -221,14 +221,13 @@ TtcStopBoundary evaluateTtcStopBoundary(
             break;
     }
     result.action_speed = std::max(0.0, result.action_speed);
-    result.decision_period = std::max(0.0, config.rolling_refresh_period);
-    result.braking_time =
-        result.action_speed / std::max(1e-6, config.max_decel);
-    result.time_margin = std::max(0.0, config.dynamic_stop_time_margin);
-    result.stop_threshold = result.decision_period + result.braking_time +
-                            result.time_margin;
-    result.stop_required =
-        vehicle_ttc <= result.stop_threshold + 1e-9;
+
+    result.decision_period = std::max(0.0, config.rolling_refresh_period );
+    result.braking_time = result.action_speed / std::max(1e-6, config.max_decel);
+
+    // 实际过程中由于physcial_safety会引发停靠位置过后，导致A1 onwer的TO B被堵塞，因此-0.5s
+    result.stop_threshold = result.decision_period + result.braking_time - 0.5;
+    result.stop_required = vehicle_ttc <= result.stop_threshold + 1e-9;
     return result;
 }
 
