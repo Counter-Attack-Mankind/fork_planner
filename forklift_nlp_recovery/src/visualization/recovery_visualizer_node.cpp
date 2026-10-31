@@ -15,6 +15,7 @@
 
 #include <geometry_msgs/Point.h>
 #include <sandbox_msgs/RecoverySnapshot.h>
+#include <sandbox_msgs/BridgeEscapeCommand.h>
 #include <sandbox_msgs/NlpRecoveryTrajectory.h>
 #include <sandbox_msgs/NlpRecoveryPoint.h>
 #include <sandbox_msgs/NlpRecoveryVehicleTrajectory.h>
@@ -261,6 +262,8 @@ public:
             "/forklift_nlp_recovery/markers", 1, true);
         trajectory_pub_ = private_nh_.advertise<sandbox_msgs::NlpRecoveryTrajectory>(
             "/forklift_planner/nlp_recovery_trajectory", 1, true);
+        bridge_escape_pub_ = private_nh_.advertise<sandbox_msgs::BridgeEscapeCommand>(
+            "/forklift_planner/bridge_escape_command", 1, true);
         snapshot_sub_ = private_nh_.subscribe(
             snapshot_topic_, 1, &RecoveryVisualizerNode::snapshotCallback, this);
         std::ostringstream selected_ids;
@@ -679,6 +682,111 @@ private:
         }
     }
 
+    bool trySolveCandidate(CandidateEvaluation candidate) {
+        if (!candidate.eligible || candidate.build.input.vehicles.size() != 1) return false;
+        NlpVehicleInput& vehicle = candidate.build.input.vehicles.front();
+        const std::string target_key = std::to_string(candidate.vehicle_id) + "@" +
+            std::to_string(vehicle.path_gen) + "@" +
+            std::to_string(static_cast<long long>(
+                std::llround(vehicle.terminal.path_s * 1000.0)));
+        if (!attempted_recovery_targets_.insert(target_key).second) {
+            ROS_WARN("[nlp_recovery][candidate] skip repeated target %s",
+                     target_key.c_str());
+            return false;
+        }
+        const HybridAstarResult hybrid = hybrid_planner_->plan(
+            vehicle, candidate.build.input.static_vehicles);
+        if (!hybrid.success) {
+            ROS_WARN("[nlp_recovery][candidate] V%d Hybrid A* failed: %s",
+                     candidate.vehicle_id, hybrid.reason.c_str());
+            return false;
+        }
+        vehicle.reference_path = hybrid.path;
+        locked_.build = std::move(candidate.build);
+        CaseSaveResult saved;
+        const PreparedGuess prepared = prepareInitialGuess(locked_.build, true, &saved);
+        locked_.original_initial_guess = prepared.original;
+        locked_.actual_initial_guess = prepared.actual;
+        if (saved.success) locked_.case_directory = saved.case_directory;
+        writeDebugInput(locked_.build);
+        if (!locked_.actual_initial_guess.generated) {
+            ROS_WARN("[nlp_recovery][candidate] V%d initial guess failed: %s",
+                     candidate.vehicle_id,
+                     locked_.actual_initial_guess.reason.c_str());
+            locked_.build = OptimizationInputBuildResult{};
+            return false;
+        }
+        locked_.solver_result = solveAndSave(
+            locked_.build, locked_.actual_initial_guess, saved);
+        if (!locked_.solver_result.execution_publish_eligible) {
+            ROS_WARN("[nlp_recovery][candidate] V%d NLP failed: %s",
+                     candidate.vehicle_id, locked_.solver_result.reason.c_str());
+            locked_.build = OptimizationInputBuildResult{};
+            locked_.actual_initial_guess = NlpInitialGuess{};
+            locked_.original_initial_guess = NlpInitialGuess{};
+            locked_.solver_result = NlpSolveResult{};
+            return false;
+        }
+        submitLockedTrajectory();
+        return true;
+    }
+
+    void requestBridgeEscape(const BridgeEscapeEvaluation& escape) {
+        sandbox_msgs::BridgeEscapeCommand command;
+        command.header.stamp = ros::Time::now();
+        command.header.frame_id = locked_.frame_id;
+        command.recovery_id = locked_.recovery_id;
+        command.vehicle_id = escape.vehicle_id;
+        command.path_gen = escape.path_gen;
+        command.target_path_s = escape.escape_path_s;
+        bridge_escape_pub_.publish(command);
+        locked_.bridge_escape_pending = true;
+        locked_.bridge_vehicle_id = escape.vehicle_id;
+        locked_.bridge_path_gen = escape.path_gen;
+        locked_.bridge_target_path_s = escape.escape_path_s;
+        ROS_WARN("[nlp_recovery][bridge_escape] requested V%d s=%.3f",
+                 escape.vehicle_id, escape.escape_path_s);
+    }
+
+    void updateBridgeEscape(const sandbox_msgs::RecoverySnapshot& snapshot,
+                            const std::vector<int>& cycle_ids) {
+        if (!locked_.bridge_escape_pending ||
+            snapshot.bridge_escape_vehicle_id != locked_.bridge_vehicle_id ||
+            snapshot.bridge_escape_path_gen != locked_.bridge_path_gen) return;
+        if (snapshot.bridge_escape_status ==
+            sandbox_msgs::RecoverySnapshot::BRIDGE_ESCAPE_FAILED) {
+            locked_.bridge_escape_pending = false;
+            ROS_ERROR("[nlp_recovery][bridge_escape] V%d failed: %s",
+                      locked_.bridge_vehicle_id,
+                      snapshot.bridge_escape_reason.c_str());
+            return;
+        }
+        if (snapshot.bridge_escape_status !=
+            sandbox_msgs::RecoverySnapshot::BRIDGE_ESCAPE_SUCCEEDED) return;
+
+        locked_.bridge_escape_pending = false;
+        const CandidateSelectionResult selection = candidate_selector_->evaluate(
+            snapshot, cycle_ids);
+        const auto found = std::find_if(
+            selection.ranked.begin(), selection.ranked.end(),
+            [&](const CandidateEvaluation& candidate) {
+                return candidate.vehicle_id == locked_.bridge_vehicle_id;
+            });
+        if (found == selection.ranked.end() || !found->eligible) {
+            ROS_ERROR("[nlp_recovery][bridge_escape] V%d post-move geometry failed: %s",
+                      locked_.bridge_vehicle_id,
+                      found == selection.ranked.end() ? selection.reason.c_str() :
+                                                       found->reason.c_str());
+            return;
+        }
+        locked_.geometry_vehicles.clear();
+        locked_.geometry_vehicles.push_back(found->build.input.vehicles.front());
+        if (!trySolveCandidate(*found)) {
+            ROS_ERROR("[nlp_recovery][bridge_escape] V%d post-move NLP attempts exhausted",
+                      locked_.bridge_vehicle_id);
+        }
+    }
+
     std::string inputIdentity(const OptimizationInputBuildResult& build) const {
         std::ostringstream key;
         key << build.input.source_mode;
@@ -914,9 +1022,13 @@ private:
             clearLockedTransaction();
         }
 
+        const std::vector<int>& cycle_ids = snapshot.deadlock_cycle_ids.empty() ?
+            snapshot.nlp_vehicle_ids : snapshot.deadlock_cycle_ids;
+        if (locked_.active && locked_.bridge_escape_pending) {
+            updateBridgeEscape(snapshot, cycle_ids);
+        }
+
         if (!locked_.active) {
-            const std::vector<int>& cycle_ids = snapshot.deadlock_cycle_ids.empty() ?
-                snapshot.nlp_vehicle_ids : snapshot.deadlock_cycle_ids;
             const CandidateSelectionResult selection = candidate_selector_->evaluate(
                 snapshot, cycle_ids);
             if (!selection.complete_snapshot) {
@@ -940,58 +1052,30 @@ private:
                         << candidate.worst_gain << " reason=" << candidate.reason;
                 locked_.attempts.push_back(attempt.str());
                 ROS_INFO("[nlp_recovery][candidate] %s", attempt.str().c_str());
-                if (!candidate.eligible) continue;
-                NlpVehicleInput& vehicle = candidate.build.input.vehicles.front();
-                const std::string target_key = std::to_string(candidate.vehicle_id) + "@" +
-                    std::to_string(vehicle.path_gen) + "@" +
-                    std::to_string(static_cast<long long>(
-                        std::llround(vehicle.terminal.path_s * 1000.0)));
-                if (!attempted_recovery_targets_.insert(target_key).second) {
-                    ROS_WARN("[nlp_recovery][candidate] skip repeated target %s",
-                             target_key.c_str());
-                    continue;
-                }
-                const HybridAstarResult hybrid = hybrid_planner_->plan(
-                    vehicle, candidate.build.input.static_vehicles);
-                if (!hybrid.success) {
-                    ROS_WARN("[nlp_recovery][candidate] V%d Hybrid A* failed: %s",
-                             candidate.vehicle_id, hybrid.reason.c_str());
-                    continue;
-                }
-                vehicle.reference_path = hybrid.path;
-                locked_.build = candidate.build;
-                CaseSaveResult saved;
-                const PreparedGuess prepared = prepareInitialGuess(
-                    locked_.build, true, &saved);
-                locked_.original_initial_guess = prepared.original;
-                locked_.actual_initial_guess = prepared.actual;
-                if (saved.success) locked_.case_directory = saved.case_directory;
-                writeDebugInput(locked_.build);
-                if (!locked_.actual_initial_guess.generated) {
-                    ROS_WARN("[nlp_recovery][candidate] V%d initial guess failed: %s",
-                             candidate.vehicle_id,
-                             locked_.actual_initial_guess.reason.c_str());
-                    locked_.build = OptimizationInputBuildResult{};
-                    continue;
-                }
-                locked_.solver_result = solveAndSave(
-                    locked_.build, locked_.actual_initial_guess, saved);
-                if (!locked_.solver_result.execution_publish_eligible) {
-                    ROS_WARN("[nlp_recovery][candidate] V%d NLP failed: %s",
-                             candidate.vehicle_id,
-                             locked_.solver_result.reason.c_str());
-                    locked_.build = OptimizationInputBuildResult{};
-                    locked_.actual_initial_guess = NlpInitialGuess{};
-                    locked_.original_initial_guess = NlpInitialGuess{};
-                    locked_.solver_result = NlpSolveResult{};
-                    continue;
-                }
-                submitLockedTrajectory();
-                break;
+                if (trySolveCandidate(std::move(candidate))) break;
             }
-            if (locked_.build.input.vehicles.empty()) {
-                ROS_ERROR("[nlp_recovery][auto] bounded candidate attempts exhausted: %s",
-                          selection.reason.c_str());
+            if (locked_.build.input.vehicles.empty() && !locked_.submitted) {
+                const BridgeEscapeSelectionResult bridge =
+                    candidate_selector_->evaluateBridgeEscapes(snapshot, cycle_ids);
+                for (const BridgeEscapeEvaluation& escape : bridge.ranked) {
+                    std::ostringstream attempt;
+                    attempt << "bridge V" << escape.vehicle_id
+                            << " A=" << escape.escape_path_s
+                            << " reason=" << escape.reason;
+                    locked_.attempts.push_back(attempt.str());
+                    ROS_INFO("[nlp_recovery][candidate] %s", attempt.str().c_str());
+                    if (!escape.eligible || !execute_after_solve_) continue;
+                    if (escape.candidate.build.input.vehicles.size() == 1) {
+                        locked_.geometry_vehicles.push_back(
+                            escape.candidate.build.input.vehicles.front());
+                    }
+                    requestBridgeEscape(escape);
+                    break;
+                }
+                if (!locked_.bridge_escape_pending) {
+                    ROS_ERROR("[nlp_recovery][auto] regular and bridge candidates exhausted: %s",
+                              bridge.reason.c_str());
+                }
             }
         }
 
@@ -1118,11 +1202,16 @@ private:
         NlpSolveResult solver_result;
         std::vector<std::string> attempts;
         std::vector<NlpVehicleInput> geometry_vehicles;
+        bool bridge_escape_pending = false;
+        int bridge_vehicle_id = -1;
+        int bridge_path_gen = -1;
+        double bridge_target_path_s = 0.0;
     };
 
     ros::NodeHandle private_nh_;
     ros::Publisher marker_pub_;
     ros::Publisher trajectory_pub_;
+    ros::Publisher bridge_escape_pub_;
     ros::Subscriber snapshot_sub_;
     MapParam map_param_;
     std::unique_ptr<ForkliftMap> map_;

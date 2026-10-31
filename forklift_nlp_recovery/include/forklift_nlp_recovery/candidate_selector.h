@@ -34,6 +34,22 @@ struct CandidateSelectionResult {
     std::vector<CandidateEvaluation> ranked;
 };
 
+struct BridgeEscapeEvaluation {
+    int vehicle_id = -1;
+    int path_gen = -1;
+    double escape_path_s = 0.0;
+    Pose2d escape_pose;
+    bool eligible = false;
+    std::string reason;
+    CandidateEvaluation candidate;
+};
+
+struct BridgeEscapeSelectionResult {
+    bool complete_snapshot = false;
+    std::string reason;
+    std::vector<BridgeEscapeEvaluation> ranked;
+};
+
 class CandidateSelector {
 public:
     CandidateSelector(const MapParam& map_param,
@@ -42,6 +58,10 @@ public:
                       const OptimizationInputBuilder& input_builder);
 
     CandidateSelectionResult evaluate(
+        const sandbox_msgs::RecoverySnapshot& snapshot,
+        const std::vector<int>& deadlock_cycle_ids) const;
+
+    BridgeEscapeSelectionResult evaluateBridgeEscapes(
         const sandbox_msgs::RecoverySnapshot& snapshot,
         const std::vector<int>& deadlock_cycle_ids) const;
 
@@ -54,6 +74,11 @@ private:
         const sandbox_msgs::RecoveryVehicleState& vehicle,
         const sandbox_msgs::RecoverySnapshot& snapshot,
         int moved_vehicle_id, const Pose2d* moved_pose) const;
+    CandidateEvaluation evaluateBuiltCandidate(
+        const sandbox_msgs::RecoverySnapshot& snapshot,
+        const std::vector<int>& deadlock_cycle_ids,
+        const std::vector<double>& before, int candidate_id,
+        OptimizationInputBuildResult build) const;
 
     MapParam map_param_;
     std::vector<ShelfBlock> shelves_;

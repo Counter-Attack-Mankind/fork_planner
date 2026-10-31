@@ -27,4 +27,14 @@ int32[] frozen_vehicle_ids
 int32[] nlp_vehicle_ids
 string reason
 
+uint8 BRIDGE_ESCAPE_NONE=0
+uint8 BRIDGE_ESCAPE_MOVING=1
+uint8 BRIDGE_ESCAPE_SUCCEEDED=2
+uint8 BRIDGE_ESCAPE_FAILED=3
+uint8 bridge_escape_status
+int32 bridge_escape_vehicle_id
+int32 bridge_escape_path_gen
+float64 bridge_escape_target_path_s
+string bridge_escape_reason
+
 sandbox_msgs/RecoveryVehicleState[] vehicles

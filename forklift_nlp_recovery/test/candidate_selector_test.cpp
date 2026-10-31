@@ -55,7 +55,6 @@ TEST(CandidateSelectorTest, ExcludesAnyObbIntersectingRow2Bridge) {
     MapParam map;
     ForkliftMap forklift_map(map);
     fnr::CorridorConfig corridor_config;
-    corridor_config.rejoin_distance = 0.20;
     fnr::CorridorBuilder corridor(map, forklift_map.shelf_blocks(), corridor_config);
     fnr::OptimizationInputBuilder input_builder(corridor,
         parameters(map, corridor));
@@ -75,6 +74,16 @@ TEST(CandidateSelectorTest, ExcludesAnyObbIntersectingRow2Bridge) {
     ASSERT_NE(found, result.ranked.end());
     EXPECT_FALSE(found->eligible);
     EXPECT_NE(found->reason.find("row-2 bridge"), std::string::npos);
+
+    const auto bridge = selector.evaluateBridgeEscapes(snapshot, {1, 2});
+    ASSERT_TRUE(bridge.complete_snapshot) << bridge.reason;
+    const auto escape = std::find_if(bridge.ranked.begin(), bridge.ranked.end(),
+        [](const fnr::BridgeEscapeEvaluation& value) { return value.vehicle_id == 1; });
+    ASSERT_NE(escape, bridge.ranked.end());
+    EXPECT_GT(escape->escape_path_s, snapshot.vehicles.front().path_s);
+    EXPECT_FALSE(escape->eligible);
+    EXPECT_NE(escape->reason.find("no effective positive spatial gain"),
+              std::string::npos);
 }
 
 int main(int argc, char** argv) {

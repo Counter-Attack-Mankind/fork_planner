@@ -87,6 +87,27 @@ bool obbInsideField(const Obb& box, const MapParam& map) {
     return true;
 }
 
+bool poseSafe(const Pose2d& pose, int vehicle_id,
+              const sandbox_msgs::RecoverySnapshot& snapshot,
+              const MapParam& map, const std::vector<ShelfBlock>& shelves,
+              int moved_vehicle_id = -1, const Pose2d* moved_pose = nullptr) {
+    const Obb body = makeObb(pose, map);
+    if (!obbInsideField(body, map)) return false;
+    for (const ShelfBlock& shelf : shelves) {
+        if (overlapsAabb(body, {shelf.x, shelf.x_max(), shelf.y, shelf.y_max()})) return false;
+    }
+    for (const auto& obstacle_state : snapshot.vehicles) {
+        if (obstacle_state.id == vehicle_id || !obstacle_state.pose_valid) continue;
+        Pose2d obstacle_pose{obstacle_state.pose.x, obstacle_state.pose.y,
+                             obstacle_state.pose.theta};
+        if (obstacle_state.id == moved_vehicle_id && moved_pose != nullptr) {
+            obstacle_pose = *moved_pose;
+        }
+        if (overlaps(body, makeObb(obstacle_pose, map))) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 CandidateSelector::CandidateSelector(
@@ -125,21 +146,8 @@ double CandidateSelector::continuousSafeDistance(
     const double step = std::max(1e-4, std::min(config_.sweep_step,
                                                 map_param_.path_resolution));
     const auto safe = [&](double s) {
-        const Obb body = makeObb(interpolatePath(path, s).pose, map_param_);
-        if (!obbInsideField(body, map_param_)) return false;
-        for (const ShelfBlock& shelf : shelves_) {
-            if (overlapsAabb(body, {shelf.x, shelf.x_max(), shelf.y, shelf.y_max()})) return false;
-        }
-        for (const auto& obstacle_state : snapshot.vehicles) {
-            if (obstacle_state.id == vehicle.id || !obstacle_state.pose_valid) continue;
-            Pose2d obstacle_pose{obstacle_state.pose.x, obstacle_state.pose.y,
-                                 obstacle_state.pose.theta};
-            if (obstacle_state.id == moved_vehicle_id && moved_pose != nullptr) {
-                obstacle_pose = *moved_pose;
-            }
-            if (overlaps(body, makeObb(obstacle_pose, map_param_))) return false;
-        }
-        return true;
+        return poseSafe(interpolatePath(path, s).pose, vehicle.id, snapshot,
+                        map_param_, shelves_, moved_vehicle_id, moved_pose);
     };
     if (!safe(vehicle.path_s)) return 0.0;
     double last_safe = vehicle.path_s;
@@ -150,6 +158,48 @@ double CandidateSelector::continuousSafeDistance(
         if (s >= path.back().s - kEpsilon) break;
     }
     return std::max(0.0, last_safe - vehicle.path_s);
+}
+
+CandidateEvaluation CandidateSelector::evaluateBuiltCandidate(
+    const sandbox_msgs::RecoverySnapshot& snapshot,
+    const std::vector<int>& deadlock_cycle_ids,
+    const std::vector<double>& before, int candidate_id,
+    OptimizationInputBuildResult build) const {
+    CandidateEvaluation evaluation;
+    evaluation.vehicle_id = candidate_id;
+    evaluation.build = std::move(build);
+    if (!evaluation.build.complete || !evaluation.build.input.valid ||
+        evaluation.build.input.vehicles.size() != 1) {
+        evaluation.reason = evaluation.build.reason;
+        return evaluation;
+    }
+
+    const Pose2d moved_pose = evaluation.build.input.vehicles.front().terminal.pose;
+    evaluation.worst_gain = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < deadlock_cycle_ids.size(); ++i) {
+        if (deadlock_cycle_ids[i] == candidate_id) continue;
+        const auto* beneficiary = findVehicle(snapshot, deadlock_cycle_ids[i]);
+        const double after = continuousSafeDistance(
+            *beneficiary, snapshot, candidate_id, &moved_pose);
+        const double gain = after - before[i];
+        evaluation.beneficiary_ids.push_back(beneficiary->id);
+        evaluation.gains.push_back(gain);
+        evaluation.worst_gain = std::min(evaluation.worst_gain, gain);
+        if (gain + kEpsilon >= config_.minimum_effective_gain) {
+            ++evaluation.positive_gain_count;
+        }
+        evaluation.total_positive_gain += std::max(0.0, gain);
+    }
+    if (!std::isfinite(evaluation.worst_gain)) evaluation.worst_gain = 0.0;
+    if (evaluation.worst_gain < -config_.maximum_negative_gain - kEpsilon) {
+        evaluation.reason = "target layout causes excessive negative spatial gain";
+    } else if (evaluation.positive_gain_count == 0) {
+        evaluation.reason = "target layout has no effective positive spatial gain";
+    } else {
+        evaluation.eligible = true;
+        evaluation.reason = "ok";
+    }
+    return evaluation;
 }
 
 CandidateSelectionResult CandidateSelector::evaluate(
@@ -193,37 +243,9 @@ CandidateSelectionResult CandidateSelector::evaluate(
         } else if (intersectsRow2Bridge(*candidate)) {
             evaluation.reason = "vehicle OBB intersects the row-2 bridge region";
         } else {
-            evaluation.build = input_builder_.build(snapshot, {candidate_id}, "auto");
-            if (!evaluation.build.complete || !evaluation.build.input.valid ||
-                evaluation.build.input.vehicles.size() != 1) {
-                evaluation.reason = evaluation.build.reason;
-            } else {
-                const Pose2d moved_pose = evaluation.build.input.vehicles.front().terminal.pose;
-                evaluation.worst_gain = std::numeric_limits<double>::infinity();
-                for (size_t i = 0; i < deadlock_cycle_ids.size(); ++i) {
-                    if (deadlock_cycle_ids[i] == candidate_id) continue;
-                    const auto* beneficiary = findVehicle(snapshot, deadlock_cycle_ids[i]);
-                    const double after = continuousSafeDistance(
-                        *beneficiary, snapshot, candidate_id, &moved_pose);
-                    const double gain = after - before[i];
-                    evaluation.beneficiary_ids.push_back(beneficiary->id);
-                    evaluation.gains.push_back(gain);
-                    evaluation.worst_gain = std::min(evaluation.worst_gain, gain);
-                    if (gain + kEpsilon >= config_.minimum_effective_gain) {
-                        ++evaluation.positive_gain_count;
-                    }
-                    evaluation.total_positive_gain += std::max(0.0, gain);
-                }
-                if (!std::isfinite(evaluation.worst_gain)) evaluation.worst_gain = 0.0;
-                if (evaluation.worst_gain < -config_.maximum_negative_gain - kEpsilon) {
-                    evaluation.reason = "target layout causes excessive negative spatial gain";
-                } else if (evaluation.positive_gain_count == 0) {
-                    evaluation.reason = "target layout has no effective positive spatial gain";
-                } else {
-                    evaluation.eligible = true;
-                    evaluation.reason = "ok";
-                }
-            }
+            evaluation = evaluateBuiltCandidate(
+                snapshot, deadlock_cycle_ids, before, candidate_id,
+                input_builder_.build(snapshot, {candidate_id}, "auto"));
         }
         result.ranked.push_back(std::move(evaluation));
     }
@@ -239,6 +261,128 @@ CandidateSelectionResult CandidateSelector::evaluate(
     result.reason = std::any_of(result.ranked.begin(), result.ranked.end(),
         [](const CandidateEvaluation& candidate) { return candidate.eligible; }) ?
         "ok" : "no candidate has bounded positive spatial gain";
+    return result;
+}
+
+BridgeEscapeSelectionResult CandidateSelector::evaluateBridgeEscapes(
+    const sandbox_msgs::RecoverySnapshot& snapshot,
+    const std::vector<int>& deadlock_cycle_ids) const {
+    BridgeEscapeSelectionResult result;
+    if (deadlock_cycle_ids.size() < 2) {
+        result.reason = "confirmed deadlock cycle has fewer than two vehicles";
+        return result;
+    }
+    const std::vector<int>& frozen_ids = snapshot.frozen_vehicle_ids.empty() ?
+        snapshot.nlp_vehicle_ids : snapshot.frozen_vehicle_ids;
+    for (const int id : frozen_ids) {
+        const auto* frozen = findVehicle(snapshot, id);
+        if (frozen == nullptr || !frozen->pose_valid || !frozen->pose_fresh ||
+            std::abs(frozen->current_speed) > config_.stopped_speed_tolerance) {
+            result.reason = "frozen vehicle snapshot is incomplete, stale, or still moving";
+            return result;
+        }
+    }
+
+    std::vector<double> before(deadlock_cycle_ids.size(), 0.0);
+    for (size_t i = 0; i < deadlock_cycle_ids.size(); ++i) {
+        const auto* vehicle = findVehicle(snapshot, deadlock_cycle_ids[i]);
+        if (vehicle == nullptr || !vehicle->pose_valid || !vehicle->pose_fresh) {
+            result.reason = "deadlock cycle snapshot is incomplete or stale";
+            return result;
+        }
+        before[i] = continuousSafeDistance(*vehicle, snapshot, -1, nullptr);
+    }
+    result.complete_snapshot = true;
+
+    const Aabb bridge_with_margin{
+        map_param_.row2_left_width - config_.sweep_step,
+        map_param_.row2_left_width + map_param_.row2_gap + config_.sweep_step,
+        map_param_.y4() - config_.sweep_step,
+        map_param_.y5() + config_.sweep_step};
+    const double step = std::max(1e-4, std::min(config_.sweep_step,
+                                                map_param_.path_resolution));
+    for (const int candidate_id : deadlock_cycle_ids) {
+        BridgeEscapeEvaluation escape;
+        escape.vehicle_id = candidate_id;
+        const auto* candidate = findVehicle(snapshot, candidate_id);
+        if (candidate == nullptr || !candidate->pose_valid || !candidate->pose_fresh) {
+            escape.reason = "invalid or stale vehicle pose";
+        } else if (std::abs(candidate->current_speed) > config_.stopped_speed_tolerance) {
+            escape.reason = "vehicle has not stopped";
+        } else if (!intersectsRow2Bridge(*candidate)) {
+            escape.reason = "vehicle OBB does not intersect the row-2 bridge region";
+        } else {
+            escape.path_gen = candidate->path_gen;
+            std::vector<Pose2d> poses;
+            poses.reserve(candidate->path.size());
+            for (const auto& point : candidate->path) {
+                poses.push_back({point.x, point.y, point.theta});
+            }
+            const std::vector<PathPoint> path =
+                CorridorBuilder::parameterizePath(poses, candidate->path_types);
+            bool segment_safe = path.size() >= 2 &&
+                candidate->path_s >= path.front().s - kEpsilon &&
+                candidate->path_s <= path.back().s + kEpsilon;
+            bool found_escape = false;
+            if (!segment_safe) escape.reason = "frozen path or path progress is invalid";
+            for (double s = candidate->path_s; segment_safe && s <= path.back().s + kEpsilon;
+                 s = std::min(path.back().s, s + step)) {
+                const PathPoint point = interpolatePath(path, s);
+                if (point.type != sandbox_msgs::RecoveryVehicleState::FORWARD) {
+                    segment_safe = false;
+                    escape.reason = "bridge escape would cross a direction-change point";
+                    break;
+                }
+                if (!poseSafe(point.pose, candidate_id, snapshot, map_param_, shelves_)) {
+                    segment_safe = false;
+                    escape.reason = "bridge escape forward sweep is not collision-free";
+                    break;
+                }
+                if (!overlapsAabb(makeObb(point.pose, map_param_), bridge_with_margin)) {
+                    escape.escape_path_s = s;
+                    escape.escape_pose = point.pose;
+                    found_escape = true;
+                    break;
+                }
+                if (s >= path.back().s - kEpsilon) break;
+            }
+            if (segment_safe && !found_escape) {
+                escape.reason = "no forward bridge-exit pose before path end";
+            } else if (segment_safe) {
+                sandbox_msgs::RecoverySnapshot virtual_snapshot = snapshot;
+                auto virtual_vehicle = std::find_if(
+                    virtual_snapshot.vehicles.begin(), virtual_snapshot.vehicles.end(),
+                    [candidate_id](const auto& vehicle) { return vehicle.id == candidate_id; });
+                virtual_vehicle->path_s = escape.escape_path_s;
+                virtual_vehicle->current_speed = 0.0;
+                virtual_vehicle->pose.x = escape.escape_pose.x;
+                virtual_vehicle->pose.y = escape.escape_pose.y;
+                virtual_vehicle->pose.theta = escape.escape_pose.yaw;
+                escape.candidate = evaluateBuiltCandidate(
+                    virtual_snapshot, deadlock_cycle_ids, before, candidate_id,
+                    input_builder_.build(virtual_snapshot, {candidate_id}, "bridge_escape"));
+                escape.eligible = escape.candidate.eligible;
+                escape.reason = escape.candidate.reason;
+            }
+        }
+        result.ranked.push_back(std::move(escape));
+    }
+    std::stable_sort(result.ranked.begin(), result.ranked.end(),
+        [](const BridgeEscapeEvaluation& first, const BridgeEscapeEvaluation& second) {
+            if (first.eligible != second.eligible) return first.eligible > second.eligible;
+            if (first.candidate.positive_gain_count != second.candidate.positive_gain_count) {
+                return first.candidate.positive_gain_count > second.candidate.positive_gain_count;
+            }
+            if (std::abs(first.candidate.total_positive_gain -
+                         second.candidate.total_positive_gain) > kEpsilon) {
+                return first.candidate.total_positive_gain >
+                       second.candidate.total_positive_gain;
+            }
+            return first.vehicle_id < second.vehicle_id;
+        });
+    result.reason = std::any_of(result.ranked.begin(), result.ranked.end(),
+        [](const BridgeEscapeEvaluation& escape) { return escape.eligible; }) ?
+        "ok" : "no bridge vehicle has a safe beneficial escape";
     return result;
 }
 
