@@ -99,7 +99,8 @@ public:
 private:
     PathPoint interpolate(const std::vector<PathPoint>& path, double s) const;
     bool rawAabbLegal(const Aabb& box) const;
-    bool expandRawAabb(const Pose2d& seed, Aabb& raw, std::string& reason) const;
+    bool expandRawAabb(const Pose2d& seed, Aabb& raw, std::string& reason,
+                       bool horizontal_first = false) const;
 
     MapParam map_param_;
     CorridorConfig config_;

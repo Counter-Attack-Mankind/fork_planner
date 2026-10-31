@@ -117,23 +117,49 @@ bool CorridorBuilder::rawAabbLegal(const Aabb& box) const {
 }
 
 bool CorridorBuilder::expandRawAabb(const Pose2d& seed, Aabb& raw,
-                                    std::string& reason) const {
+                                    std::string& reason,
+                                    bool horizontal_first) const {
     raw = {seed.x, seed.x, seed.y, seed.y};
     if (!rawAabbLegal(raw)) {
         reason = "raw seed point intersects a shelf or lies outside the map";
         return false;
     }
-    bool open[4] = {true, true, true, true};
-    while (open[0] || open[1] || open[2] || open[3]) {
-        for (int direction = 0; direction < 4; ++direction) {
-            if (!open[direction]) continue;
-            Aabb candidate = raw;
-            if (direction == 0) candidate.max_y += config_.expansion_step;
-            if (direction == 1) candidate.min_y -= config_.expansion_step;
-            if (direction == 2) candidate.min_x -= config_.expansion_step;
-            if (direction == 3) candidate.max_x += config_.expansion_step;
-            if (rawAabbLegal(candidate)) raw = candidate;
-            else open[direction] = false;
+    if (horizontal_first) {
+        bool horizontal_open[2] = {true, true};
+        while (horizontal_open[0] || horizontal_open[1]) {
+            for (int direction = 0; direction < 2; ++direction) {
+                if (!horizontal_open[direction]) continue;
+                Aabb candidate = raw;
+                if (direction == 0) candidate.min_x -= config_.expansion_step;
+                else candidate.max_x += config_.expansion_step;
+                if (rawAabbLegal(candidate)) raw = candidate;
+                else horizontal_open[direction] = false;
+            }
+        }
+        bool vertical_open[2] = {true, true};
+        while (vertical_open[0] || vertical_open[1]) {
+            for (int direction = 0; direction < 2; ++direction) {
+                if (!vertical_open[direction]) continue;
+                Aabb candidate = raw;
+                if (direction == 0) candidate.max_y += config_.expansion_step;
+                else candidate.min_y -= config_.expansion_step;
+                if (rawAabbLegal(candidate)) raw = candidate;
+                else vertical_open[direction] = false;
+            }
+        }
+    } else {
+        bool open[4] = {true, true, true, true};
+        while (open[0] || open[1] || open[2] || open[3]) {
+            for (int direction = 0; direction < 4; ++direction) {
+                if (!open[direction]) continue;
+                Aabb candidate = raw;
+                if (direction == 0) candidate.max_y += config_.expansion_step;
+                if (direction == 1) candidate.min_y -= config_.expansion_step;
+                if (direction == 2) candidate.min_x -= config_.expansion_step;
+                if (direction == 3) candidate.max_x += config_.expansion_step;
+                if (rawAabbLegal(candidate)) raw = candidate;
+                else open[direction] = false;
+            }
         }
     }
     reason.clear();
@@ -206,7 +232,7 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
         return result;
     }
     std::string expansion_reason;
-    if (!expandRawAabb(center, result.raw_aabb, expansion_reason)) {
+    if (!expandRawAabb(center, result.raw_aabb, expansion_reason, !start_on_path)) {
         std::ostringstream reason;
         reason << "stage=raw_aabb_expansion vehicle=" << vehicle
                << " disc_center=(" << center.x << "," << center.y << ") "
@@ -315,60 +341,66 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
     result.optimization_start_valid = true;
     const double step = std::max(1e-4, std::min(config_.exit_search_step,
                                                 map_param_.path_resolution));
-    double path_entry_s = optimization_start_s;
-    if (!start_on_path && !inside(path_entry_s)) {
-        double previous_s = path_entry_s;
-        path_entry_s = -1.0;
-        for (double s = std::min(path.back().s, current_s + step);
-             s <= path.back().s + kEpsilon; s = std::min(path.back().s, s + step)) {
-            if (inside(s)) {
-                double outside_entry_s = previous_s;
-                path_entry_s = s;
-                for (int iteration = 0; iteration < 24; ++iteration) {
-                    const double mid = 0.5 * (outside_entry_s + path_entry_s);
-                    if (inside(mid)) path_entry_s = mid;
-                    else outside_entry_s = mid;
+    double terminal_s = -1.0;
+    if (!start_on_path) {
+        const double path_end_s = path.back().s;
+        if (inside(path_end_s)) {
+            terminal_s = path_end_s;
+        } else {
+            double outside_s = path_end_s;
+            for (double s = std::max(current_s, path_end_s - step);
+                 s >= current_s - kEpsilon; s = std::max(current_s, s - step)) {
+                if (inside(s)) {
+                    double inside_s = s;
+                    for (int iteration = 0; iteration < 24; ++iteration) {
+                        const double mid = 0.5 * (inside_s + outside_s);
+                        if (inside(mid)) inside_s = mid;
+                        else outside_s = mid;
+                    }
+                    terminal_s = inside_s;
+                    break;
                 }
-                break;
+                outside_s = s;
+                if (s <= current_s + kEpsilon) break;
             }
-            previous_s = s;
-            if (s >= path.back().s - kEpsilon) break;
         }
-        if (path_entry_s < 0.0) {
+        if (terminal_s < current_s - kEpsilon) {
             std::ostringstream reason;
             reason << "stage=terminal_search vehicle=" << vehicle
-                   << " original path does not enter safe_stc=" << aabbText(stc)
-                   << " from current_s=" << current_s;
+                   << " no body-center intersection with safe_stc=" << aabbText(stc)
+                   << " in reverse search range=[" << current_s << ","
+                   << path_end_s << "]";
             result.reason = reason.str();
             return result;
         }
-    }
-    double inside_s = path_entry_s;
-    double outside_s = -1.0;
-    for (double s = std::min(path.back().s, path_entry_s + step);
-         s <= path.back().s + kEpsilon; s = std::min(path.back().s, s + step)) {
-        if (!inside(s)) {
-            outside_s = s;
-            break;
+    } else {
+        double inside_s = optimization_start_s;
+        double outside_s = -1.0;
+        for (double s = std::min(path.back().s, optimization_start_s + step);
+             s <= path.back().s + kEpsilon; s = std::min(path.back().s, s + step)) {
+            if (!inside(s)) {
+                outside_s = s;
+                break;
+            }
+            inside_s = s;
+            if (s >= path.back().s - kEpsilon) break;
         }
-        inside_s = s;
-        if (s >= path.back().s - kEpsilon) break;
+        if (outside_s < 0.0) {
+            std::ostringstream reason;
+            reason << "stage=terminal_search vehicle=" << vehicle
+                   << " no body-center exit from safe_stc=" << aabbText(stc)
+                   << " current_s=" << optimization_start_s
+                   << " path_end_s=" << path.back().s;
+            result.reason = reason.str();
+            return result;
+        }
+        for (int iteration = 0; iteration < 24; ++iteration) {
+            const double mid = 0.5 * (inside_s + outside_s);
+            if (inside(mid)) inside_s = mid;
+            else outside_s = mid;
+        }
+        terminal_s = inside_s;
     }
-    if (outside_s < 0.0) {
-        std::ostringstream reason;
-        reason << "stage=terminal_search vehicle=" << vehicle
-               << " no body-center exit from safe_stc=" << aabbText(stc)
-               << " current_s=" << path_entry_s
-               << " path_end_s=" << path.back().s;
-        result.reason = reason.str();
-        return result;
-    }
-    for (int iteration = 0; iteration < 24; ++iteration) {
-        const double mid = 0.5 * (inside_s + outside_s);
-        if (inside(mid)) inside_s = mid;
-        else outside_s = mid;
-    }
-    const double terminal_s = inside_s;
     const PathPoint terminal = interpolate(path, terminal_s);
     for (size_t i = 1; i < path.size(); ++i) {
         if (path[i - 1].type == path[i].type) continue;

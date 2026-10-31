@@ -446,17 +446,20 @@ private:
     void addVehicleAnalysis(visualization_msgs::MarkerArray& markers,
                             const NlpVehicleInput& vehicle,
                             const std::string& name, int id_offset,
-                            const std_msgs::ColorRGBA& rgba) {
+                            const std_msgs::ColorRGBA& rgba,
+                            bool show_frozen_start = true) {
         const Pose2d& frozen_start = vehicle.frozen_initial_state.rear_axle_pose;
         const Pose2d& start = vehicle.initial_state.rear_axle_pose;
-        addBody(markers, name + "_frozen_body", id_offset, frozen_start,
-                color(rgba.r, rgba.g, rgba.b, 0.30f));
-        addSolidPoint(markers, name + "_frozen_start_point", id_offset, frozen_start,
-                      color(1.0f, 0.45f, 0.0f, 1.0f));
-        addText(markers, name + "_frozen_start_text", id_offset,
-                frozen_start.x, frozen_start.y, 0.22,
-                poseText("V" + std::to_string(vehicle.id) + " frozen rear", frozen_start),
-                color(1.0f, 0.45f, 0.0f, 1.0f));
+        if (show_frozen_start) {
+            addBody(markers, name + "_frozen_body", id_offset, frozen_start,
+                    color(rgba.r, rgba.g, rgba.b, 0.30f));
+            addSolidPoint(markers, name + "_frozen_start_point", id_offset, frozen_start,
+                          color(1.0f, 0.45f, 0.0f, 1.0f));
+            addText(markers, name + "_frozen_start_text", id_offset,
+                    frozen_start.x, frozen_start.y, 0.22,
+                    poseText("V" + std::to_string(vehicle.id) + " frozen rear", frozen_start),
+                    color(1.0f, 0.45f, 0.0f, 1.0f));
+        }
         addDisc(markers, name + "_disc", id_offset, start,
                 color(rgba.r, rgba.g, rgba.b, 0.20f));
         addDiscCenter(markers, name + "_disc_center", id_offset, start,
@@ -710,18 +713,6 @@ private:
                                                point_on_path.pose.y, 0.15));
             }
             markers.markers.push_back(segment);
-            addArrow(markers, "bridge_escape_a_arrow", id_offset,
-                     escape.escape_pose, color(0.0f, 0.85f, 0.2f, 1.0f));
-            std::ostringstream target_text;
-            target_text << std::fixed << std::setprecision(3)
-                        << "V" << escape.vehicle_id << " A d_A="
-                        << escape.escape_distance << " dir=" << escape.motion_direction
-                        << " pose=(" << escape.escape_pose.x
-                        << "," << escape.escape_pose.y << ","
-                        << escape.escape_pose.yaw << ")";
-            addText(markers, "bridge_escape_a_text", id_offset,
-                    escape.escape_pose.x, escape.escape_pose.y, 0.32,
-                    target_text.str(), color(0.0f, 0.85f, 0.2f, 1.0f), 0.055);
         }
 
         if (escape.sweep_failure_valid) {
@@ -1130,6 +1121,10 @@ private:
                 for (const BridgeEscapeEvaluation& escape : bridge.ranked) {
                     if (escape.intersects_bridge) {
                         locked_.bridge_evaluations.push_back(escape);
+                        if (escape.candidate.build.input.vehicles.size() == 1) {
+                            locked_.geometry_vehicles.push_back(
+                                escape.candidate.build.input.vehicles.front());
+                        }
                     }
                     std::ostringstream attempt;
                     attempt << "bridge V" << escape.vehicle_id << " A=";
@@ -1142,10 +1137,6 @@ private:
                         execute_after_solve_) selected_escape = &escape;
                 }
                 if (selected_escape != nullptr) {
-                    if (selected_escape->candidate.build.input.vehicles.size() == 1) {
-                        locked_.geometry_vehicles.push_back(
-                            selected_escape->candidate.build.input.vehicles.front());
-                    }
                     requestBridgeEscape(*selected_escape);
                 }
                 if (!locked_.bridge_escape_pending) {
@@ -1182,10 +1173,15 @@ private:
             if (i != 0) ids << ",";
             const NlpVehicleInput& vehicle = locked_.geometry_vehicles[i];
             ids << "V" << vehicle.id;
+            const bool bridge_geometry = std::any_of(
+                locked_.bridge_evaluations.begin(), locked_.bridge_evaluations.end(),
+                [&](const BridgeEscapeEvaluation& escape) {
+                    return escape.vehicle_id == vehicle.id;
+                });
             addVehicleAnalysis(markers, vehicle,
                                "nlp_V" + std::to_string(vehicle.id),
                                1000 + static_cast<int>(i) * 1000,
-                               analysisColor(i));
+                               analysisColor(i), !bridge_geometry);
         }
         for (size_t i = 0; i < locked_.bridge_evaluations.size(); ++i) {
             addBridgeEscapeAnalysis(markers, locked_.bridge_evaluations[i],
