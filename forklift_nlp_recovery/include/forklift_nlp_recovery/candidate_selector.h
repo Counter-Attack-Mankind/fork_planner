@@ -14,6 +14,7 @@ struct CandidateSelectionConfig {
     double sweep_step = 0.01;
     double minimum_effective_gain = 0.05;
     double maximum_negative_gain = 0.02;
+    double bridge_escape_rear_clearance = -1.0;
 };
 
 struct CandidateEvaluation {
@@ -37,8 +38,19 @@ struct CandidateSelectionResult {
 struct BridgeEscapeEvaluation {
     int vehicle_id = -1;
     int path_gen = -1;
-    double escape_path_s = 0.0;
+    bool intersects_bridge = false;
+    double frozen_path_s = 0.0;
+    Pose2d frozen_pose;
+    bool escape_valid = false;
+    double escape_distance = 0.0;
+    int motion_direction = 1;
     Pose2d escape_pose;
+    std::vector<PathPoint> escape_segment;
+    bool sweep_failure_valid = false;
+    double sweep_failure_distance = 0.0;
+    Pose2d sweep_failure_pose;
+    bool sweep_failure_at_start = false;
+    std::string sweep_failure_reason;
     bool eligible = false;
     std::string reason;
     CandidateEvaluation candidate;
@@ -59,7 +71,8 @@ public:
 
     CandidateSelectionResult evaluate(
         const sandbox_msgs::RecoverySnapshot& snapshot,
-        const std::vector<int>& deadlock_cycle_ids) const;
+        const std::vector<int>& deadlock_cycle_ids,
+        int off_path_start_vehicle_id = -1) const;
 
     BridgeEscapeSelectionResult evaluateBridgeEscapes(
         const sandbox_msgs::RecoverySnapshot& snapshot,

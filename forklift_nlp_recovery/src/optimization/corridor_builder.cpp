@@ -191,7 +191,8 @@ PathPoint CorridorBuilder::interpolate(const std::vector<PathPoint>& path, doubl
 }
 
 CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<PathPoint>& path,
-                                      double current_s, int path_gen, int vehicle_id) const {
+                                      double current_s, int path_gen, int vehicle_id,
+                                      bool start_on_path) const {
     CorridorResult result;
     const std::string vehicle = vehicleLabel(vehicle_id);
     const Pose2d center = bodyCenter(start);
@@ -257,6 +258,14 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
     Pose2d optimization_start_pose = start;
     uint8_t optimization_start_type = interpolate(path, current_s).type;
     if (!pointInside(center)) {
+        if (!start_on_path) {
+            std::ostringstream reason;
+            reason << "stage=start_search vehicle=" << vehicle << " disc_center=("
+                   << center.x << "," << center.y << ") is outside safe_stc="
+                   << aabbText(stc) << " for off-path optimization start";
+            result.reason = reason.str();
+            return result;
+        }
         const double max_start_correction = std::max(0.0, config_.max_start_correction);
         const double search_end = std::min(path.back().s, current_s + max_start_correction);
         const double search_step = std::max(1e-4, std::min({0.001,
@@ -306,9 +315,37 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
     result.optimization_start_valid = true;
     const double step = std::max(1e-4, std::min(config_.exit_search_step,
                                                 map_param_.path_resolution));
-    double inside_s = optimization_start_s;
+    double path_entry_s = optimization_start_s;
+    if (!start_on_path && !inside(path_entry_s)) {
+        double previous_s = path_entry_s;
+        path_entry_s = -1.0;
+        for (double s = std::min(path.back().s, current_s + step);
+             s <= path.back().s + kEpsilon; s = std::min(path.back().s, s + step)) {
+            if (inside(s)) {
+                double outside_entry_s = previous_s;
+                path_entry_s = s;
+                for (int iteration = 0; iteration < 24; ++iteration) {
+                    const double mid = 0.5 * (outside_entry_s + path_entry_s);
+                    if (inside(mid)) path_entry_s = mid;
+                    else outside_entry_s = mid;
+                }
+                break;
+            }
+            previous_s = s;
+            if (s >= path.back().s - kEpsilon) break;
+        }
+        if (path_entry_s < 0.0) {
+            std::ostringstream reason;
+            reason << "stage=terminal_search vehicle=" << vehicle
+                   << " original path does not enter safe_stc=" << aabbText(stc)
+                   << " from current_s=" << current_s;
+            result.reason = reason.str();
+            return result;
+        }
+    }
+    double inside_s = path_entry_s;
     double outside_s = -1.0;
-    for (double s = std::min(path.back().s, optimization_start_s + step);
+    for (double s = std::min(path.back().s, path_entry_s + step);
          s <= path.back().s + kEpsilon; s = std::min(path.back().s, s + step)) {
         if (!inside(s)) {
             outside_s = s;
@@ -321,7 +358,7 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
         std::ostringstream reason;
         reason << "stage=terminal_search vehicle=" << vehicle
                << " no body-center exit from safe_stc=" << aabbText(stc)
-               << " current_s=" << optimization_start_s
+               << " current_s=" << path_entry_s
                << " path_end_s=" << path.back().s;
         result.reason = reason.str();
         return result;

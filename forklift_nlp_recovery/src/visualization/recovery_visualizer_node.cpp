@@ -212,6 +212,9 @@ public:
         private_nh_.param("maximum_negative_gain",
                           candidate_config_.maximum_negative_gain,
                           candidate_config_.maximum_negative_gain);
+        private_nh_.param("bridge_escape_rear_clearance",
+                          candidate_config_.bridge_escape_rear_clearance,
+                          candidate_config_.bridge_escape_rear_clearance);
         candidate_selector_ = std::make_unique<CandidateSelector>(
             map_param_, map_->shelf_blocks(), candidate_config_, *input_builder_);
         private_nh_.param("hybrid_integration_step", hybrid_config_.integration_step,
@@ -682,6 +685,69 @@ private:
         }
     }
 
+    void addBridgeEscapeAnalysis(visualization_msgs::MarkerArray& markers,
+                                 const BridgeEscapeEvaluation& escape,
+                                 int id_offset) const {
+        if (!escape.intersects_bridge) return;
+        std::ostringstream start_text;
+        start_text << std::fixed << std::setprecision(3)
+                   << "V" << escape.vehicle_id << " S0 s0=" << escape.frozen_path_s
+                   << " pose=(" << escape.frozen_pose.x << ","
+                   << escape.frozen_pose.y << "," << escape.frozen_pose.yaw << ")";
+        addArrow(markers, "bridge_escape_s0_arrow", id_offset,
+                 escape.frozen_pose, color(1.0f, 0.55f, 0.0f, 1.0f));
+        addText(markers, "bridge_escape_s0_text", id_offset,
+                escape.frozen_pose.x, escape.frozen_pose.y, 0.32,
+                start_text.str(), color(1.0f, 0.55f, 0.0f, 1.0f), 0.055);
+
+        if (escape.escape_valid) {
+            auto segment = baseMarker("bridge_escape_segment", id_offset,
+                                      visualization_msgs::Marker::LINE_STRIP);
+            segment.scale.x = 0.025;
+            segment.color = color(0.0f, 0.75f, 1.0f, 1.0f);
+            for (const PathPoint& point_on_path : escape.escape_segment) {
+                segment.points.push_back(point(point_on_path.pose.x,
+                                               point_on_path.pose.y, 0.15));
+            }
+            markers.markers.push_back(segment);
+            addArrow(markers, "bridge_escape_a_arrow", id_offset,
+                     escape.escape_pose, color(0.0f, 0.85f, 0.2f, 1.0f));
+            std::ostringstream target_text;
+            target_text << std::fixed << std::setprecision(3)
+                        << "V" << escape.vehicle_id << " A d_A="
+                        << escape.escape_distance << " dir=" << escape.motion_direction
+                        << " pose=(" << escape.escape_pose.x
+                        << "," << escape.escape_pose.y << ","
+                        << escape.escape_pose.yaw << ")";
+            addText(markers, "bridge_escape_a_text", id_offset,
+                    escape.escape_pose.x, escape.escape_pose.y, 0.32,
+                    target_text.str(), color(0.0f, 0.85f, 0.2f, 1.0f), 0.055);
+        }
+
+        if (escape.sweep_failure_valid) {
+            addSolidPoint(markers, "bridge_escape_failure_point", id_offset,
+                          escape.sweep_failure_pose,
+                          color(1.0f, 0.0f, 0.0f, 1.0f));
+            std::ostringstream failure_text;
+            failure_text << std::fixed << std::setprecision(3)
+                         << "V" << escape.vehicle_id << " sweep FAIL d="
+                         << escape.sweep_failure_distance << " pose=("
+                         << escape.sweep_failure_pose.x << ","
+                         << escape.sweep_failure_pose.y << ","
+                         << escape.sweep_failure_pose.yaw << ") at_S0="
+                         << (escape.sweep_failure_at_start ? "yes" : "no")
+                         << " " << escape.sweep_failure_reason;
+            addText(markers, "bridge_escape_failure_text", id_offset,
+                    escape.sweep_failure_pose.x, escape.sweep_failure_pose.y, 0.38,
+                    failure_text.str(), color(1.0f, 0.0f, 0.0f, 1.0f), 0.052);
+        } else if (!escape.escape_valid) {
+            addText(markers, "bridge_escape_failure_text", id_offset,
+                    escape.frozen_pose.x, escape.frozen_pose.y, 0.38,
+                    "V" + std::to_string(escape.vehicle_id) + " no A: " + escape.reason,
+                    color(1.0f, 0.0f, 0.0f, 1.0f), 0.052);
+        }
+    }
+
     bool trySolveCandidate(CandidateEvaluation candidate) {
         if (!candidate.eligible || candidate.build.input.vehicles.size() != 1) return false;
         NlpVehicleInput& vehicle = candidate.build.input.vehicles.front();
@@ -738,14 +804,17 @@ private:
         command.recovery_id = locked_.recovery_id;
         command.vehicle_id = escape.vehicle_id;
         command.path_gen = escape.path_gen;
-        command.target_path_s = escape.escape_path_s;
+        command.target_pose.x = escape.escape_pose.x;
+        command.target_pose.y = escape.escape_pose.y;
+        command.target_pose.theta = escape.escape_pose.yaw;
+        command.motion_direction = escape.motion_direction;
+        command.travel_distance = escape.escape_distance;
         bridge_escape_pub_.publish(command);
         locked_.bridge_escape_pending = true;
         locked_.bridge_vehicle_id = escape.vehicle_id;
         locked_.bridge_path_gen = escape.path_gen;
-        locked_.bridge_target_path_s = escape.escape_path_s;
-        ROS_WARN("[nlp_recovery][bridge_escape] requested V%d s=%.3f",
-                 escape.vehicle_id, escape.escape_path_s);
+        ROS_WARN("[nlp_recovery][bridge_escape] requested V%d d=%.3f dir=%d",
+                 escape.vehicle_id, escape.escape_distance, escape.motion_direction);
     }
 
     void updateBridgeEscape(const sandbox_msgs::RecoverySnapshot& snapshot,
@@ -766,7 +835,7 @@ private:
 
         locked_.bridge_escape_pending = false;
         const CandidateSelectionResult selection = candidate_selector_->evaluate(
-            snapshot, cycle_ids);
+            snapshot, cycle_ids, locked_.bridge_vehicle_id);
         const auto found = std::find_if(
             selection.ranked.begin(), selection.ranked.end(),
             [&](const CandidateEvaluation& candidate) {
@@ -1057,20 +1126,27 @@ private:
             if (locked_.build.input.vehicles.empty() && !locked_.submitted) {
                 const BridgeEscapeSelectionResult bridge =
                     candidate_selector_->evaluateBridgeEscapes(snapshot, cycle_ids);
+                const BridgeEscapeEvaluation* selected_escape = nullptr;
                 for (const BridgeEscapeEvaluation& escape : bridge.ranked) {
+                    if (escape.intersects_bridge) {
+                        locked_.bridge_evaluations.push_back(escape);
+                    }
                     std::ostringstream attempt;
-                    attempt << "bridge V" << escape.vehicle_id
-                            << " A=" << escape.escape_path_s
-                            << " reason=" << escape.reason;
+                    attempt << "bridge V" << escape.vehicle_id << " A=";
+                    if (escape.escape_valid) attempt << "d=" << escape.escape_distance;
+                    else attempt << "invalid";
+                    attempt << " reason=" << escape.reason;
                     locked_.attempts.push_back(attempt.str());
                     ROS_INFO("[nlp_recovery][candidate] %s", attempt.str().c_str());
-                    if (!escape.eligible || !execute_after_solve_) continue;
-                    if (escape.candidate.build.input.vehicles.size() == 1) {
+                    if (selected_escape == nullptr && escape.eligible &&
+                        execute_after_solve_) selected_escape = &escape;
+                }
+                if (selected_escape != nullptr) {
+                    if (selected_escape->candidate.build.input.vehicles.size() == 1) {
                         locked_.geometry_vehicles.push_back(
-                            escape.candidate.build.input.vehicles.front());
+                            selected_escape->candidate.build.input.vehicles.front());
                     }
-                    requestBridgeEscape(escape);
-                    break;
+                    requestBridgeEscape(*selected_escape);
                 }
                 if (!locked_.bridge_escape_pending) {
                     ROS_ERROR("[nlp_recovery][auto] regular and bridge candidates exhausted: %s",
@@ -1110,6 +1186,10 @@ private:
                                "nlp_V" + std::to_string(vehicle.id),
                                1000 + static_cast<int>(i) * 1000,
                                analysisColor(i));
+        }
+        for (size_t i = 0; i < locked_.bridge_evaluations.size(); ++i) {
+            addBridgeEscapeAnalysis(markers, locked_.bridge_evaluations[i],
+                                    20000 + static_cast<int>(i) * 100);
         }
         const std::string input_reason = locked_.build.input.vehicles.empty() ?
             "geometry-only" : locked_.build.reason;
@@ -1202,10 +1282,10 @@ private:
         NlpSolveResult solver_result;
         std::vector<std::string> attempts;
         std::vector<NlpVehicleInput> geometry_vehicles;
+        std::vector<BridgeEscapeEvaluation> bridge_evaluations;
         bool bridge_escape_pending = false;
         int bridge_vehicle_id = -1;
         int bridge_path_gen = -1;
-        double bridge_target_path_s = 0.0;
     };
 
     ros::NodeHandle private_nh_;

@@ -102,7 +102,8 @@ public:
     OptimizationInputBuildResult build(
         const sandbox_msgs::RecoverySnapshot& snapshot,
         const std::vector<int>& participant_ids,
-        const std::string& source_mode) const;
+        const std::string& source_mode,
+        bool off_path_start = false) const;
 
     static double pointToAabbDistance(const Pose2d& point, const Aabb& box);
     static bool discMayAffectCorridor(const Pose2d& center, double static_radius,

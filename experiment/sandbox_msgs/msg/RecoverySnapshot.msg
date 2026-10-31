@@ -34,7 +34,7 @@ uint8 BRIDGE_ESCAPE_FAILED=3
 uint8 bridge_escape_status
 int32 bridge_escape_vehicle_id
 int32 bridge_escape_path_gen
-float64 bridge_escape_target_path_s
+geometry_msgs/Pose2D bridge_escape_target_pose
 string bridge_escape_reason
 
 sandbox_msgs/RecoveryVehicleState[] vehicles

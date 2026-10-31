@@ -42,6 +42,7 @@ stopped_speed_tolerance: 0.01
 sweep_step: 0.01
 minimum_effective_gain: 0.05
 maximum_negative_gain: 0.02
+bridge_escape_rear_clearance: -1.0  # m; negative uses vehicle_length/2-rear_axle_to_center
 
 hybrid_integration_step: 0.04
 hybrid_collision_check_step: 0.01

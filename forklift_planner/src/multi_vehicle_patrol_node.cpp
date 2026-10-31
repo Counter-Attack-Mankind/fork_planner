@@ -2615,12 +2615,14 @@ private:
         snapshot.bridge_escape_status = sandbox_msgs::RecoverySnapshot::BRIDGE_ESCAPE_NONE;
         snapshot.bridge_escape_vehicle_id = -1;
         snapshot.bridge_escape_path_gen = -1;
-        snapshot.bridge_escape_target_path_s = 0.0;
+        snapshot.bridge_escape_target_pose = geometry_msgs::Pose2D{};
         if (bridge_escape_.recovery_id == recovery.recovery_id) {
             snapshot.bridge_escape_status = bridge_escape_.status;
             snapshot.bridge_escape_vehicle_id = bridge_escape_.vehicle_id;
             snapshot.bridge_escape_path_gen = bridge_escape_.path_gen;
-            snapshot.bridge_escape_target_path_s = bridge_escape_.target_path_s;
+            snapshot.bridge_escape_target_pose.x = bridge_escape_.target_pose.x;
+            snapshot.bridge_escape_target_pose.y = bridge_escape_.target_pose.y;
+            snapshot.bridge_escape_target_pose.theta = bridge_escape_.target_pose.theta;
             snapshot.bridge_escape_reason = bridge_escape_.reason;
         }
         snapshot.vehicles.reserve(agents_.size());
@@ -2679,8 +2681,7 @@ private:
         recovery_snapshot_pub_.publish(snapshot);
     }
 
-    bool bridgeEscapePoseSafe(const VehicleAgent& moving, double path_s) const {
-        const RoughWp pose = moving.track.poseAtS(path_s);
+    bool bridgeEscapePoseSafe(const VehicleAgent& moving, const RoughWp& pose) const {
         if (!forklift_planner::multi_vehicle::footprintInsideField(pose, mp_)) return false;
         for (const ShelfBlock& shelf : map_->shelf_blocks()) {
             if (forklift_planner::multi_vehicle::footprintIntersectsShelf(
@@ -2700,16 +2701,22 @@ private:
         return true;
     }
 
-    bool bridgeEscapeSweepClear(const VehicleAgent& vehicle, double target_s) const {
+    bool bridgeEscapeSweepClear(const VehicleAgent& vehicle, const RoughWp& start,
+                                const RoughWp& target, int direction,
+                                double distance) const {
         const double step = std::max(0.005, cfg_.path_validation_step);
-        const int count = std::max(1, static_cast<int>(
-            std::ceil((target_s - vehicle.path_s) / step)));
+        const int count = std::max(1, static_cast<int>(std::ceil(distance / step)));
         for (int i = 0; i <= count; ++i) {
-            const double s = vehicle.path_s +
-                (target_s - vehicle.path_s) * static_cast<double>(i) / count;
-            if (vehicle.track.typeAtS(s) != WpType::FORWARD ||
-                !bridgeEscapePoseSafe(vehicle, s)) return false;
+            const double traveled = distance * static_cast<double>(i) / count;
+            RoughWp pose = start;
+            pose.x += direction * std::cos(start.theta) * traveled;
+            pose.y += direction * std::sin(start.theta) * traveled;
+            pose.type = direction > 0 ? WpType::FORWARD : WpType::REVERSE;
+            if (!bridgeEscapePoseSafe(vehicle, pose)) return false;
         }
+        if (std::hypot(target.x - (start.x + direction * std::cos(start.theta) * distance),
+                       target.y - (start.y + direction * std::sin(start.theta) * distance)) > 1e-4 ||
+            std::abs(normalizeAngle(target.theta - start.theta)) > 1e-4) return false;
         return true;
     }
 
@@ -2724,8 +2731,9 @@ private:
             command->header.frame_id == pp_.frame_id && vehicle != nullptr &&
             std::find(cycle_ids.begin(), cycle_ids.end(), command->vehicle_id) !=
                 cycle_ids.end() && vehicle->path_gen == command->path_gen &&
-            !vehicle->track.empty() && command->target_path_s > vehicle->path_s + 1e-9 &&
-            command->target_path_s <= vehicle->track.length() + 1e-9;
+            !vehicle->track.empty() &&
+            (command->motion_direction == 1 || command->motion_direction == -1) &&
+            std::isfinite(command->travel_distance) && command->travel_distance > 0.0;
         if (!identity_valid) {
             ROS_ERROR("[BRIDGE_ESCAPE_REJECT] transaction, vehicle, or path identity mismatch");
             return;
@@ -2735,10 +2743,23 @@ private:
         bridge_escape_.recovery_id = command->recovery_id;
         bridge_escape_.vehicle_id = command->vehicle_id;
         bridge_escape_.path_gen = command->path_gen;
-        bridge_escape_.target_path_s = command->target_path_s;
-        if (!bridgeEscapeSweepClear(*vehicle, command->target_path_s)) {
+        geometry_msgs::Pose2D start_pose;
+        if (!recoveryPose(*vehicle, start_pose)) {
             bridge_escape_.status = sandbox_msgs::RecoverySnapshot::BRIDGE_ESCAPE_FAILED;
-            bridge_escape_.reason = "forward sweep is no longer collision-free";
+            bridge_escape_.reason = "frozen start pose is unavailable";
+            return;
+        }
+        bridge_escape_.start_pose = {start_pose.x, start_pose.y, start_pose.theta, WpType::FORWARD};
+        bridge_escape_.target_pose = {command->target_pose.x, command->target_pose.y,
+                                      command->target_pose.theta, WpType::FORWARD};
+        bridge_escape_.motion_direction = command->motion_direction;
+        bridge_escape_.travel_distance = command->travel_distance;
+        if (!bridgeEscapeSweepClear(*vehicle, bridge_escape_.start_pose,
+                                    bridge_escape_.target_pose,
+                                    bridge_escape_.motion_direction,
+                                    bridge_escape_.travel_distance)) {
+            bridge_escape_.status = sandbox_msgs::RecoverySnapshot::BRIDGE_ESCAPE_FAILED;
+            bridge_escape_.reason = "straight sweep is no longer collision-free or target is inconsistent";
             ROS_ERROR("[BRIDGE_ESCAPE_REJECT] V%d %s", command->vehicle_id,
                       bridge_escape_.reason.c_str());
             return;
@@ -2746,9 +2767,10 @@ private:
         bridge_escape_.status = sandbox_msgs::RecoverySnapshot::BRIDGE_ESCAPE_MOVING;
         bridge_escape_.active = true;
         vehicle->current_speed = 0.0;
-        ROS_WARN("[BRIDGE_ESCAPE_START] recovery_id=%llu V%d s=%.3f->%.3f",
+        ROS_WARN("[BRIDGE_ESCAPE_START] recovery_id=%llu V%d d=%.3f dir=%d",
                  static_cast<unsigned long long>(command->recovery_id),
-                 command->vehicle_id, vehicle->path_s, command->target_path_s);
+                 command->vehicle_id, command->travel_distance,
+                 static_cast<int>(command->motion_direction));
     }
 
     void executeBridgeEscape(double dt) {
@@ -2763,17 +2785,21 @@ private:
             return;
         }
 
-        const double remaining = bridge_escape_.target_path_s - vehicle->path_s;
+        const double remaining = bridge_escape_.travel_distance - bridge_escape_.traveled;
         const double tolerance = std::max(0.005, cfg_.path_validation_step);
         if (remaining <= tolerance && vehicle->current_speed <= cfg_.max_decel * dt + 1e-9) {
-            vehicle->path_s = bridge_escape_.target_path_s;
+            vehicle->real_pose_valid = true;
+            vehicle->real_x = bridge_escape_.target_pose.x;
+            vehicle->real_y = bridge_escape_.target_pose.y;
+            vehicle->real_yaw = bridge_escape_.target_pose.theta;
             vehicle->current_speed = 0.0;
             vehicle->reason = "bridge_escape_arrived";
             bridge_escape_.active = false;
             bridge_escape_.status = sandbox_msgs::RecoverySnapshot::BRIDGE_ESCAPE_SUCCEEDED;
             bridge_escape_.reason = "arrived and stopped";
-            ROS_WARN("[BRIDGE_ESCAPE_FINISH] V%d s=%.3f",
-                     vehicle->id, vehicle->path_s);
+            ROS_WARN("[BRIDGE_ESCAPE_FINISH] V%d pose=(%.3f,%.3f,%.3f) path_s=%.3f",
+                     vehicle->id, vehicle->real_x, vehicle->real_y,
+                     vehicle->real_yaw, vehicle->path_s);
             return;
         }
 
@@ -2781,11 +2807,18 @@ private:
             std::max(0.0, 2.0 * cfg_.max_decel * std::max(0.0, remaining)));
         const double desired = std::min({
             rule_engine_->speedForAction(VehicleAction::CREEP),
-            curvatureSpeed(*vehicle), stopping_speed});
+            stopping_speed});
         const double next_speed = limitedSpeed(vehicle->current_speed, desired, dt);
-        const double next_s = std::min(
-            bridge_escape_.target_path_s, vehicle->path_s + next_speed * dt);
-        if (!bridgeEscapePoseSafe(*vehicle, next_s)) {
+        const double next_traveled = std::min(
+            bridge_escape_.travel_distance, bridge_escape_.traveled + next_speed * dt);
+        RoughWp next_pose = bridge_escape_.start_pose;
+        next_pose.x += bridge_escape_.motion_direction *
+                       std::cos(next_pose.theta) * next_traveled;
+        next_pose.y += bridge_escape_.motion_direction *
+                       std::sin(next_pose.theta) * next_traveled;
+        next_pose.type = bridge_escape_.motion_direction > 0 ?
+                         WpType::FORWARD : WpType::REVERSE;
+        if (!bridgeEscapePoseSafe(*vehicle, next_pose)) {
             vehicle->current_speed = 0.0;
             vehicle->reason = "bridge_escape_collision_hold";
             bridge_escape_.active = false;
@@ -2796,10 +2829,15 @@ private:
             return;
         }
         vehicle->current_speed = next_speed;
-        vehicle->path_s = next_s;
+        vehicle->real_pose_valid = true;
+        vehicle->real_x = next_pose.x;
+        vehicle->real_y = next_pose.y;
+        vehicle->real_yaw = next_pose.theta;
+        bridge_escape_.traveled = next_traveled;
         vehicle->action = VehicleAction::CREEP;
         vehicle->requested_action = VehicleAction::CREEP;
-        vehicle->reason = "bridge_escape_forward";
+        vehicle->reason = bridge_escape_.motion_direction > 0 ?
+                          "bridge_escape_forward" : "bridge_escape_reverse";
         ++tick_count_;
         sim_time_ += dt;
     }
@@ -3869,7 +3907,11 @@ private:
         uint64_t recovery_id = 0;
         int vehicle_id = -1;
         int path_gen = -1;
-        double target_path_s = 0.0;
+        RoughWp start_pose;
+        RoughWp target_pose;
+        int motion_direction = 1;
+        double travel_distance = 0.0;
+        double traveled = 0.0;
         std::string reason;
     } bridge_escape_;
     uint64_t sim_plan_id_ = 0;

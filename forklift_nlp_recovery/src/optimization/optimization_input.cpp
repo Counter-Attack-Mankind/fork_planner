@@ -111,7 +111,8 @@ void OptimizationInputBuilder::collectStaticVehicleCandidates(
 OptimizationInputBuildResult OptimizationInputBuilder::build(
     const sandbox_msgs::RecoverySnapshot& snapshot,
     const std::vector<int>& participant_ids,
-    const std::string& source_mode) const {
+    const std::string& source_mode,
+    bool off_path_start) const {
     OptimizationInputBuildResult result;
     result.input.source_mode = source_mode;
     result.input.trigger_reason = snapshot.reason;
@@ -166,7 +167,7 @@ OptimizationInputBuildResult OptimizationInputBuilder::build(
         const CorridorResult corridor = corridor_builder_.build(
             input_vehicle.frozen_initial_state.rear_axle_pose,
             input_vehicle.original_path, input_vehicle.frozen_path_s,
-            input_vehicle.path_gen, id);
+            input_vehicle.path_gen, id, !off_path_start);
         if (corridor.optimization_start_valid) {
             input_vehicle.initial_state.rear_axle_pose = corridor.optimization_start.pose;
             input_vehicle.path_s = corridor.optimization_start.s;

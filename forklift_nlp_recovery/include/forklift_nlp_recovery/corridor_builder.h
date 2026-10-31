@@ -90,7 +90,8 @@ public:
     bool generateAabb(const Pose2d& seed, Aabb& box, std::string& reason) const;
     // start and path are rear-axle poses; only internal geometry is body-centered.
     CorridorResult build(const Pose2d& start, const std::vector<PathPoint>& path,
-                         double current_s, int path_gen, int vehicle_id = -1) const;
+                         double current_s, int path_gen, int vehicle_id = -1,
+                         bool start_on_path = true) const;
 
     static std::vector<PathPoint> parameterizePath(
         const std::vector<Pose2d>& poses, const std::vector<uint8_t>& types);

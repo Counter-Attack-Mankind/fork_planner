@@ -80,9 +80,28 @@ TEST(CandidateSelectorTest, ExcludesAnyObbIntersectingRow2Bridge) {
     const auto escape = std::find_if(bridge.ranked.begin(), bridge.ranked.end(),
         [](const fnr::BridgeEscapeEvaluation& value) { return value.vehicle_id == 1; });
     ASSERT_NE(escape, bridge.ranked.end());
-    EXPECT_GT(escape->escape_path_s, snapshot.vehicles.front().path_s);
+    EXPECT_TRUE(escape->intersects_bridge);
+    EXPECT_TRUE(escape->escape_valid);
+    EXPECT_FALSE(escape->escape_segment.empty());
+    EXPECT_GT(escape->escape_distance, 0.0);
+    EXPECT_NEAR(escape->escape_pose.yaw, escape->frozen_pose.yaw, 1e-9);
+    EXPECT_NEAR(escape->escape_pose.x, escape->frozen_pose.x, 1e-9);
     EXPECT_FALSE(escape->eligible);
     EXPECT_NE(escape->reason.find("no effective positive spatial gain"),
+              std::string::npos);
+
+    sandbox_msgs::RecoverySnapshot blocked = snapshot;
+    blocked.vehicles.push_back(vehicle(3, {1.25, 2.25, M_PI * 0.5},
+        {{1.25, 2.25, M_PI * 0.5}, {1.25, 2.80, M_PI * 0.5}}));
+    const auto blocked_bridge = selector.evaluateBridgeEscapes(blocked, {1, 2});
+    const auto blocked_escape = std::find_if(
+        blocked_bridge.ranked.begin(), blocked_bridge.ranked.end(),
+        [](const fnr::BridgeEscapeEvaluation& value) { return value.vehicle_id == 1; });
+    ASSERT_NE(blocked_escape, blocked_bridge.ranked.end());
+    EXPECT_TRUE(blocked_escape->sweep_failure_valid);
+    EXPECT_TRUE(blocked_escape->sweep_failure_at_start);
+    EXPECT_FALSE(blocked_escape->escape_valid);
+    EXPECT_NE(blocked_escape->sweep_failure_reason.find("frozen V3"),
               std::string::npos);
 }
 
