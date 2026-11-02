@@ -285,6 +285,49 @@ CandidateSelectionResult CandidateSelector::evaluate(
     return result;
 }
 
+CandidateSelectionResult CandidateSelector::evaluatePreserved(
+    const sandbox_msgs::RecoverySnapshot& snapshot,
+    const std::vector<int>& deadlock_cycle_ids,
+    const std::vector<OptimizationInputBuildResult>& preserved_builds) const {
+    CandidateSelectionResult result;
+    if (deadlock_cycle_ids.size() < 2) {
+        result.reason = "confirmed deadlock cycle has fewer than two vehicles";
+        return result;
+    }
+    std::vector<double> before(deadlock_cycle_ids.size(), 0.0);
+    for (size_t i = 0; i < deadlock_cycle_ids.size(); ++i) {
+        const auto* vehicle = findVehicle(snapshot, deadlock_cycle_ids[i]);
+        if (vehicle == nullptr || !vehicle->pose_valid || !vehicle->pose_fresh ||
+            std::abs(vehicle->current_speed) > config_.stopped_speed_tolerance) {
+            result.reason = "backtracked deadlock snapshot is incomplete, stale, or moving";
+            return result;
+        }
+        before[i] = continuousSafeDistance(*vehicle, snapshot, -1, nullptr);
+    }
+    result.complete_snapshot = true;
+    for (const OptimizationInputBuildResult& build : preserved_builds) {
+        if (!build.complete || build.input.vehicles.size() != 1) continue;
+        const int id = build.input.vehicles.front().id;
+        if (std::find(deadlock_cycle_ids.begin(), deadlock_cycle_ids.end(), id) ==
+            deadlock_cycle_ids.end()) continue;
+        result.ranked.push_back(evaluateBuiltCandidate(
+            snapshot, deadlock_cycle_ids, before, id, build));
+    }
+    std::stable_sort(result.ranked.begin(), result.ranked.end(),
+        [](const CandidateEvaluation& first, const CandidateEvaluation& second) {
+            if (first.eligible != second.eligible) return first.eligible > second.eligible;
+            if (first.positive_gain_count != second.positive_gain_count)
+                return first.positive_gain_count > second.positive_gain_count;
+            if (std::abs(first.total_positive_gain - second.total_positive_gain) > kEpsilon)
+                return first.total_positive_gain > second.total_positive_gain;
+            return first.vehicle_id < second.vehicle_id;
+        });
+    result.reason = std::any_of(result.ranked.begin(), result.ranked.end(),
+        [](const CandidateEvaluation& candidate) { return candidate.eligible; }) ?
+        "ok" : "no preserved candidate has bounded positive spatial gain";
+    return result;
+}
+
 BridgeEscapeSelectionResult CandidateSelector::evaluateBridgeEscapes(
     const sandbox_msgs::RecoverySnapshot& snapshot,
     const std::vector<int>& deadlock_cycle_ids) const {

@@ -32,6 +32,7 @@
 #include "forklift_planner/multi_vehicle/marker_publisher.h"
 #include "forklift_planner/multi_vehicle/multi_vehicle_config.h"
 #include "forklift_planner/multi_vehicle/real_state_estimation.h"
+#include "forklift_planner/multi_vehicle/recovery/nlp_backtrack_executor.h"
 #include "forklift_planner/multi_vehicle/rule_engine.h"
 #include "forklift_planner/multi_vehicle/task_allocator.h"
 #include "forklift_planner/multi_vehicle/traffic_resource_map.h"
@@ -43,6 +44,7 @@
 #include "sandbox_msgs/RecoveryVehicleState.h"
 #include "sandbox_msgs/BridgeEscapeCommand.h"
 #include "sandbox_msgs/NlpRecoveryTrajectory.h"
+#include "sandbox_msgs/NlpBacktrackCommand.h"
 #include "sandbox_msgs/NlpRecoveryPoint.h"
 #include "sandbox_msgs/NlpRecoveryVehicleTrajectory.h"
 #include "sandbox_msgs/Trajectory.h"
@@ -122,6 +124,13 @@ public:
         initCoordLog();
 
         map_ = std::make_unique<ForkliftMap>(mp_);
+        forklift_planner::multi_vehicle::NlpBacktrackExecutorConfig backtrack_config;
+        backtrack_config.path_validation_step = cfg_.path_validation_step;
+        backtrack_config.max_accel = cfg_.max_accel;
+        backtrack_config.max_decel = cfg_.max_decel;
+        nlp_backtrack_executor_ = std::make_unique<
+            forklift_planner::multi_vehicle::NlpBacktrackExecutor>(
+                mp_, map_->shelf_blocks(), backtrack_config);
         resource_map_ = std::make_unique<
             forklift_planner::multi_vehicle::TrafficResourceMap>(
             mp_, map_->slots(), map_->road_segments());
@@ -148,6 +157,9 @@ public:
         bridge_escape_sub_ = nh_.subscribe(
             "/forklift_planner/bridge_escape_command", 1,
             &MultiVehiclePatrolNode::bridgeEscapeCallback, this);
+        nlp_backtrack_sub_ = nh_.subscribe(
+            "/forklift_planner/nlp_backtrack_command", 1,
+            &MultiVehiclePatrolNode::nlpBacktrackCallback, this);
 
         if (stress_quiet_) {
             ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME,
@@ -2501,6 +2513,8 @@ private:
         if (cfg_.real_mode || !recovery.nlpTakeover()) return false;
 
         nlp_recovery_frozen_ = true;
+        nlp_recovery_solve_round_ = 0;
+        nlp_recovery_round_id_ = recovery.recovery_id;
         for (VehicleAgent& vehicle : agents_) vehicle.current_speed = 0.0;
         sim_plan_frames_.clear();
         sim_plan_cursor_ = 0;
@@ -2612,6 +2626,8 @@ private:
         snapshot.frozen_vehicle_ids = recovery.frozen_vehicle_ids;
         snapshot.nlp_vehicle_ids = recovery.nlp_vehicle_ids;
         snapshot.reason = recovery.reason;
+        snapshot.solve_round = recovery.recovery_id == nlp_recovery_round_id_ ?
+            nlp_recovery_solve_round_ : 0;
         snapshot.bridge_escape_status = sandbox_msgs::RecoverySnapshot::BRIDGE_ESCAPE_NONE;
         snapshot.bridge_escape_vehicle_id = -1;
         snapshot.bridge_escape_path_gen = -1;
@@ -2624,6 +2640,18 @@ private:
             snapshot.bridge_escape_target_pose.y = bridge_escape_.target_pose.y;
             snapshot.bridge_escape_target_pose.theta = bridge_escape_.target_pose.theta;
             snapshot.bridge_escape_reason = bridge_escape_.reason;
+        }
+        snapshot.backtrack_status = sandbox_msgs::RecoverySnapshot::BACKTRACK_NONE;
+        snapshot.backtrack_vehicle_id = -1;
+        snapshot.backtrack_path_gen = -1;
+        snapshot.backtrack_target_s = 0.0;
+        if (nlp_backtrack_executor_ != nullptr &&
+            nlp_backtrack_executor_->recoveryId() == recovery.recovery_id) {
+            snapshot.backtrack_status = nlp_backtrack_executor_->status();
+            snapshot.backtrack_vehicle_id = nlp_backtrack_executor_->vehicleId();
+            snapshot.backtrack_path_gen = nlp_backtrack_executor_->pathGen();
+            snapshot.backtrack_target_s = nlp_backtrack_executor_->targetS();
+            snapshot.backtrack_reason = nlp_backtrack_executor_->reason();
         }
         snapshot.vehicles.reserve(agents_.size());
         for (size_t vehicle_index = 0; vehicle_index < agents_.size(); ++vehicle_index) {
@@ -2659,6 +2687,7 @@ private:
             state.blocker_id = vehicle.blocker_id;
             state.blocker_reason = vehicle.reason;
             state.loaded = vehicle.loaded;
+            state.source_slot_id = vehicle.current_slot;
             state.slot_departure_clear_s = vehicle.slot_departure_clear_s;
             const double departure_tolerance = std::max(0.005, cfg_.path_validation_step);
             state.departed_source_slot =
@@ -2720,6 +2749,30 @@ private:
         return true;
     }
 
+    void nlpBacktrackCallback(
+        const sandbox_msgs::NlpBacktrackCommand::ConstPtr& command) {
+        const auto& recovery = rule_engine_->recoveryDirective();
+        const std::vector<int>& cycle_ids = recovery.deadlock_cycle_ids.empty() ?
+            recovery.nlp_vehicle_ids : recovery.deadlock_cycle_ids;
+        if (cfg_.real_mode || !nlp_recovery_frozen_ || nlp_execution_active_ ||
+            bridge_escape_.active || !recovery.nlpTakeover() ||
+            command->header.frame_id != pp_.frame_id) {
+            ROS_ERROR("[NLP_BACKTRACK_REJECT] planner is not in an idle simulation NLP freeze");
+            return;
+        }
+        std::string reason;
+        if (!nlp_backtrack_executor_->begin(
+                *command, recovery.recovery_id, nlp_recovery_solve_round_,
+                cycle_ids, agents_, reason)) {
+            ROS_ERROR("[NLP_BACKTRACK_REJECT] %s", reason.c_str());
+            if (diagnostics_) diagnostics_->event("[NLP_BACKTRACK_REJECT] " + reason);
+            return;
+        }
+        ROS_WARN("[NLP_BACKTRACK_START] recovery_id=%llu round=%u vehicles=%zu",
+                 static_cast<unsigned long long>(command->recovery_id),
+                 command->solve_round, command->vehicle_ids.size());
+    }
+
     void bridgeEscapeCallback(const sandbox_msgs::BridgeEscapeCommand::ConstPtr& command) {
         const auto& recovery = rule_engine_->recoveryDirective();
         VehicleAgent* vehicle = agentById(command->vehicle_id);
@@ -2727,6 +2780,7 @@ private:
             recovery.nlp_vehicle_ids : recovery.deadlock_cycle_ids;
         const bool identity_valid = !cfg_.real_mode && nlp_recovery_frozen_ &&
             !nlp_execution_active_ && !bridge_escape_.active &&
+            !nlp_backtrack_executor_->active() &&
             recovery.nlpTakeover() && command->recovery_id == recovery.recovery_id &&
             command->header.frame_id == pp_.frame_id && vehicle != nullptr &&
             std::find(cycle_ids.begin(), cycle_ids.end(), command->vehicle_id) !=
@@ -2846,12 +2900,17 @@ private:
                                std::string& reason) {
         const auto& recovery = rule_engine_->recoveryDirective();
         if (cfg_.real_mode || !nlp_recovery_frozen_ || bridge_escape_.active ||
+            nlp_backtrack_executor_->active() ||
             !recovery.nlpTakeover()) {
             reason = "planner is not in a simulation NLP_PREP freeze";
             return false;
         }
         if (message.recovery_id == 0 || message.recovery_id != recovery.recovery_id) {
             reason = "recovery transaction identity mismatch";
+            return false;
+        }
+        if (message.solve_round != nlp_recovery_solve_round_) {
+            reason = "trajectory solve round does not match the frozen layout";
             return false;
         }
         if (message.header.frame_id != pp_.frame_id) {
@@ -3275,8 +3334,25 @@ private:
         simulation_step_credit_ -= simulation_steps;
         for (int step = 0; step < simulation_steps; ++step) {
             if (nlp_recovery_frozen_) {
-                if (bridge_escape_.active) executeBridgeEscape(dt);
-                else executeNlpRecovery(dt);
+                if (nlp_backtrack_executor_->active()) {
+                    const auto& recovery = rule_engine_->recoveryDirective();
+                    nlp_backtrack_executor_->step(dt, recovery.recovery_id, agents_);
+                    ++tick_count_;
+                    sim_time_ += dt;
+                    if (!nlp_backtrack_executor_->active() &&
+                        nlp_backtrack_executor_->status() ==
+                            forklift_planner::multi_vehicle::NlpBacktrackExecutor::SUCCEEDED &&
+                        nlp_recovery_solve_round_ == nlp_backtrack_executor_->solveRound()) {
+                        ++nlp_recovery_solve_round_;
+                        ROS_WARN("[NLP_BACKTRACK_FINISH] recovery_id=%llu solve_round=%u",
+                                 static_cast<unsigned long long>(recovery.recovery_id),
+                                 nlp_recovery_solve_round_);
+                    }
+                } else if (bridge_escape_.active) {
+                    executeBridgeEscape(dt);
+                } else {
+                    executeNlpRecovery(dt);
+                }
             } else {
                 stepSimulation(dt);
             }
@@ -3873,6 +3949,7 @@ private:
     ros::Publisher recovery_snapshot_pub_;              // read-only rear-axle pose and raw offline path
     ros::Subscriber nlp_trajectory_sub_;
     ros::Subscriber bridge_escape_sub_;
+    ros::Subscriber nlp_backtrack_sub_;
     ros::Publisher snapshot_trigger_pub_;
     bool snapshot_debug_enabled_ = false;
     double debug_timeline_start_ = -1.0;
@@ -3901,6 +3978,10 @@ private:
     double nlp_execution_elapsed_ = 0.0;
     double nlp_max_start_correction_ = 0.02;
     sandbox_msgs::NlpRecoveryTrajectory nlp_execution_;
+    std::unique_ptr<forklift_planner::multi_vehicle::NlpBacktrackExecutor>
+        nlp_backtrack_executor_;
+    uint64_t nlp_recovery_round_id_ = 0;
+    uint32_t nlp_recovery_solve_round_ = 0;
     struct BridgeEscapeExecution {
         bool active = false;
         uint8_t status = sandbox_msgs::RecoverySnapshot::BRIDGE_ESCAPE_NONE;

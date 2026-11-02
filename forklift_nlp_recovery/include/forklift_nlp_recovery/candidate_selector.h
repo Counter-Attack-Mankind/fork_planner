@@ -74,6 +74,11 @@ public:
         const std::vector<int>& deadlock_cycle_ids,
         int off_path_start_vehicle_id = -1) const;
 
+    CandidateSelectionResult evaluatePreserved(
+        const sandbox_msgs::RecoverySnapshot& snapshot,
+        const std::vector<int>& deadlock_cycle_ids,
+        const std::vector<OptimizationInputBuildResult>& preserved_builds) const;
+
     BridgeEscapeSelectionResult evaluateBridgeEscapes(
         const sandbox_msgs::RecoverySnapshot& snapshot,
         const std::vector<int>& deadlock_cycle_ids) const;

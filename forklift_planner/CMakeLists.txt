@@ -73,6 +73,7 @@ add_executable(multi_vehicle_patrol_node
   src/multi_vehicle/marker_publisher.cpp
   src/multi_vehicle/multi_vehicle_config.cpp
   src/multi_vehicle/path_track.cpp
+  src/multi_vehicle/recovery/nlp_backtrack_executor.cpp
   src/multi_vehicle/a1/a1_coordinator.cpp
   src/multi_vehicle/deadlock/deadlock_manager.cpp
   src/multi_vehicle/rule_engine.cpp

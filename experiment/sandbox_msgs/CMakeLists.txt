@@ -20,6 +20,7 @@ add_message_files(
   RecoveryVehicleState.msg
   RecoverySnapshot.msg
   BridgeEscapeCommand.msg
+  NlpBacktrackCommand.msg
   NlpRecoveryVehicleTrajectory.msg
   NlpRecoveryTrajectory.msg
   NlpRecoveryPoint.msg

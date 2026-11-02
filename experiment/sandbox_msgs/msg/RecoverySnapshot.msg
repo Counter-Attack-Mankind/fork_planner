@@ -37,4 +37,16 @@ int32 bridge_escape_path_gen
 geometry_msgs/Pose2D bridge_escape_target_pose
 string bridge_escape_reason
 
+uint8 BACKTRACK_NONE=0
+uint8 BACKTRACK_MOVING=1
+uint8 BACKTRACK_SUCCEEDED=2
+uint8 BACKTRACK_SAFETY_FAILED=3
+uint8 BACKTRACK_NO_EXECUTABLE=4
+uint32 solve_round
+uint8 backtrack_status
+int32 backtrack_vehicle_id
+int32 backtrack_path_gen
+float64 backtrack_target_s
+string backtrack_reason
+
 sandbox_msgs/RecoveryVehicleState[] vehicles

@@ -16,6 +16,7 @@
 #include <geometry_msgs/Point.h>
 #include <sandbox_msgs/RecoverySnapshot.h>
 #include <sandbox_msgs/BridgeEscapeCommand.h>
+#include <sandbox_msgs/NlpBacktrackCommand.h>
 #include <sandbox_msgs/NlpRecoveryTrajectory.h>
 #include <sandbox_msgs/NlpRecoveryPoint.h>
 #include <sandbox_msgs/NlpRecoveryVehicleTrajectory.h>
@@ -28,6 +29,7 @@
 #include "forklift_map/map_param.h"
 #include "forklift_nlp_recovery/corridor_builder.h"
 #include "forklift_nlp_recovery/candidate_selector.h"
+#include "forklift_nlp_recovery/backtrack_planner.h"
 #include "forklift_nlp_recovery/hybrid_astar.h"
 #include "forklift_nlp_recovery/initial_guess.h"
 #include "forklift_nlp_recovery/nlp_solver.h"
@@ -217,6 +219,17 @@ public:
                           candidate_config_.bridge_escape_rear_clearance);
         candidate_selector_ = std::make_unique<CandidateSelector>(
             map_param_, map_->shelf_blocks(), candidate_config_, *input_builder_);
+        private_nh_.param("nlp_backtrack_enabled", backtrack_config_.enabled,
+                          backtrack_config_.enabled);
+        private_nh_.param("nlp_backtrack_distance", backtrack_config_.distance,
+                          backtrack_config_.distance);
+        private_nh_.param("nlp_backtrack_speed", backtrack_config_.speed,
+                          backtrack_config_.speed);
+        global_nh.param(planner_ns + "path_validation_step",
+                        backtrack_config_.path_validation_step,
+                        backtrack_config_.path_validation_step);
+        backtrack_planner_ = std::make_unique<BacktrackPlanner>(
+            map_param_, map_->slots(), backtrack_config_);
         private_nh_.param("hybrid_integration_step", hybrid_config_.integration_step,
                           hybrid_config_.integration_step);
         private_nh_.param("hybrid_collision_check_step",
@@ -267,6 +280,8 @@ public:
             "/forklift_planner/nlp_recovery_trajectory", 1, true);
         bridge_escape_pub_ = private_nh_.advertise<sandbox_msgs::BridgeEscapeCommand>(
             "/forklift_planner/bridge_escape_command", 1, true);
+        backtrack_pub_ = private_nh_.advertise<sandbox_msgs::NlpBacktrackCommand>(
+            "/forklift_planner/nlp_backtrack_command", 1, true);
         snapshot_sub_ = private_nh_.subscribe(
             snapshot_topic_, 1, &RecoveryVisualizerNode::snapshotCallback, this);
         std::ostringstream selected_ids;
@@ -631,6 +646,7 @@ private:
         message.header.stamp = ros::Time::now();
         message.header.frame_id = locked_.frame_id;
         message.recovery_id = locked_.recovery_id;
+        message.solve_round = locked_.solve_round;
         message.solver_success = locked_.solver_result.solver_success;
         message.validation_passed = locked_.solver_result.validation_passed;
         for (size_t i = 0; i < locked_.solver_result.vehicles.size(); ++i) {
@@ -742,8 +758,10 @@ private:
     bool trySolveCandidate(CandidateEvaluation candidate) {
         if (!candidate.eligible || candidate.build.input.vehicles.size() != 1) return false;
         NlpVehicleInput& vehicle = candidate.build.input.vehicles.front();
-        const std::string target_key = std::to_string(candidate.vehicle_id) + "@" +
+        const std::string target_key = std::to_string(locked_.recovery_id) + "@" +
+            std::to_string(candidate.vehicle_id) + "@" +
             std::to_string(vehicle.path_gen) + "@" +
+            std::to_string(locked_.solve_round) + "@" +
             std::to_string(static_cast<long long>(
                 std::llround(vehicle.terminal.path_s * 1000.0)));
         if (!attempted_recovery_targets_.insert(target_key).second) {
@@ -806,6 +824,156 @@ private:
         locked_.bridge_path_gen = escape.path_gen;
         ROS_WARN("[nlp_recovery][bridge_escape] requested V%d d=%.3f dir=%d",
                  escape.vehicle_id, escape.escape_distance, escape.motion_direction);
+    }
+
+    void requestBacktrack(const sandbox_msgs::RecoverySnapshot& snapshot,
+                          const std::vector<int>& cycle_ids) {
+        if (locked_.backtrack_triggered) return;
+        locked_.backtrack_triggered = true;
+        locked_.backtrack_plan = backtrack_planner_->plan(
+            snapshot, cycle_ids, locked_.preserved_builds);
+        sandbox_msgs::NlpBacktrackCommand command;
+        command.header.stamp = ros::Time::now();
+        command.header.frame_id = locked_.frame_id;
+        command.recovery_id = locked_.recovery_id;
+        command.solve_round = locked_.solve_round;
+        command.speed = locked_.backtrack_plan.speed;
+        for (const BacktrackCandidate& candidate : locked_.backtrack_plan.candidates) {
+            command.vehicle_ids.push_back(candidate.vehicle_id);
+            command.path_gens.push_back(candidate.path_gen);
+            command.target_s.push_back(candidate.target_s);
+            command.hold_at_source_b.push_back(candidate.hold_at_source_b);
+        }
+        backtrack_pub_.publish(command);
+        locked_.backtrack_pending = true;
+        ROS_WARN("[nlp_recovery][backtrack] requested recovery_id=%llu round=%u "
+                 "vehicles=%zu reason=%s",
+                 static_cast<unsigned long long>(locked_.recovery_id),
+                 locked_.solve_round, command.vehicle_ids.size(),
+                 locked_.backtrack_plan.reason.c_str());
+    }
+
+    bool preparePreservedBacktrackBuild(
+        const BacktrackCandidate& candidate,
+        const sandbox_msgs::RecoverySnapshot& snapshot,
+        OptimizationInputBuildResult& build, std::string& reason) const {
+        if (candidate.hold_at_source_b || !candidate.preserved_build.complete ||
+            !candidate.preserved_build.input.valid ||
+            candidate.preserved_build.input.vehicles.size() != 1) return false;
+        const auto* state = findVehicle(snapshot, candidate.vehicle_id);
+        if (state == nullptr || !state->pose_valid || !state->pose_fresh ||
+            state->path_gen != candidate.path_gen ||
+            std::abs(state->path_s - candidate.target_s) >
+                std::max(0.005, backtrack_config_.path_validation_step)) {
+            reason = "completed backtrack state does not match the preserved path target";
+            return false;
+        }
+        build = candidate.preserved_build;
+        build.input.source_mode = "backtrack_reuse";
+        NlpVehicleInput& vehicle = build.input.vehicles.front();
+        const Pose2d rear{state->pose.x, state->pose.y, state->pose.theta};
+        const Pose2d center = builder_->bodyCenter(rear);
+        const auto contains = [](const Aabb& box, const Pose2d& point) {
+            return point.x >= box.min_x - 1e-9 && point.x <= box.max_x + 1e-9 &&
+                   point.y >= box.min_y - 1e-9 && point.y <= box.max_y + 1e-9;
+        };
+        if (!vehicle.stc_valid || vehicle.corridor.empty() ||
+            !contains(vehicle.safe_stc, center) ||
+            !contains(vehicle.corridor.front(), center)) {
+            reason = "backtracked start is incompatible with the preserved first STC node";
+            return false;
+        }
+        vehicle.frozen_initial_state.rear_axle_pose = rear;
+        vehicle.frozen_initial_state.longitudinal_speed = 0.0;
+        vehicle.initial_state = vehicle.frozen_initial_state;
+        vehicle.initial_state_corrected = false;
+        vehicle.frozen_path_s = state->path_s;
+        vehicle.path_s = state->path_s;
+        for (StaticVehicleObstacle& obstacle : build.input.static_vehicles) {
+            const auto* obstacle_state = findVehicle(snapshot, obstacle.id);
+            if (obstacle_state == nullptr || !obstacle_state->pose_valid) continue;
+            obstacle.rear_axle_pose = {obstacle_state->pose.x, obstacle_state->pose.y,
+                                       obstacle_state->pose.theta};
+            obstacle.disc_center = {
+                obstacle.rear_axle_pose.x + obstacle.rear_axle_to_center *
+                    std::cos(obstacle.rear_axle_pose.yaw),
+                obstacle.rear_axle_pose.y + obstacle.rear_axle_to_center *
+                    std::sin(obstacle.rear_axle_pose.yaw),
+                obstacle.rear_axle_pose.yaw};
+        }
+        for (const BacktrackCandidate& held : locked_.backtrack_plan.candidates) {
+            if (!held.hold_at_source_b || held.vehicle_id == candidate.vehicle_id ||
+                std::any_of(build.input.static_vehicles.begin(),
+                            build.input.static_vehicles.end(),
+                            [&](const StaticVehicleObstacle& obstacle) {
+                                return obstacle.id == held.vehicle_id;
+                            })) continue;
+            const auto* held_state = findVehicle(snapshot, held.vehicle_id);
+            if (held_state == nullptr || !held_state->pose_valid) continue;
+            StaticVehicleObstacle obstacle;
+            obstacle.id = held.vehicle_id;
+            obstacle.rear_axle_pose = {held_state->pose.x, held_state->pose.y,
+                                       held_state->pose.theta};
+            obstacle.rear_axle_to_center = vehicle.parameters.rear_axle_to_center;
+            obstacle.length = vehicle.parameters.length;
+            obstacle.width = vehicle.parameters.width;
+            obstacle.disc_radius = vehicle.parameters.disc_radius;
+            obstacle.disc_center = builder_->bodyCenter(obstacle.rear_axle_pose);
+            build.input.static_vehicles.push_back(std::move(obstacle));
+        }
+        build.reason = "ok (preserved corridor)";
+        build.input.reason = build.reason;
+        reason = "ok";
+        return true;
+    }
+
+    void updateBacktrack(const sandbox_msgs::RecoverySnapshot& snapshot) {
+        if (!locked_.backtrack_pending || snapshot.recovery_id != locked_.recovery_id) return;
+        if (snapshot.backtrack_status == sandbox_msgs::RecoverySnapshot::BACKTRACK_MOVING ||
+            snapshot.backtrack_status == sandbox_msgs::RecoverySnapshot::BACKTRACK_NONE) return;
+        if (snapshot.backtrack_status ==
+                sandbox_msgs::RecoverySnapshot::BACKTRACK_SAFETY_FAILED ||
+            snapshot.backtrack_status ==
+                sandbox_msgs::RecoverySnapshot::BACKTRACK_NO_EXECUTABLE) {
+            locked_.backtrack_pending = false;
+            ROS_ERROR("[nlp_recovery][backtrack] failed: %s",
+                      snapshot.backtrack_reason.c_str());
+            return;
+        }
+        if (snapshot.backtrack_status !=
+                sandbox_msgs::RecoverySnapshot::BACKTRACK_SUCCEEDED ||
+            snapshot.solve_round != locked_.solve_round + 1) return;
+
+        locked_.backtrack_pending = false;
+        locked_.solve_round = snapshot.solve_round;
+        locked_.build = OptimizationInputBuildResult{};
+        locked_.geometry_vehicles.clear();
+        std::vector<OptimizationInputBuildResult> reusable_builds;
+        for (const BacktrackCandidate& backtracked : locked_.backtrack_plan.candidates) {
+            OptimizationInputBuildResult build;
+            std::string reason;
+            if (!preparePreservedBacktrackBuild(backtracked, snapshot, build, reason)) {
+                if (!backtracked.hold_at_source_b) {
+                    ROS_WARN("[nlp_recovery][backtrack] V%d cannot reuse corridor: %s",
+                             backtracked.vehicle_id, reason.c_str());
+                }
+                continue;
+            }
+            reusable_builds.push_back(std::move(build));
+        }
+        const std::vector<int>& cycle_ids = snapshot.deadlock_cycle_ids.empty() ?
+            snapshot.nlp_vehicle_ids : snapshot.deadlock_cycle_ids;
+        const CandidateSelectionResult selection = candidate_selector_->evaluatePreserved(
+            snapshot, cycle_ids, reusable_builds);
+        for (CandidateEvaluation candidate : selection.ranked) {
+            if (candidate.build.input.vehicles.size() == 1) {
+                locked_.geometry_vehicles.push_back(candidate.build.input.vehicles.front());
+            }
+            if (trySolveCandidate(std::move(candidate))) return;
+        }
+        ROS_ERROR("[nlp_recovery][backtrack] preserved-corridor re-solve failed (%s); "
+                  "global freeze retained and no second backtrack will be requested",
+                  selection.reason.c_str());
     }
 
     void updateBridgeEscape(const sandbox_msgs::RecoverySnapshot& snapshot,
@@ -1084,6 +1252,9 @@ private:
 
         const std::vector<int>& cycle_ids = snapshot.deadlock_cycle_ids.empty() ?
             snapshot.nlp_vehicle_ids : snapshot.deadlock_cycle_ids;
+        if (locked_.active && locked_.backtrack_pending) {
+            updateBacktrack(snapshot);
+        }
         if (locked_.active && locked_.bridge_escape_pending) {
             updateBridgeEscape(snapshot, cycle_ids);
         }
@@ -1099,7 +1270,14 @@ private:
             }
             locked_.active = true;
             locked_.recovery_id = snapshot.recovery_id;
+            locked_.solve_round = snapshot.solve_round;
             locked_.frame_id = snapshot.header.frame_id;
+            for (const CandidateEvaluation& candidate : selection.ranked) {
+                if (candidate.build.complete &&
+                    candidate.build.input.vehicles.size() == 1) {
+                    locked_.preserved_builds.push_back(candidate.build);
+                }
+            }
             for (CandidateEvaluation candidate : selection.ranked) {
                 if (candidate.build.input.vehicles.size() == 1) {
                     locked_.geometry_vehicles.push_back(
@@ -1142,6 +1320,7 @@ private:
                 if (!locked_.bridge_escape_pending) {
                     ROS_ERROR("[nlp_recovery][auto] regular and bridge candidates exhausted: %s",
                               bridge.reason.c_str());
+                    requestBacktrack(snapshot, cycle_ids);
                 }
             }
         }
@@ -1270,6 +1449,7 @@ private:
         bool active = false;
         bool submitted = false;
         uint64_t recovery_id = 0;
+        uint32_t solve_round = 0;
         std::string frame_id;
         std::string case_directory;
         OptimizationInputBuildResult build;
@@ -1282,12 +1462,17 @@ private:
         bool bridge_escape_pending = false;
         int bridge_vehicle_id = -1;
         int bridge_path_gen = -1;
+        bool backtrack_triggered = false;
+        bool backtrack_pending = false;
+        BacktrackPlan backtrack_plan;
+        std::vector<OptimizationInputBuildResult> preserved_builds;
     };
 
     ros::NodeHandle private_nh_;
     ros::Publisher marker_pub_;
     ros::Publisher trajectory_pub_;
     ros::Publisher bridge_escape_pub_;
+    ros::Publisher backtrack_pub_;
     ros::Subscriber snapshot_sub_;
     MapParam map_param_;
     std::unique_ptr<ForkliftMap> map_;
@@ -1295,12 +1480,14 @@ private:
     std::unique_ptr<CorridorBuilder> builder_;
     std::unique_ptr<OptimizationInputBuilder> input_builder_;
     std::unique_ptr<CandidateSelector> candidate_selector_;
+    std::unique_ptr<BacktrackPlanner> backtrack_planner_;
     std::unique_ptr<HybridAstarPlanner> hybrid_planner_;
     std::unique_ptr<InitialGuessGenerator> initial_guess_generator_;
     std::unique_ptr<NlpSolver> nlp_solver_;
     InitialGuessConfig initial_guess_config_;
     NlpSolverConfig solver_config_;
     CandidateSelectionConfig candidate_config_;
+    BacktrackConfig backtrack_config_;
     HybridAstarConfig hybrid_config_;
     OperatingMode mode_ = OperatingMode::DEBUG;
     std::string mode_name_ = "debug";

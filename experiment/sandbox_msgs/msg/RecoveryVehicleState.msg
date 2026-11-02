@@ -1,6 +1,13 @@
 int32 FORWARD=0
 int32 REVERSE=1
 
+int32 MISSION_DIRECT_TO_B=0
+int32 MISSION_TO_A1=1
+int32 MISSION_PICKUP_DWELL=2
+int32 MISSION_WAIT_DROPOFF_TASK=3
+int32 MISSION_TO_B=4
+int32 MISSION_UNLOAD_DWELL=5
+
 int32 id
 int32 path_gen
 float64 path_s
@@ -19,6 +26,7 @@ int32 action
 int32 blocker_id
 string blocker_reason
 bool loaded
+int32 source_slot_id
 float64 slot_departure_clear_s
 bool departed_source_slot
 geometry_msgs/Pose2D[] path
