@@ -50,24 +50,35 @@ public:
     const std::string& reason() const { return reason_; }
 
 private:
+    struct CollisionInfo {
+        int blocker_id = -1;
+        double path_s = 0.0;
+        RoughWp pose;
+    };
+
     struct Request {
         int vehicle_id = -1;
         int path_gen = -1;
         double target_s = 0.0;
         bool hold_at_source_b = false;
+        double start_s = 0.0;
     };
 
     VehicleAgent* findVehicle(std::vector<VehicleAgent>& vehicles, int id) const;
     const VehicleAgent* findVehicle(const std::vector<VehicleAgent>& vehicles, int id) const;
     bool poseSafe(const VehicleAgent& moving, const RoughWp& pose,
-                  const std::vector<VehicleAgent>& vehicles) const;
+                  const std::vector<VehicleAgent>& vehicles,
+                  int* blocker_id = nullptr) const;
     bool sweepClear(const VehicleAgent& moving, double target_s,
-                    const std::vector<VehicleAgent>& vehicles) const;
+                    const std::vector<VehicleAgent>& vehicles,
+                    CollisionInfo& collision) const;
     bool startCurrent(std::vector<VehicleAgent>& vehicles);
+    void finishCurrentBlocked(VehicleAgent& vehicle, const CollisionInfo& collision,
+                              std::vector<VehicleAgent>& vehicles);
+    void finishBatch();
     void fail(const std::string& reason);
 
     MapParam map_param_;
-    std::vector<ShelfBlock> shelves_;
     NlpBacktrackExecutorConfig config_;
     std::vector<Request> requests_;
     size_t request_index_ = 0;
@@ -79,6 +90,9 @@ private:
     int vehicle_id_ = -1;
     int path_gen_ = -1;
     double target_s_ = 0.0;
+    size_t completed_count_ = 0;
+    size_t skipped_count_ = 0;
+    size_t moved_count_ = 0;
     std::string reason_;
 };
 

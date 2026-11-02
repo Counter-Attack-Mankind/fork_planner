@@ -857,15 +857,17 @@ private:
         const BacktrackCandidate& candidate,
         const sandbox_msgs::RecoverySnapshot& snapshot,
         OptimizationInputBuildResult& build, std::string& reason) const {
-        if (candidate.hold_at_source_b || !candidate.preserved_build.complete ||
-            !candidate.preserved_build.input.valid ||
+        if (!candidate.preserved_build.complete || !candidate.preserved_build.input.valid ||
             candidate.preserved_build.input.vehicles.size() != 1) return false;
         const auto* state = findVehicle(snapshot, candidate.vehicle_id);
+        const double tolerance = std::max(0.005, backtrack_config_.path_validation_step);
         if (state == nullptr || !state->pose_valid || !state->pose_fresh ||
-            state->path_gen != candidate.path_gen ||
-            std::abs(state->path_s - candidate.target_s) >
-                std::max(0.005, backtrack_config_.path_validation_step)) {
-            reason = "completed backtrack state does not match the preserved path target";
+            state->path_gen != candidate.path_gen) {
+            reason = "latest vehicle state does not match the preserved path identity";
+            return false;
+        }
+        if (candidate.hold_at_source_b && std::abs(state->path_s) <= tolerance) {
+            reason = "vehicle returned to source B and is retained as a static obstacle";
             return false;
         }
         build = candidate.preserved_build;
@@ -902,14 +904,16 @@ private:
                 obstacle.rear_axle_pose.yaw};
         }
         for (const BacktrackCandidate& held : locked_.backtrack_plan.candidates) {
-            if (!held.hold_at_source_b || held.vehicle_id == candidate.vehicle_id ||
+            const auto* held_state = findVehicle(snapshot, held.vehicle_id);
+            if (!held.hold_at_source_b || held_state == nullptr ||
+                std::abs(held_state->path_s) > tolerance ||
+                held.vehicle_id == candidate.vehicle_id ||
                 std::any_of(build.input.static_vehicles.begin(),
                             build.input.static_vehicles.end(),
                             [&](const StaticVehicleObstacle& obstacle) {
                                 return obstacle.id == held.vehicle_id;
                             })) continue;
-            const auto* held_state = findVehicle(snapshot, held.vehicle_id);
-            if (held_state == nullptr || !held_state->pose_valid) continue;
+            if (!held_state->pose_valid) continue;
             StaticVehicleObstacle obstacle;
             obstacle.id = held.vehicle_id;
             obstacle.rear_axle_pose = {held_state->pose.x, held_state->pose.y,
@@ -949,13 +953,34 @@ private:
         locked_.build = OptimizationInputBuildResult{};
         locked_.geometry_vehicles.clear();
         std::vector<OptimizationInputBuildResult> reusable_builds;
-        for (const BacktrackCandidate& backtracked : locked_.backtrack_plan.candidates) {
+        for (const OptimizationInputBuildResult& preserved : locked_.preserved_builds) {
+            if (!preserved.complete || preserved.input.vehicles.size() != 1) continue;
+            const NlpVehicleInput& preserved_vehicle = preserved.input.vehicles.front();
+            BacktrackCandidate current;
+            current.vehicle_id = preserved_vehicle.id;
+            current.path_gen = preserved_vehicle.path_gen;
+            current.preserved_build = preserved;
+            const auto requested = std::find_if(
+                locked_.backtrack_plan.candidates.begin(),
+                locked_.backtrack_plan.candidates.end(),
+                [&](const BacktrackCandidate& value) {
+                    return value.vehicle_id == current.vehicle_id &&
+                           value.path_gen == current.path_gen;
+                });
+            if (requested != locked_.backtrack_plan.candidates.end()) {
+                current.target_s = requested->target_s;
+                current.hold_at_source_b = requested->hold_at_source_b;
+            }
             OptimizationInputBuildResult build;
             std::string reason;
-            if (!preparePreservedBacktrackBuild(backtracked, snapshot, build, reason)) {
-                if (!backtracked.hold_at_source_b) {
+            if (!preparePreservedBacktrackBuild(current, snapshot, build, reason)) {
+                const auto* state = findVehicle(snapshot, current.vehicle_id);
+                const bool returned_to_b = current.hold_at_source_b && state != nullptr &&
+                    std::abs(state->path_s) <=
+                        std::max(0.005, backtrack_config_.path_validation_step);
+                if (!returned_to_b) {
                     ROS_WARN("[nlp_recovery][backtrack] V%d cannot reuse corridor: %s",
-                             backtracked.vehicle_id, reason.c_str());
+                             current.vehicle_id, reason.c_str());
                 }
                 continue;
             }
