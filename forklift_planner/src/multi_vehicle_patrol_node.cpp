@@ -3195,6 +3195,11 @@ private:
             }
             return;
         }
+        const auto& finishing_recovery = rule_engine_->recoveryDirective();
+        const std::vector<int> recovery_vehicle_ids =
+            finishing_recovery.frozen_vehicle_ids.empty() ?
+                finishing_recovery.nlp_vehicle_ids :
+                finishing_recovery.frozen_vehicle_ids;
         if (!rule_engine_->completeNlpRecovery(nlp_execution_.recovery_id)) {
             nlp_execution_active_ = false;
             ROS_ERROR("[NLP_FINISH] wait graph is acyclic but transaction completion was rejected");
@@ -3218,6 +3223,29 @@ private:
                     "[NLP_FINISH] normal coordination plan unavailable");
                 return;
             }
+        }
+        const double pose_tolerance = std::max(0.005, cfg_.path_validation_step);
+        for (const int id : recovery_vehicle_ids) {
+            VehicleAgent* vehicle = agentById(id);
+            if (vehicle == nullptr || !vehicle->real_pose_valid) continue;
+            if (vehicle->track.empty()) {
+                ROS_ERROR("[NLP_FINISH] V%d retains recovery pose because its path is unavailable",
+                          id);
+                continue;
+            }
+            const RoughWp path_pose = vehicle->track.poseAtS(
+                std::clamp(vehicle->path_s, 0.0, vehicle->track.length()));
+            const double position_error = std::hypot(
+                path_pose.x - vehicle->real_x, path_pose.y - vehicle->real_y);
+            const double heading_error = std::abs(
+                normalizeAngle(path_pose.theta - vehicle->real_yaw));
+            if (position_error > pose_tolerance || heading_error > pose_tolerance) {
+                ROS_ERROR("[NLP_FINISH] V%d retains recovery pose: path pose discontinuity "
+                          "position=%.6f heading=%.6f path_s=%.6f",
+                          id, position_error, heading_error, vehicle->path_s);
+                continue;
+            }
+            vehicle->real_pose_valid = false;
         }
         nlp_recovery_frozen_ = false;
         ROS_WARN("[NLP_FINISH] recovery_id=%llu rejoined and normal coordination resumed",
