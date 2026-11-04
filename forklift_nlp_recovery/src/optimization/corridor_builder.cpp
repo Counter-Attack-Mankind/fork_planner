@@ -344,35 +344,44 @@ CorridorResult CorridorBuilder::build(const Pose2d& start, const std::vector<Pat
     double terminal_s = -1.0;
     if (!start_on_path) {
         const double path_end_s = path.back().s;
-        if (inside(path_end_s)) {
-            terminal_s = path_end_s;
-        } else {
-            double outside_s = path_end_s;
-            for (double s = std::max(current_s, path_end_s - step);
-                 s >= current_s - kEpsilon; s = std::max(current_s, s - step)) {
+        double inside_s = inside(current_s) ? current_s : -1.0;
+        if (inside_s < 0.0) {
+            for (double s = std::min(path_end_s, current_s + step);
+                 s <= path_end_s + kEpsilon; s = std::min(path_end_s, s + step)) {
                 if (inside(s)) {
-                    double inside_s = s;
-                    for (int iteration = 0; iteration < 24; ++iteration) {
-                        const double mid = 0.5 * (inside_s + outside_s);
-                        if (inside(mid)) inside_s = mid;
-                        else outside_s = mid;
-                    }
-                    terminal_s = inside_s;
+                    inside_s = s;
                     break;
                 }
-                outside_s = s;
-                if (s <= current_s + kEpsilon) break;
+                if (s >= path_end_s - kEpsilon) break;
             }
         }
-        if (terminal_s < current_s - kEpsilon) {
+        double outside_s = -1.0;
+        if (inside_s >= 0.0) {
+            for (double s = std::min(path_end_s, inside_s + step);
+                 s <= path_end_s + kEpsilon; s = std::min(path_end_s, s + step)) {
+                if (!inside(s)) {
+                    outside_s = s;
+                    break;
+                }
+                inside_s = s;
+                if (s >= path_end_s - kEpsilon) break;
+            }
+        }
+        if (outside_s < 0.0) {
             std::ostringstream reason;
             reason << "stage=terminal_search vehicle=" << vehicle
-                   << " no body-center intersection with safe_stc=" << aabbText(stc)
-                   << " in reverse search range=[" << current_s << ","
+                   << " no first body-center exit from safe_stc=" << aabbText(stc)
+                   << " in forward search range=[" << current_s << ","
                    << path_end_s << "]";
             result.reason = reason.str();
             return result;
         }
+        for (int iteration = 0; iteration < 24; ++iteration) {
+            const double mid = 0.5 * (inside_s + outside_s);
+            if (inside(mid)) inside_s = mid;
+            else outside_s = mid;
+        }
+        terminal_s = inside_s;
     } else {
         double inside_s = optimization_start_s;
         double outside_s = -1.0;

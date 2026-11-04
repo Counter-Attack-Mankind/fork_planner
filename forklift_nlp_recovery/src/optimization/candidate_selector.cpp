@@ -354,17 +354,14 @@ BridgeEscapeSelectionResult CandidateSelector::evaluateBridgeEscapes(
                 escape.reason = "frozen path or path progress is invalid";
             } else {
                 const uint8_t path_type = interpolatePath(path, candidate->path_s).type;
-                const int preferred_direction =
+                const int direction =
                     path_type == sandbox_msgs::RecoveryVehicleState::REVERSE ? -1 : 1;
-                const int directions[2] = {preferred_direction, -preferred_direction};
                 std::string first_failure;
-                for (const int direction : directions) {
-                    const double ux = direction * std::cos(escape.frozen_pose.yaw);
-                    const double uy = direction * std::sin(escape.frozen_pose.yaw);
-                    if (std::abs(uy) <= kEpsilon) {
-                        if (first_failure.empty()) first_failure = "fixed heading cannot reach a bridge y exit";
-                        continue;
-                    }
+                const double ux = direction * std::cos(escape.frozen_pose.yaw);
+                const double uy = direction * std::sin(escape.frozen_pose.yaw);
+                if (std::abs(uy) <= kEpsilon) {
+                    first_failure = "fixed heading cannot reach a bridge y exit";
+                } else {
                     const double longitudinal_min = -rear_clearance * std::sin(escape.frozen_pose.yaw);
                     const double longitudinal_max = front_extent * std::sin(escape.frozen_pose.yaw);
                     const double lateral_y = map_param_.vehicle_width * 0.5 *
@@ -378,25 +375,21 @@ BridgeEscapeSelectionResult CandidateSelector::evaluateBridgeEscapes(
                     const double required_distance =
                         (target_y - escape.frozen_pose.y) / uy;
                     if (required_distance < -kEpsilon) {
-                        if (first_failure.empty()) first_failure = "selected straight direction does not reach the bridge exit";
-                        continue;
-                    }
-                    const int sample_count = std::max(1, static_cast<int>(
-                        std::ceil(std::max(0.0, required_distance) / step)) + 2);
-                    std::vector<PathPoint> segment;
-                    bool direction_failed = false;
-                    for (int sample = 0; sample <= sample_count; ++sample) {
-                        const double distance = sample == sample_count ?
-                            std::max(0.0, required_distance) + step :
-                            std::min(std::max(0.0, required_distance) + step, sample * step);
-                        const Pose2d pose{escape.frozen_pose.x + ux * distance,
-                                          escape.frozen_pose.y + uy * distance,
-                                          escape.frozen_pose.yaw};
-                        std::string collision_reason;
-                        if (!poseSafe(pose, candidate_id, snapshot, map_param_, shelves_,
-                                      -1, nullptr, &collision_reason)) {
-                            direction_failed = true;
-                            if (first_failure.empty()) {
+                        first_failure = "selected straight direction does not reach the bridge exit";
+                    } else {
+                        const int sample_count = std::max(1, static_cast<int>(
+                            std::ceil(std::max(0.0, required_distance) / step)) + 2);
+                        std::vector<PathPoint> segment;
+                        for (int sample = 0; sample <= sample_count; ++sample) {
+                            const double distance = sample == sample_count ?
+                                std::max(0.0, required_distance) + step :
+                                std::min(std::max(0.0, required_distance) + step, sample * step);
+                            const Pose2d pose{escape.frozen_pose.x + ux * distance,
+                                              escape.frozen_pose.y + uy * distance,
+                                              escape.frozen_pose.yaw};
+                            std::string collision_reason;
+                            if (!poseSafe(pose, candidate_id, snapshot, map_param_, shelves_,
+                                          -1, nullptr, &collision_reason)) {
                                 escape.sweep_failure_valid = true;
                                 escape.sweep_failure_distance = distance;
                                 escape.sweep_failure_pose = pose;
@@ -408,27 +401,24 @@ BridgeEscapeSelectionResult CandidateSelector::evaluateBridgeEscapes(
                                        << pose.yaw << "): " << collision_reason
                                        << " at_S0=" << escape.sweep_failure_at_start;
                                 first_failure = reason.str();
+                                break;
                             }
-                            break;
+                            segment.push_back({pose, distance,
+                                direction > 0 ? sandbox_msgs::RecoveryVehicleState::FORWARD :
+                                                sandbox_msgs::RecoveryVehicleState::REVERSE});
+                            if (distance + kEpsilon >= required_distance &&
+                                !overlapsAabb(makeObb(pose, map_param_), bridge)) {
+                                escape.escape_valid = true;
+                                escape.escape_distance = distance;
+                                escape.motion_direction = direction;
+                                escape.escape_pose = pose;
+                                escape.escape_segment = std::move(segment);
+                                break;
+                            }
                         }
-                        segment.push_back({pose, distance,
-                            direction > 0 ? sandbox_msgs::RecoveryVehicleState::FORWARD :
-                                            sandbox_msgs::RecoveryVehicleState::REVERSE});
-                        if (distance + kEpsilon >= required_distance &&
-                            !overlapsAabb(makeObb(pose, map_param_), bridge)) {
-                            escape.escape_valid = true;
-                            escape.sweep_failure_valid = false;
-                            escape.sweep_failure_reason.clear();
-                            escape.escape_distance = distance;
-                            escape.motion_direction = direction;
-                            escape.escape_pose = pose;
-                            escape.escape_segment = std::move(segment);
-                            break;
+                        if (!escape.escape_valid && first_failure.empty()) {
+                            first_failure = "no complete fixed-heading bridge-exit pose found";
                         }
-                    }
-                    if (escape.escape_valid) break;
-                    if (!direction_failed && first_failure.empty()) {
-                        first_failure = "no complete fixed-heading bridge-exit pose found";
                     }
                 }
                 if (!escape.escape_valid) escape.reason = first_failure;
