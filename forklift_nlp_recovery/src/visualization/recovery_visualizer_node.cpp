@@ -11,6 +11,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <geometry_msgs/Point.h>
@@ -30,6 +31,7 @@
 #include "forklift_nlp_recovery/cooperative/cooperative_initial_guess.h"
 #include "forklift_nlp_recovery/cooperative/cooperative_nlp_solver.h"
 #include "forklift_nlp_recovery/candidate_selector.h"
+#include "forklift_nlp_recovery/case_manager.h"
 #include "forklift_nlp_recovery/hybrid_astar.h"
 #include "forklift_nlp_recovery/initial_guess.h"
 #include "forklift_nlp_recovery/nlp_solver.h"
@@ -121,6 +123,9 @@ public:
                                        "/tmp/forklift_nlp_recovery_input.yaml");
         private_nh_.param<std::string>("results_dir", results_directory_,
                                        "package://forklift_nlp_recovery/results");
+        private_nh_.param<std::string>("case_dir", case_directory_,
+                                       "package://forklift_nlp_recovery/case");
+        private_nh_.param("offline_case_number", offline_case_number_, 0);
         private_nh_.param("execute_after_solve", execute_after_solve_, false);
         int initial_guess_nodes = static_cast<int>(initial_guess_config_.node_count);
         private_nh_.param("initial_guess_nodes", initial_guess_nodes,
@@ -260,13 +265,16 @@ public:
                            std::to_string(experiment_seed);
         }
         const std::string package_prefix = "package://forklift_nlp_recovery";
-        if (results_directory_.compare(0, package_prefix.size(), package_prefix) == 0) {
-            const std::string package_path = ros::package::getPath("forklift_nlp_recovery");
-            if (!package_path.empty()) {
-                results_directory_ = package_path +
-                    results_directory_.substr(package_prefix.size());
+        const std::string package_path = ros::package::getPath("forklift_nlp_recovery");
+        const auto resolve_package_path = [&](std::string& path) {
+            if (!package_path.empty() &&
+                path.compare(0, package_prefix.size(), package_prefix) == 0) {
+                path = package_path + path.substr(package_prefix.size());
             }
-        }
+        };
+        resolve_package_path(case_directory_);
+        resolve_package_path(results_directory_);
+        case_manager_ = std::make_unique<CaseManager>(case_directory_, results_directory_);
         marker_pub_ = private_nh_.advertise<visualization_msgs::MarkerArray>(
             "/forklift_nlp_recovery/markers", 1, true);
         trajectory_pub_ = private_nh_.advertise<sandbox_msgs::NlpRecoveryTrajectory>(
@@ -284,7 +292,7 @@ public:
                  "disc_radius=%.4f boundary_clearance=%.4f "
                  "shelf_inflation=%.4f topic=%s output=%s "
                  "initial_grid=(N=%zu,margin=%.2f) "
-                 "solver_time_scale=[%.2f,%.2f] validation_substeps=%zu results=%s",
+                 "solver_time_scale=[%.2f,%.2f] validation_substeps=%zu cases=%s results=%s",
                  mode_name_.c_str(), execute_after_solve_, selected_ids.str().c_str(),
                  builder_->vehicleRadius(),
                  builder_->boundaryClearance(), builder_->shelfInflation(),
@@ -292,6 +300,7 @@ public:
                  initial_guess_config_.node_count, initial_guess_config_.time_margin,
                  solver_config_.min_time_scale, solver_config_.max_time_scale,
                  solver_config_.validation_substeps,
+                 case_directory_.c_str(),
                  results_directory_.c_str());
     }
 
@@ -562,6 +571,84 @@ private:
         return found == snapshot.vehicles.end() ? nullptr : &*found;
     }
 
+    bool ensureOnlineCase(const sandbox_msgs::RecoverySnapshot& snapshot,
+                          const std::vector<int>& participant_ids) {
+        if (snapshot.recovery_id == 0 || participant_ids.empty()) return false;
+        const auto existing = online_case_numbers_.find(snapshot.recovery_id);
+        if (existing != online_case_numbers_.end()) return true;
+        if (offline_case_number_ > 0) {
+            online_case_numbers_.emplace(snapshot.recovery_id,
+                                         static_cast<unsigned int>(offline_case_number_));
+            return true;
+        }
+        for (int id : participant_ids) {
+            const auto* vehicle = findVehicle(snapshot, id);
+            if (vehicle == nullptr || !vehicle->pose_valid || !vehicle->pose_fresh ||
+                vehicle->path.size() < 2 ||
+                std::abs(vehicle->current_speed) > candidate_config_.stopped_speed_tolerance) {
+                return false;
+            }
+        }
+        const CaseDirectory saved = case_manager_->createCase(snapshot, participant_ids);
+        if (!saved.success) {
+            ROS_ERROR_THROTTLE(2.0, "[nlp_recovery][case] save failed: %s",
+                               saved.reason.c_str());
+            return false;
+        }
+        online_case_numbers_.emplace(snapshot.recovery_id, saved.number);
+        ROS_INFO("[nlp_recovery][case] recovery_id=%llu saved case/%u",
+                 static_cast<unsigned long long>(snapshot.recovery_id), saved.number);
+        return true;
+    }
+
+    CaseSaveResult createResultArtifacts(const OptimizationInputBuildResult& build,
+                                         const NlpInitialGuess& original,
+                                         const NlpInitialGuess& actual,
+                                         const std::string& stage,
+                                         const std::string& reason) {
+        CaseSaveResult saved;
+        if (locked_.case_number == 0) {
+            saved.reason = "online case number is unavailable";
+            return saved;
+        }
+        const ResultDirectory directory = case_manager_->createResult(locked_.case_number);
+        if (!directory.success) {
+            saved.reason = directory.reason;
+            return saved;
+        }
+        saved.case_id = std::to_string(directory.case_number) + "/" +
+                        std::to_string(directory.run_number);
+        saved.case_directory = directory.path;
+        saved.success = true;
+        saved.reason = "ok";
+        locked_.result_directory = directory;
+        locked_.result_saved = true;
+        std::string error;
+        case_manager_->writeRunStatus(directory, stage, false, false, reason, error);
+        if (!saveInitialGuessArtifacts(build, original, actual, directory.path,
+                                       saved.case_id, error)) {
+            ROS_ERROR("[nlp_recovery][case] result %s artifact save failed: %s",
+                      saved.case_id.c_str(), error.c_str());
+            saved.reason = error;
+        }
+        return saved;
+    }
+
+    void saveFailureResult(const OptimizationInputBuildResult& build,
+                           const std::string& stage, const std::string& reason) {
+        if (locked_.result_saved || locked_.case_number == 0) return;
+        const CaseSaveResult saved = createResultArtifacts(
+            build, NlpInitialGuess{}, NlpInitialGuess{}, stage, reason);
+        if (!saved.success) {
+            ROS_ERROR("[nlp_recovery][case] failure result save failed: %s",
+                      saved.reason.c_str());
+            return;
+        }
+        std::string error;
+        case_manager_->writeRunStatus(locked_.result_directory, stage, true, false,
+                                      reason, error);
+    }
+
     void clearLockedTransaction() {
         if (locked_.active) {
             ROS_INFO("[nlp_recovery][auto] clear locked NLP_PREP transaction");
@@ -671,13 +758,6 @@ private:
         trajectory_pub_.publish(message);
         locked_.submitted = true;
         locked_.solver_result.execution_published = true;
-        if (!locked_.case_directory.empty()) {
-            std::string error;
-            if (!saveNlpSolveResult(locked_.solver_result, locked_.case_directory, error)) {
-                ROS_ERROR("[nlp_recovery][auto] failed to update execution status: %s",
-                          error.c_str());
-            }
-        }
         ROS_WARN("[nlp_recovery][auto] submitted recovery_id=%llu vehicles=%zu",
                  static_cast<unsigned long long>(locked_.recovery_id),
                  message.vehicles.size());
@@ -759,21 +839,33 @@ private:
         if (!hybrid.success) {
             ROS_WARN("[nlp_recovery][candidate] V%d Hybrid A* failed: %s",
                      candidate.vehicle_id, hybrid.reason.c_str());
+            locked_.build = candidate.build;
+            locked_.result_saved = false;
+            saveFailureResult(locked_.build, "initial_guess", hybrid.reason);
+            locked_.build = OptimizationInputBuildResult{};
             return false;
         }
         vehicle.reference_path = hybrid.path;
         locked_.build = std::move(candidate.build);
-        CaseSaveResult saved;
-        const PreparedGuess prepared = prepareInitialGuess(locked_.build, true, &saved);
+        locked_.result_saved = false;
+        const PreparedGuess prepared = prepareInitialGuess(locked_.build, false);
         locked_.original_initial_guess = prepared.original;
         locked_.actual_initial_guess = prepared.actual;
+        const CaseSaveResult saved = createResultArtifacts(
+            locked_.build, prepared.original, prepared.actual, "initial_guess",
+            prepared.actual.reason);
         if (saved.success) locked_.case_directory = saved.case_directory;
         writeDebugInput(locked_.build);
         if (!locked_.actual_initial_guess.generated) {
             ROS_WARN("[nlp_recovery][candidate] V%d initial guess failed: %s",
                      candidate.vehicle_id,
                      locked_.actual_initial_guess.reason.c_str());
+            std::string error;
+            case_manager_->writeRunStatus(locked_.result_directory, "initial_guess", true,
+                                          false, locked_.actual_initial_guess.reason, error);
             locked_.build = OptimizationInputBuildResult{};
+            locked_.actual_initial_guess = NlpInitialGuess{};
+            locked_.original_initial_guess = NlpInitialGuess{};
             return false;
         }
         locked_.solver_result = solveAndSave(
@@ -809,6 +901,8 @@ private:
         if (!locked_.build.complete || !locked_.build.input.valid ||
             locked_.build.input.vehicles.size() != 3) {
             ROS_ERROR("[COOP_NLP] input infeasible: %s", locked_.build.reason.c_str());
+            locked_.result_saved = false;
+            saveFailureResult(locked_.build, "optimization_input", locked_.build.reason);
             return false;
         }
         for (const NlpVehicleInput& vehicle : locked_.build.input.vehicles) {
@@ -825,18 +919,23 @@ private:
         locked_.actual_initial_guess =
             cooperative_initial_guess_generator_->generate(locked_.build.input);
         locked_.original_initial_guess = locked_.actual_initial_guess;
+        locked_.result_saved = false;
+        const CaseSaveResult saved = createResultArtifacts(
+            locked_.build, locked_.original_initial_guess,
+            locked_.actual_initial_guess, "initial_guess",
+            locked_.actual_initial_guess.reason);
+        if (saved.success) locked_.case_directory = saved.case_directory;
         if (!locked_.actual_initial_guess.generated) {
             ROS_ERROR("[COOP_NLP] stationary initial guess failed: %s",
                       locked_.actual_initial_guess.reason.c_str());
+            std::string error;
+            case_manager_->writeRunStatus(locked_.result_directory, "initial_guess", true,
+                                          false, locked_.actual_initial_guess.reason, error);
             return false;
         }
         ROS_INFO("[COOP_NLP] stationary initial guess N=%zu T_init=%.3f",
                  locked_.actual_initial_guess.node_count,
                  locked_.actual_initial_guess.total_time);
-        const CaseSaveResult saved = saveInitialGuessCase(locked_.build,
-            locked_.original_initial_guess, locked_.actual_initial_guess,
-            results_directory_, case_prefix_ + "_coop");
-        if (saved.success) locked_.case_directory = saved.case_directory;
         locked_.solver_result = solveAndSave(locked_.build,
             locked_.actual_initial_guess, saved, true);
         const NlpSolveResult& result = locked_.solver_result;
@@ -1054,6 +1153,13 @@ private:
             ROS_INFO("[nlp_recovery][solver] saved optimized_trajectory.csv and "
                      "solver_report.yaml at %s", saved.case_directory.c_str());
         }
+        if (locked_.result_directory.success &&
+            locked_.result_directory.path == saved.case_directory) {
+            const bool success = result.solver_success && result.validation_passed &&
+                                 result.execution_publish_eligible;
+            case_manager_->writeRunStatus(locked_.result_directory, "solver", true,
+                                          success, result.reason, error);
+        }
         return result;
     }
 
@@ -1160,6 +1266,11 @@ private:
 
         const std::vector<int>& cycle_ids = snapshot.deadlock_cycle_ids.empty() ?
             snapshot.nlp_vehicle_ids : snapshot.deadlock_cycle_ids;
+        if (!ensureOnlineCase(snapshot, cycle_ids)) {
+            ROS_WARN_THROTTLE(1.0, "[nlp_recovery][case] waiting for complete frozen scene");
+            return;
+        }
+        const unsigned int case_number = online_case_numbers_.at(snapshot.recovery_id);
         if (locked_.active && locked_.bridge_escape_pending) {
             updateBridgeEscape(snapshot, cycle_ids);
         }
@@ -1168,6 +1279,7 @@ private:
             locked_.active = true;
             locked_.recovery_id = snapshot.recovery_id;
             locked_.frame_id = snapshot.header.frame_id;
+            locked_.case_number = case_number;
             std::ostringstream participants;
             for (size_t i = 0; i < cycle_ids.size(); ++i) {
                 if (i != 0) participants << ',';
@@ -1191,6 +1303,7 @@ private:
             locked_.active = true;
             locked_.recovery_id = snapshot.recovery_id;
             locked_.frame_id = snapshot.header.frame_id;
+            locked_.case_number = case_number;
             for (CandidateEvaluation candidate : selection.ranked) {
                 if (candidate.build.input.vehicles.size() == 1) {
                     locked_.geometry_vehicles.push_back(
@@ -1231,6 +1344,8 @@ private:
                     requestBridgeEscape(*selected_escape);
                 }
                 if (!locked_.bridge_escape_pending) {
+                    saveFailureResult(OptimizationInputBuildResult{},
+                                      "candidate_selection", bridge.reason);
                     ROS_ERROR("[nlp_recovery][auto] regular and bridge candidates exhausted: %s",
                               bridge.reason.c_str());
                 }
@@ -1373,6 +1488,9 @@ private:
         uint64_t recovery_id = 0;
         std::string frame_id;
         std::string case_directory;
+        unsigned int case_number = 0;
+        ResultDirectory result_directory;
+        bool result_saved = false;
         OptimizationInputBuildResult build;
         NlpInitialGuess original_initial_guess;
         NlpInitialGuess actual_initial_guess;
@@ -1413,6 +1531,8 @@ private:
     std::string snapshot_topic_;
     std::string debug_output_file_;
     std::string results_directory_;
+    std::string case_directory_;
+    std::unique_ptr<CaseManager> case_manager_;
     std::string case_prefix_;
     bool execute_after_solve_ = false;
     std::string last_debug_case_identity_;
@@ -1420,6 +1540,8 @@ private:
     NlpInitialGuess latest_debug_actual_guess_;
     NlpSolveResult latest_debug_solver_result_;
     std::set<std::string> attempted_recovery_targets_;
+    std::unordered_map<uint64_t, unsigned int> online_case_numbers_;
+    int offline_case_number_ = 0;
 };
 
 }  // namespace forklift_nlp_recovery

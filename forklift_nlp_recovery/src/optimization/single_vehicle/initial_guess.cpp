@@ -783,4 +783,39 @@ CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
     return result;
 }
 
+bool saveInitialGuessArtifacts(const OptimizationInputBuildResult& input,
+                               const NlpInitialGuess& original_guess,
+                               const NlpInitialGuess& actual_guess,
+                               const std::string& result_directory,
+                               const std::string& case_id,
+                               std::string& error) {
+    const std::filesystem::path directory(result_directory);
+    if (!std::filesystem::is_directory(directory)) {
+        error = "result directory does not exist";
+        return false;
+    }
+    if (!writeOptimizationInputDebugFile(
+            input, (directory / "optimization_input.yaml").string(), error)) {
+        return false;
+    }
+    std::ofstream yaml(directory / "optimization_input.yaml", std::ios::app);
+    yaml << std::boolalpha << std::fixed << std::setprecision(9)
+         << "initial_guess_grid: {node_count: " << actual_guess.node_count
+         << ", total_time: " << actual_guess.total_time
+         << ", average_dt: " << actual_guess.average_dt << "}\n";
+    if (!yaml) {
+        error = "failed while appending initial guess timing";
+        return false;
+    }
+    const std::string generated_at = isoTimestamp();
+    if (!original_guess.vehicles.empty() &&
+        !writeInitialGuessCsv(original_guess, directory / "original_initial_guess.csv",
+                              case_id, generated_at, error)) return false;
+    if (!actual_guess.vehicles.empty() &&
+        !writeInitialGuessCsv(actual_guess, directory / "initial_guess.csv",
+                              case_id, generated_at, error)) return false;
+    error = "ok";
+    return true;
+}
+
 }  // namespace forklift_nlp_recovery

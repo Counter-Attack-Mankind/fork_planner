@@ -1,0 +1,47 @@
+<launch>
+  <arg name="case" default="1"/>
+  <arg name="mode" default="solve"/>
+  <arg name="run" default="1"/>
+  <arg name="playback_rate" default="1.0"/>
+  <arg name="start_rviz" default="true"/>
+  <arg name="case_root" default="$(find forklift_nlp_recovery)/case"/>
+  <arg name="results_root" default="$(find forklift_nlp_recovery)/results"/>
+
+  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
+  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml"/>
+
+  <group if="$(eval arg('mode') == 'solve')">
+    <rosparam command="load" file="$(find forklift_nlp_recovery)/config/recovery.yaml"
+              ns="/forklift_nlp_recovery"/>
+    <node pkg="forklift_nlp_recovery" type="recovery_visualizer_node"
+          name="forklift_nlp_recovery" output="screen" required="true">
+      <param name="mode" value="auto"/>
+      <param name="execute_after_solve" value="false"/>
+      <param name="snapshot_topic" value="/forklift_nlp_recovery/offline_snapshot"/>
+      <param name="case_dir" value="$(arg case_root)"/>
+      <param name="results_dir" value="$(arg results_root)"/>
+      <param name="offline_case_number" value="$(arg case)"/>
+    </node>
+    <node pkg="forklift_nlp_recovery" type="nlp_offline_case_node"
+          name="nlp_offline_case" output="screen" required="true">
+      <param name="case_dir" value="$(arg case_root)/$(arg case)"/>
+      <param name="result_case_dir" value="$(arg results_root)/$(arg case)"/>
+      <param name="playback_rate" value="$(arg playback_rate)"/>
+    </node>
+  </group>
+
+  <group if="$(eval arg('mode') == 'replay')">
+    <node pkg="forklift_nlp_recovery" type="nlp_trajectory_replay_node"
+          name="nlp_trajectory_replay" output="screen" required="true">
+      <rosparam command="load" file="$(find forklift_nlp_recovery)/config/recovery.yaml"/>
+      <param name="case_dir" value="$(arg results_root)/$(arg case)/$(arg run)"/>
+      <param name="playback_rate" value="$(arg playback_rate)"/>
+    </node>
+  </group>
+
+  <node if="$(arg start_rviz)" pkg="rviz" type="rviz" name="nlp_offline_rviz"
+        args="-d $(find forklift_nlp_recovery)/rviz/nlp_offline.rviz" required="false">
+    <env name="LIBGL_ALWAYS_SOFTWARE" value="1"/>
+    <env name="QT_X11_NO_MITSHM" value="1"/>
+  </node>
+</launch>

@@ -45,6 +45,35 @@ std::filesystem::path writeCase(bool inconsistent_time = false) {
     return directory;
 }
 
+std::filesystem::path writeFullStcCase() {
+    const auto directory = std::filesystem::temp_directory_path() /
+        "forklift_replay_full_stc_test";
+    std::filesystem::create_directories(directory);
+    std::ofstream input(directory / "optimization_input.yaml");
+    input << "frame_id: map\nparticipant_ids: [2, 5, 9]\nvehicles:\n";
+    for (int id : {2, 5, 9}) {
+        input << "  - id: " << id << "\n"
+              << "    parameters: {length: 0.2, width: 0.1, rear_axle_to_center: 0.05, disc_radius: 0.12, wheel_base: 0.5}\n"
+              << "    aabbs: [{min_x: -1, max_x: 3, min_y: -1, max_y: 4}]\n";
+    }
+    input << "static_vehicles: []\n";
+    input.close();
+    std::ofstream csv(directory / "optimized_trajectory.csv");
+    csv << "vehicle_id,node_index,time,rear_x,rear_y,heading,signed_speed,front_steer,acceleration,steer_rate,aabb_index\n";
+    for (int i = 0; i < 3; ++i) {
+        const int id = i == 0 ? 2 : (i == 1 ? 5 : 9);
+        csv << id << ",0,0,0," << i << ",0,0,0,0,0,-1\n"
+            << id << ",1,1,1," << i << ",0,0,0,0,0,-1\n";
+    }
+    csv.close();
+    std::ofstream report(directory / "solver_report.yaml");
+    report << "solver_success: false\nvalidation_passed: false\nreturn_status: Maximum_Iterations_Exceeded\nnode_count: 2\ntotal_time: 1.0\n"
+           << "validation:\n  reason: failed\n  minimum_participant_obb_separation_margin: 0.8\n"
+           << "  minimum_static_obb_separation_margin: 0\n  participant_obb_collision_samples: 0\n"
+           << "  static_obb_collision_samples: 0\n  aabb_violation_samples: 0\n";
+    return directory;
+}
+
 TEST(ReplayDataTest, LoadsNonContiguousVehicleIdsAndCommonGrid) {
     const auto directory = writeCase();
     ReplayCase replay_case;
@@ -67,6 +96,20 @@ TEST(ReplayDataTest, RejectsDifferentParticipantTimeAxes) {
     std::string error;
     EXPECT_FALSE(loadReplayCase(directory.string(), replay_case, error));
     EXPECT_NE(error.find("time axes differ"), std::string::npos);
+    std::filesystem::remove_all(directory);
+}
+
+TEST(ReplayDataTest, LoadsThreeVehicleFullStcWithNegativeAabbIndex) {
+    const auto directory = writeFullStcCase();
+    ReplayCase replay_case;
+    std::string error;
+    ASSERT_TRUE(loadReplayCase(directory.string(), replay_case, error)) << error;
+    ASSERT_EQ(replay_case.vehicles.size(), 3U);
+    for (const ReplayVehicle& vehicle : replay_case.vehicles) {
+        EXPECT_EQ(vehicle.corridor.size(), 1U);
+        EXPECT_EQ(vehicle.nodes.front().aabb_index, -1);
+    }
+    EXPECT_FALSE(replay_case.report.solver_success);
     std::filesystem::remove_all(directory);
 }
 

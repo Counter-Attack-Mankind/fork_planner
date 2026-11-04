@@ -266,12 +266,20 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
             auto found = nodes.find(vehicle.id);
             if (found == nodes.end() || found->second.size() < 2) throw std::runtime_error("trajectory missing or too short for vehicle " + std::to_string(vehicle.id));
             vehicle.nodes = std::move(found->second);
-            if (vehicle.corridor.size() != vehicle.nodes.size())
-                throw std::runtime_error("AABB and node counts differ for vehicle " + std::to_string(vehicle.id));
+            const bool node_aabbs = vehicle.corridor.size() == vehicle.nodes.size();
+            const bool full_stc = vehicle.corridor.size() == 1;
+            if (!node_aabbs && !full_stc) {
+                throw std::runtime_error("corridor must contain one full STC or one AABB per node for vehicle " + std::to_string(vehicle.id));
+            }
             for (std::size_t i = 0; i < vehicle.nodes.size(); ++i) {
                 const ReplayNode& node = vehicle.nodes[i];
                 if (node.node_index != static_cast<int>(i)) throw std::runtime_error("non-contiguous node_index for vehicle " + std::to_string(vehicle.id));
-                if (node.aabb_index != static_cast<int>(i)) throw std::runtime_error("aabb_index does not equal node_index for vehicle " + std::to_string(vehicle.id));
+                if (node_aabbs && node.aabb_index != static_cast<int>(i)) {
+                    throw std::runtime_error("node AABB index mismatch for vehicle " + std::to_string(vehicle.id));
+                }
+                if (full_stc && node.aabb_index != -1) {
+                    throw std::runtime_error("full-STC trajectory requires aabb_index=-1 for vehicle " + std::to_string(vehicle.id));
+                }
                 if (i > 0 && node.time <= vehicle.nodes[i - 1].time) throw std::runtime_error("non-increasing time for vehicle " + std::to_string(vehicle.id));
             }
         }
@@ -397,8 +405,10 @@ std::vector<ReplayViolation> checkReplayInstant(const ReplayCase& replay_case, d
         const auto node = std::find_if(vehicle.nodes.begin(), vehicle.nodes.end(),
             [&](const ReplayNode& value) { return std::abs(value.time - time) <= kTimeTolerance; });
         if (node != vehicle.nodes.end()) {
+            const std::size_t box_index = vehicle.corridor.size() == 1 ? 0 :
+                static_cast<std::size_t>(node->node_index);
             const double outside = replayAabbViolation(centers[i],
-                vehicle.corridor[static_cast<size_t>(node->node_index)]);
+                vehicle.corridor[box_index]);
             if (outside > tolerance) result.push_back({ReplayViolationType::AABB, time, vehicle.id, -1,
                                                        false, outside, 0.0, outside,
                                                        centers[i], centers[i]});

@@ -138,4 +138,11 @@ CaseSaveResult saveInitialGuessCase(const OptimizationInputBuildResult& input,
                                     const std::string& results_directory,
                                     const std::string& case_prefix = "");
 
+bool saveInitialGuessArtifacts(const OptimizationInputBuildResult& input,
+                               const NlpInitialGuess& original_guess,
+                               const NlpInitialGuess& actual_guess,
+                               const std::string& result_directory,
+                               const std::string& case_id,
+                               std::string& error);
+
 }  // namespace forklift_nlp_recovery

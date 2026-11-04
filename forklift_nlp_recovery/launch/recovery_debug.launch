@@ -1,33 +1,26 @@
-
 <launch>
-  <arg name="start_planner" default="true"/>
-  <arg name="real_mode" default="false"/>
-  <arg name="start_rviz" default="true"/>
+  <!-- Complete A1 simulation + NLP recovery debugging in one command. -->
+  <arg name="start_planner_rviz" default="true"/>
+  <arg name="start_recovery_rviz" default="true"/>
+  <arg name="one_shot" default="false"/>
 
-  <!-- 地图与规划器参数 -->
-  <param name="/use_sim_time" value="false"/>
-  <rosparam command="load" file="$(find forklift_map)/config/map_param.yaml"/>
-  <rosparam command="load" file="$(find forklift_planner)/config/planner_param.yaml"/>
-  <rosparam command="load" file="$(find forklift_nlp_recovery)/config/recovery.yaml"
+  <!-- Reuse the map, planner, parameters and primary RViz from the normal simulation. -->
+  <include file="$(find forklift_planner)/launch/multi_vehicle_a1_rviz.launch">
+    <arg name="one_shot" value="$(arg one_shot)"/>
+    <arg name="start_rviz" value="$(arg start_planner_rviz)"/>
+  </include>
+
+  <!-- Only the recovery-specific parameters and node are added here. -->
+  <rosparam command="load"
+            file="$(find forklift_nlp_recovery)/config/recovery.yaml"
             ns="/forklift_nlp_recovery"/>
 
-  <param name="/forklift_planner/multi_vehicle/real_mode" value="$(arg real_mode)"/>
-
-  <!-- 多车规划器 -->
-  <node if="$(arg start_planner)"
-        pkg="forklift_planner"
-        type="multi_vehicle_patrol_node"
-        name="multi_vehicle_patrol_node"
-        output="screen"/>
-
-  <!-- NLP 恢复节点 -->
   <node pkg="forklift_nlp_recovery"
         type="recovery_visualizer_node"
         name="forklift_nlp_recovery"
         output="screen"/>
 
-  <!-- RViz -->
-  <node if="$(arg start_rviz)"
+  <node if="$(arg start_recovery_rviz)"
         pkg="rviz"
         type="rviz"
         name="recovery_debug_rviz"

@@ -20,7 +20,7 @@ find_package(yaml-cpp REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_model forklift_nlp_recovery_input forklift_nlp_recovery_selection forklift_nlp_recovery_initial_guess forklift_nlp_recovery_validator forklift_nlp_recovery_constraint_diagnostics forklift_nlp_recovery_solver forklift_nlp_recovery_cooperative forklift_nlp_recovery_replay
+  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_model forklift_nlp_recovery_input forklift_nlp_recovery_selection forklift_nlp_recovery_initial_guess forklift_nlp_recovery_validator forklift_nlp_recovery_constraint_diagnostics forklift_nlp_recovery_solver forklift_nlp_recovery_cooperative forklift_nlp_recovery_replay forklift_nlp_recovery_case
   CATKIN_DEPENDS roscpp roslib geometry_msgs std_msgs std_srvs visualization_msgs forklift_map forklift_planner sandbox_msgs
 )
 
@@ -110,11 +110,24 @@ add_library(forklift_nlp_recovery_replay src/visualization/replay_data.cpp)
 add_dependencies(forklift_nlp_recovery_replay ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_replay yaml-cpp ${catkin_LIBRARIES})
 
+add_library(forklift_nlp_recovery_case src/visualization/case_manager.cpp)
+add_dependencies(forklift_nlp_recovery_case ${catkin_EXPORTED_TARGETS})
+target_link_libraries(forklift_nlp_recovery_case yaml-cpp ${catkin_LIBRARIES})
+
 add_executable(nlp_trajectory_replay_node src/visualization/nlp_trajectory_replay_node.cpp)
 add_dependencies(nlp_trajectory_replay_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(nlp_trajectory_replay_node
   forklift_nlp_recovery_replay
   forklift_map_lib
+  ${catkin_LIBRARIES}
+)
+
+add_executable(nlp_offline_case_node src/visualization/nlp_offline_case_node.cpp)
+add_dependencies(nlp_offline_case_node ${catkin_EXPORTED_TARGETS})
+target_link_libraries(nlp_offline_case_node
+  forklift_nlp_recovery_case
+  forklift_nlp_recovery_replay
+  yaml-cpp
   ${catkin_LIBRARIES}
 )
 
@@ -130,6 +143,7 @@ target_link_libraries(recovery_visualizer_node
   forklift_nlp_recovery_initial_guess
   forklift_nlp_recovery_input
   forklift_nlp_recovery_geometry
+  forklift_nlp_recovery_case
   forklift_map_lib
   ${catkin_LIBRARIES}
 )
@@ -249,6 +263,12 @@ if(CATKIN_ENABLE_TESTING)
     add_dependencies(replay_data_test ${catkin_EXPORTED_TARGETS})
     target_link_libraries(replay_data_test forklift_nlp_recovery_replay yaml-cpp ${catkin_LIBRARIES})
   endif()
+
+  catkin_add_gtest(case_manager_test test/case_manager_test.cpp)
+  if(TARGET case_manager_test)
+    add_dependencies(case_manager_test ${catkin_EXPORTED_TARGETS})
+    target_link_libraries(case_manager_test forklift_nlp_recovery_case yaml-cpp ${catkin_LIBRARIES})
+  endif()
 endif()
 
 install(TARGETS forklift_nlp_recovery_geometry forklift_nlp_recovery_input
@@ -260,8 +280,10 @@ install(TARGETS forklift_nlp_recovery_geometry forklift_nlp_recovery_input
                 forklift_nlp_recovery_solver
                 forklift_nlp_recovery_cooperative
                 forklift_nlp_recovery_replay
+                forklift_nlp_recovery_case
                 recovery_visualizer_node
                 nlp_trajectory_replay_node
+                nlp_offline_case_node
                 coordinate_mapping_visualizer_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
@@ -272,6 +294,10 @@ install(DIRECTORY include/${PROJECT_NAME}/
 )
 install(DIRECTORY config launch rviz
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+install(DIRECTORY case/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/case
+  PATTERN ".git*" EXCLUDE
 )
 install(DIRECTORY results/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/results
