@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <sandbox_msgs/RecoverySnapshot.h>
+#include <geometry_msgs/Pose2D.h>
 
 namespace forklift_nlp_recovery {
 
@@ -33,6 +34,11 @@ public:
     bool writeRunStatus(const ResultDirectory& directory, const std::string& stage,
                         bool complete, bool success, const std::string& reason,
                         std::string& error) const;
+    bool writeVirtualBridgeEscape(const ResultDirectory& directory, int vehicle_id,
+                                  int path_gen, const geometry_msgs::Pose2D& frozen_pose,
+                                  const geometry_msgs::Pose2D& target_pose,
+                                  double distance, int direction,
+                                  std::string& error) const;
 
     const std::string& caseRoot() const { return case_root_; }
     const std::string& resultsRoot() const { return results_root_; }

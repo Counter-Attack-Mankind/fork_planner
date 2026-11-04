@@ -1,0 +1,8 @@
+schema_version: 1
+mode: offline_virtual_bridge_escape
+vehicle_id: 0
+path_gen: 41
+distance: 0.14
+direction: 1
+frozen_pose: {x: 1.25, y: 2.387241307777221, yaw: 1.570796326794897}
+target_pose: {x: 1.25, y: 2.527241307777221, yaw: 1.570796326794897}

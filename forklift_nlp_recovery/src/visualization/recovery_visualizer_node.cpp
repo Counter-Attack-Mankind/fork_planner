@@ -631,6 +631,16 @@ private:
                       saved.case_id.c_str(), error.c_str());
             saved.reason = error;
         }
+        if (locked_.virtual_bridge_escape) {
+            if (!case_manager_->writeVirtualBridgeEscape(
+                    directory, locked_.bridge_vehicle_id, locked_.bridge_path_gen,
+                    locked_.bridge_frozen_pose, locked_.bridge_target_pose,
+                    locked_.bridge_escape_distance, locked_.bridge_motion_direction,
+                    error)) {
+                ROS_ERROR("[NLP_OFFLINE] virtual Bridge Escape metadata save failed: %s",
+                          error.c_str());
+            }
+        }
         return saved;
     }
 
@@ -782,11 +792,24 @@ private:
                    << escape.frozen_pose.y << "," << escape.frozen_pose.yaw << ")";
         addArrow(markers, "bridge_escape_s0_arrow", id_offset,
                  escape.frozen_pose, color(1.0f, 0.55f, 0.0f, 1.0f));
+        addBody(markers, "bridge_escape_s0_body", id_offset,
+                escape.frozen_pose, color(1.0f, 0.55f, 0.0f, 0.35f));
         addText(markers, "bridge_escape_s0_text", id_offset,
                 escape.frozen_pose.x, escape.frozen_pose.y, 0.32,
                 start_text.str(), color(1.0f, 0.55f, 0.0f, 1.0f), 0.055);
 
         if (escape.escape_valid) {
+            addBody(markers, "bridge_escape_virtual_target_body", id_offset,
+                    escape.escape_pose, color(0.0f, 0.80f, 1.0f, 0.42f));
+            addArrow(markers, "bridge_escape_virtual_target_arrow", id_offset,
+                     escape.escape_pose, color(0.0f, 0.80f, 1.0f, 1.0f));
+            std::ostringstream target_text;
+            target_text << std::fixed << std::setprecision(3) << "V"
+                        << escape.vehicle_id << " virtual escape d="
+                        << escape.escape_distance;
+            addText(markers, "bridge_escape_virtual_target_text", id_offset,
+                    escape.escape_pose.x, escape.escape_pose.y, 0.34,
+                    target_text.str(), color(0.0f, 0.80f, 1.0f, 1.0f), 0.055);
             auto segment = baseMarker("bridge_escape_segment", id_offset,
                                       visualization_msgs::Marker::LINE_STRIP);
             segment.scale.x = 0.025;
@@ -976,6 +999,83 @@ private:
         locked_.bridge_path_gen = escape.path_gen;
         ROS_WARN("[nlp_recovery][bridge_escape] requested V%d d=%.3f dir=%d",
                  escape.vehicle_id, escape.escape_distance, escape.motion_direction);
+    }
+
+    bool trySolveOfflineBridgeEscape(
+        const sandbox_msgs::RecoverySnapshot& snapshot,
+        const std::vector<int>& cycle_ids,
+        const BridgeEscapeEvaluation& escape) {
+        if (offline_case_number_ <= 0 || execute_after_solve_) {
+            ROS_ERROR("[NLP_OFFLINE] virtual Bridge Escape requires offline mode with execution disabled");
+            return false;
+        }
+        if (!escape.escape_valid || !escape.eligible || escape.escape_distance <= 0.0 ||
+            (escape.motion_direction != 1 && escape.motion_direction != -1)) {
+            ROS_ERROR("[NLP_OFFLINE] V%d virtual Bridge Escape is not a validated escape",
+                      escape.vehicle_id);
+            return false;
+        }
+        sandbox_msgs::RecoverySnapshot virtual_snapshot = snapshot;
+        auto vehicle = std::find_if(
+            virtual_snapshot.vehicles.begin(), virtual_snapshot.vehicles.end(),
+            [&](const auto& state) { return state.id == escape.vehicle_id; });
+        if (vehicle == virtual_snapshot.vehicles.end() || !vehicle->pose_valid ||
+            !vehicle->pose_fresh || vehicle->path_gen != escape.path_gen ||
+            std::abs(vehicle->current_speed) > candidate_config_.stopped_speed_tolerance ||
+            vehicle->path.size() < 2 ||
+            vehicle->path.size() != vehicle->path_types.size()) {
+            ROS_ERROR("[NLP_OFFLINE] V%d cannot construct reliable post-escape state: "
+                      "frozen identity, stop state, or path is invalid", escape.vehicle_id);
+            return false;
+        }
+
+        vehicle->pose.x = escape.escape_pose.x;
+        vehicle->pose.y = escape.escape_pose.y;
+        vehicle->pose.theta = escape.escape_pose.yaw;
+        vehicle->pose_stamp = ros::Time::now();
+        vehicle->pose_valid = true;
+        vehicle->pose_fresh = true;
+        vehicle->current_speed = 0.0;
+        vehicle->blocker_reason = "bridge_escape_arrived";
+        virtual_snapshot.header.stamp = vehicle->pose_stamp;
+        virtual_snapshot.bridge_escape_status =
+            sandbox_msgs::RecoverySnapshot::BRIDGE_ESCAPE_SUCCEEDED;
+        virtual_snapshot.bridge_escape_vehicle_id = escape.vehicle_id;
+        virtual_snapshot.bridge_escape_path_gen = escape.path_gen;
+        virtual_snapshot.bridge_escape_target_pose = vehicle->pose;
+        virtual_snapshot.bridge_escape_reason = "offline virtual arrival and stop";
+
+        const CandidateSelectionResult selection = candidate_selector_->evaluate(
+            virtual_snapshot, cycle_ids, escape.vehicle_id);
+        const auto candidate = std::find_if(
+            selection.ranked.begin(), selection.ranked.end(),
+            [&](const CandidateEvaluation& value) {
+                return value.vehicle_id == escape.vehicle_id;
+            });
+        if (!selection.complete_snapshot || candidate == selection.ranked.end() ||
+            !candidate->eligible || candidate->build.input.vehicles.size() != 1) {
+            const std::string reason = candidate == selection.ranked.end() ?
+                selection.reason : candidate->reason;
+            ROS_ERROR("[NLP_OFFLINE] V%d post-escape candidate rejected: %s",
+                      escape.vehicle_id, reason.c_str());
+            return false;
+        }
+
+        locked_.virtual_bridge_escape = true;
+        locked_.bridge_vehicle_id = escape.vehicle_id;
+        locked_.bridge_path_gen = escape.path_gen;
+        locked_.bridge_frozen_pose.x = escape.frozen_pose.x;
+        locked_.bridge_frozen_pose.y = escape.frozen_pose.y;
+        locked_.bridge_frozen_pose.theta = escape.frozen_pose.yaw;
+        locked_.bridge_target_pose = vehicle->pose;
+        locked_.bridge_escape_distance = escape.escape_distance;
+        locked_.bridge_motion_direction = escape.motion_direction;
+        locked_.geometry_vehicles.clear();
+        locked_.geometry_vehicles.push_back(candidate->build.input.vehicles.front());
+        ROS_WARN("[NLP_OFFLINE] V%d virtual Bridge Escape validated: d=%.3f dir=%d; "
+                 "post-escape candidate accepted, entering initial guess and IPOPT",
+                 escape.vehicle_id, escape.escape_distance, escape.motion_direction);
+        return trySolveCandidate(*candidate);
     }
 
     void updateBridgeEscape(const sandbox_msgs::RecoverySnapshot& snapshot,
@@ -1322,6 +1422,7 @@ private:
                 const BridgeEscapeSelectionResult bridge =
                     candidate_selector_->evaluateBridgeEscapes(snapshot, cycle_ids);
                 const BridgeEscapeEvaluation* selected_escape = nullptr;
+                bool bridge_solved = false;
                 for (const BridgeEscapeEvaluation& escape : bridge.ranked) {
                     if (escape.intersects_bridge) {
                         locked_.bridge_evaluations.push_back(escape);
@@ -1338,12 +1439,19 @@ private:
                     locked_.attempts.push_back(attempt.str());
                     ROS_INFO("[nlp_recovery][candidate] %s", attempt.str().c_str());
                     if (selected_escape == nullptr && escape.eligible &&
-                        execute_after_solve_) selected_escape = &escape;
+                        (execute_after_solve_ || offline_case_number_ > 0)) {
+                        selected_escape = &escape;
+                    }
                 }
                 if (selected_escape != nullptr) {
-                    requestBridgeEscape(*selected_escape);
+                    if (offline_case_number_ > 0) {
+                        bridge_solved = trySolveOfflineBridgeEscape(
+                            snapshot, cycle_ids, *selected_escape);
+                    } else if (execute_after_solve_) {
+                        requestBridgeEscape(*selected_escape);
+                    }
                 }
-                if (!locked_.bridge_escape_pending) {
+                if (!locked_.bridge_escape_pending && !bridge_solved) {
                     saveFailureResult(OptimizationInputBuildResult{},
                                       "candidate_selection", bridge.reason);
                     ROS_ERROR("[nlp_recovery][auto] regular and bridge candidates exhausted: %s",
@@ -1501,6 +1609,11 @@ private:
         bool bridge_escape_pending = false;
         int bridge_vehicle_id = -1;
         int bridge_path_gen = -1;
+        bool virtual_bridge_escape = false;
+        geometry_msgs::Pose2D bridge_frozen_pose;
+        geometry_msgs::Pose2D bridge_target_pose;
+        double bridge_escape_distance = 0.0;
+        int bridge_motion_direction = 0;
     };
 
     ros::NodeHandle private_nh_;

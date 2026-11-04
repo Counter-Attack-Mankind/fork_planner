@@ -185,6 +185,41 @@ bool CaseManager::writeRunStatus(const ResultDirectory& directory,
     return true;
 }
 
+bool CaseManager::writeVirtualBridgeEscape(
+    const ResultDirectory& directory, int vehicle_id, int path_gen,
+    const geometry_msgs::Pose2D& frozen_pose,
+    const geometry_msgs::Pose2D& target_pose, double distance, int direction,
+    std::string& error) const {
+    if (!directory.success || directory.path.empty()) {
+        error = "valid result directory is required";
+        return false;
+    }
+    const std::filesystem::path path =
+        std::filesystem::path(directory.path) / "virtual_bridge_escape.yaml";
+    if (std::filesystem::exists(path)) {
+        error = "virtual_bridge_escape.yaml already exists";
+        return false;
+    }
+    YAML::Emitter out;
+    out << YAML::BeginMap << YAML::Key << "schema_version" << YAML::Value
+        << kSchemaVersion << YAML::Key << "mode" << YAML::Value
+        << "offline_virtual_bridge_escape" << YAML::Key << "vehicle_id"
+        << YAML::Value << vehicle_id << YAML::Key << "path_gen" << YAML::Value
+        << path_gen << YAML::Key << "distance" << YAML::Value << distance
+        << YAML::Key << "direction" << YAML::Value << direction
+        << YAML::Key << "frozen_pose" << YAML::Value;
+    emitPose(out, frozen_pose);
+    out << YAML::Key << "target_pose" << YAML::Value;
+    emitPose(out, target_pose);
+    out << YAML::EndMap;
+    std::ofstream file(path);
+    if (!file) { error = "cannot open virtual_bridge_escape.yaml"; return false; }
+    file << out.c_str() << '\n';
+    if (!file) { error = "failed writing virtual_bridge_escape.yaml"; return false; }
+    error = "ok";
+    return true;
+}
+
 bool loadRecoveryCase(const std::string& case_directory,
                       sandbox_msgs::RecoverySnapshot& snapshot,
                       std::vector<int>& participant_ids, std::string& error) {
