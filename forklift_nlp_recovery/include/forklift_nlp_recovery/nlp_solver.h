@@ -62,12 +62,17 @@ struct NlpSolutionValidation {
     double max_terminal_error = 0.0;
     double max_kinematic_position_residual = 0.0;
     double max_kinematic_heading_residual = 0.0;
+    double max_kinematic_speed_residual = 0.0;
+    double max_kinematic_steer_residual = 0.0;
     double max_speed_violation = 0.0;
     double max_steer_violation = 0.0;
     double max_acceleration_violation = 0.0;
     double max_steer_rate_violation = 0.0;
     double max_aabb_violation = 0.0;
     double minimum_participant_obb_separation_margin = 0.0;
+    int minimum_participant_vehicle_a_id = -1;
+    int minimum_participant_vehicle_b_id = -1;
+    double minimum_participant_separation_time = 0.0;
     double minimum_static_obb_separation_margin = 0.0;
     size_t participant_obb_collision_samples = 0;
     size_t static_obb_collision_samples = 0;
@@ -86,6 +91,8 @@ struct NlpSolverStatistics {
     double wall_time = 0.0;
     double objective = 0.0;
     double max_constraint_violation = 0.0;
+    size_t variable_count = 0;
+    size_t constraint_count = 0;
 };
 
 struct VehicleDirectionDiagnostics {

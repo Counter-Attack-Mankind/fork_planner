@@ -2858,17 +2858,23 @@ private:
             reason = "trajectory frame does not match the planner frame";
             return false;
         }
-        if (!message.solver_success) {
-            reason = "IPOPT did not report success";
-            return false;
-        }
-        if (message.vehicles.size() != 1) {
-            reason = "single-vehicle recovery requires exactly one trajectory";
+        if (!message.solver_success || !message.validation_passed) {
+            reason = message.solver_success ?
+                "independent safety validation did not pass" :
+                "IPOPT did not report success";
             return false;
         }
         const std::vector<int>& cycle_ids = recovery.deadlock_cycle_ids.empty() ?
             recovery.nlp_vehicle_ids : recovery.deadlock_cycle_ids;
         std::set<int> expected(cycle_ids.begin(), cycle_ids.end());
+        const bool cooperative = expected.size() == 3;
+        const size_t required_trajectories = cooperative ? 3 : 1;
+        if (message.vehicles.size() != required_trajectories) {
+            reason = cooperative ?
+                "three-vehicle recovery requires exactly three synchronized trajectories" :
+                "single-vehicle recovery requires exactly one trajectory";
+            return false;
+        }
         std::set<int> received;
         size_t node_count = 0;
         for (const auto& trajectory : message.vehicles) {
@@ -2898,6 +2904,11 @@ private:
             const auto& first = trajectory.points.front();
             const double start_shift = std::hypot(first.x - start.x, first.y - start.y);
             const bool corrected_start = trajectory.initial_state_corrected;
+            if (cooperative && (corrected_start ||
+                std::abs(trajectory.initial_path_s - vehicle->path_s) > 1e-9)) {
+                reason = "cooperative trajectory did not preserve the frozen start state";
+                return false;
+            }
             bool start_matches = start_shift <= 1e-4 &&
                 std::abs(normalizeAngle(first.yaw - start.theta)) <= 1e-4;
             if (corrected_start &&
@@ -2949,7 +2960,8 @@ private:
                 previous_time = point.time;
             }
         }
-        if (received.size() != 1) {
+        if (received.size() != required_trajectories ||
+            (cooperative && received != expected)) {
             reason = "selected recovery vehicle identity is incomplete";
             return false;
         }
@@ -2977,11 +2989,6 @@ private:
         sim_plan_frames_.clear();
         sim_plan_cursor_ = 0;
         sim_plan_valid_ = false;
-        if (!message->validation_passed) {
-            ROS_WARN("[NLP_EXEC] independent validation failed; executing because IPOPT succeeded");
-            if (diagnostics_) diagnostics_->event(
-                "[NLP_EXEC] independent validation failed; executing IPOPT-success trajectory");
-        }
         ROS_WARN("[NLP_EXEC] recovery_id=%llu vehicles=%zu duration=%.3f",
                  static_cast<unsigned long long>(message->recovery_id),
                  message->vehicles.size(), message->vehicles.front().points.back().time);

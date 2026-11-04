@@ -10,6 +10,7 @@ enum class NlpConstraintCategory {
     RK4,
     AABB_NODE,
     STATIC_OBCA,
+    DYNAMIC_OBCA,
     VARIABLE_BOUND
 };
 

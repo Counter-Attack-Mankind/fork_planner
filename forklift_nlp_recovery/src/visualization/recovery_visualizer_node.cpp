@@ -27,6 +27,8 @@
 #include "forklift_map/forklift_map.h"
 #include "forklift_map/map_param.h"
 #include "forklift_nlp_recovery/corridor_builder.h"
+#include "forklift_nlp_recovery/cooperative/cooperative_initial_guess.h"
+#include "forklift_nlp_recovery/cooperative/cooperative_nlp_solver.h"
 #include "forklift_nlp_recovery/candidate_selector.h"
 #include "forklift_nlp_recovery/hybrid_astar.h"
 #include "forklift_nlp_recovery/initial_guess.h"
@@ -243,6 +245,10 @@ public:
         initial_guess_generator_ = std::make_unique<InitialGuessGenerator>(
             initial_guess_config_, *builder_);
         nlp_solver_ = std::make_unique<NlpSolver>(solver_config_, *builder_);
+        cooperative_initial_guess_generator_ =
+            std::make_unique<CooperativeInitialGuessGenerator>(initial_guess_config_);
+        cooperative_nlp_solver_ =
+            std::make_unique<CooperativeNlpSolver>(solver_config_, *builder_);
         int experiment_vehicle_count = 0;
         int experiment_seed = 0;
         global_nh.param("forklift_planner/multi_vehicle/vehicle_count",
@@ -578,8 +584,10 @@ private:
     bool optimizedTrajectoryComplete(const NlpOptimizationInput& input,
                                      const NlpSolveResult& result,
                                      std::string& reason) const {
-        if (!result.solver_success) {
-            reason = "IPOPT did not report success";
+        if (!result.solver_success || !result.validation_passed) {
+            reason = result.solver_success ?
+                "independent safety validation did not pass" :
+                "IPOPT did not report success";
             return false;
         }
         if (result.node_count < 2 || result.vehicles.empty() ||
@@ -669,11 +677,6 @@ private:
                 ROS_ERROR("[nlp_recovery][auto] failed to update execution status: %s",
                           error.c_str());
             }
-        }
-        if (!locked_.solver_result.validation_passed) {
-            ROS_WARN("[nlp_recovery][auto] independent validation failed; publishing "
-                     "recovery_id=%llu because IPOPT succeeded",
-                     static_cast<unsigned long long>(locked_.recovery_id));
         }
         ROS_WARN("[nlp_recovery][auto] submitted recovery_id=%llu vehicles=%zu",
                  static_cast<unsigned long long>(locked_.recovery_id),
@@ -782,6 +785,74 @@ private:
             locked_.actual_initial_guess = NlpInitialGuess{};
             locked_.original_initial_guess = NlpInitialGuess{};
             locked_.solver_result = NlpSolveResult{};
+            return false;
+        }
+        submitLockedTrajectory();
+        return true;
+    }
+
+    bool trySolveCooperative(const sandbox_msgs::RecoverySnapshot& snapshot,
+                             const std::vector<int>& cycle_ids) {
+        if (cycle_ids.size() != 3) return false;
+        for (int id : cycle_ids) {
+            const auto* vehicle = findVehicle(snapshot, id);
+            if (vehicle == nullptr || !vehicle->pose_valid || !vehicle->pose_fresh ||
+                std::abs(vehicle->current_speed) > candidate_config_.stopped_speed_tolerance) {
+                ROS_WARN_THROTTLE(1.0, "[COOP_NLP] waiting for fresh stopped V%d", id);
+                locked_.active = false;
+                return false;
+            }
+        }
+        locked_.build = input_builder_->build(snapshot, cycle_ids, "auto_cooperative");
+        locked_.geometry_vehicles = locked_.build.input.vehicles;
+        writeDebugInput(locked_.build);
+        if (!locked_.build.complete || !locked_.build.input.valid ||
+            locked_.build.input.vehicles.size() != 3) {
+            ROS_ERROR("[COOP_NLP] input infeasible: %s", locked_.build.reason.c_str());
+            return false;
+        }
+        for (const NlpVehicleInput& vehicle : locked_.build.input.vehicles) {
+            ROS_INFO("[COOP_NLP] V%d start=(%.3f,%.3f,%.3f) terminal=(%.3f,%.3f,%.3f) "
+                     "safe_stc=[%.3f,%.3f]x[%.3f,%.3f] path_gen=%d",
+                     vehicle.id, vehicle.frozen_initial_state.rear_axle_pose.x,
+                     vehicle.frozen_initial_state.rear_axle_pose.y,
+                     vehicle.frozen_initial_state.rear_axle_pose.yaw,
+                     vehicle.terminal.pose.x, vehicle.terminal.pose.y,
+                     vehicle.terminal.pose.yaw, vehicle.safe_stc.min_x,
+                     vehicle.safe_stc.max_x, vehicle.safe_stc.min_y,
+                     vehicle.safe_stc.max_y, vehicle.path_gen);
+        }
+        locked_.actual_initial_guess =
+            cooperative_initial_guess_generator_->generate(locked_.build.input);
+        locked_.original_initial_guess = locked_.actual_initial_guess;
+        if (!locked_.actual_initial_guess.generated) {
+            ROS_ERROR("[COOP_NLP] stationary initial guess failed: %s",
+                      locked_.actual_initial_guess.reason.c_str());
+            return false;
+        }
+        ROS_INFO("[COOP_NLP] stationary initial guess N=%zu T_init=%.3f",
+                 locked_.actual_initial_guess.node_count,
+                 locked_.actual_initial_guess.total_time);
+        const CaseSaveResult saved = saveInitialGuessCase(locked_.build,
+            locked_.original_initial_guess, locked_.actual_initial_guess,
+            results_directory_, case_prefix_ + "_coop");
+        if (saved.success) locked_.case_directory = saved.case_directory;
+        locked_.solver_result = solveAndSave(locked_.build,
+            locked_.actual_initial_guess, saved, true);
+        const NlpSolveResult& result = locked_.solver_result;
+        ROS_INFO("[COOP_NLP] variables=%zu constraints=%zu status=%s iterations=%d "
+                 "wall=%.3f max_violation=%.3g validation=%s min_pair_margin=%.4f "
+                 "pair=V%d-V%d time=%.3f",
+                 result.statistics.variable_count, result.statistics.constraint_count,
+                 result.statistics.return_status.c_str(), result.statistics.iterations,
+                 result.statistics.wall_time, result.statistics.max_constraint_violation,
+                 result.validation_passed ? "passed" : "failed",
+                 result.validation.minimum_participant_obb_separation_margin,
+                 result.validation.minimum_participant_vehicle_a_id,
+                 result.validation.minimum_participant_vehicle_b_id,
+                 result.validation.minimum_participant_separation_time);
+        if (!result.execution_publish_eligible) {
+            ROS_ERROR("[COOP_NLP] solve rejected: %s", result.reason.c_str());
             return false;
         }
         submitLockedTrajectory();
@@ -920,7 +991,7 @@ private:
                  result.reason.c_str());
         if (!result.validation_passed) {
             ROS_WARN("[nlp_recovery][solver] independent validation: "
-                     "boundary=(%.3g,%.3g) dynamics=(%.3g,%.3g) "
+                     "boundary=(%.3g,%.3g) dynamics=(%.3g,%.3g,%.3g,%.3g) "
                      "bounds=(v %.3g,steer %.3g,a %.3g,omega %.3g) "
                      "aabb=%.3g/%zu obb_sat=(pair %zu,static %zu) "
                      "map_samples=%zu min_obb_margin=(pair %.3g,static %.3g)",
@@ -928,6 +999,8 @@ private:
                      result.validation.max_terminal_error,
                      result.validation.max_kinematic_position_residual,
                      result.validation.max_kinematic_heading_residual,
+                     result.validation.max_kinematic_speed_residual,
+                     result.validation.max_kinematic_steer_residual,
                      result.validation.max_speed_violation,
                      result.validation.max_steer_violation,
                      result.validation.max_acceleration_violation,
@@ -955,8 +1028,11 @@ private:
 
     NlpSolveResult solveAndSave(const OptimizationInputBuildResult& build,
                                 const NlpInitialGuess& guess,
-                                const CaseSaveResult& saved) {
-        NlpSolveResult result = nlp_solver_->solve(build.input, guess);
+                                const CaseSaveResult& saved,
+                                bool cooperative = false) {
+        NlpSolveResult result = cooperative ?
+            cooperative_nlp_solver_->solve(build.input, guess) :
+            nlp_solver_->solve(build.input, guess);
         std::string completeness_reason;
         result.execution_publish_eligible = optimizedTrajectoryComplete(
             build.input, result, completeness_reason);
@@ -1088,7 +1164,22 @@ private:
             updateBridgeEscape(snapshot, cycle_ids);
         }
 
-        if (!locked_.active) {
+        if (!locked_.active && cycle_ids.size() == 3) {
+            locked_.active = true;
+            locked_.recovery_id = snapshot.recovery_id;
+            locked_.frame_id = snapshot.header.frame_id;
+            std::ostringstream participants;
+            for (size_t i = 0; i < cycle_ids.size(); ++i) {
+                if (i != 0) participants << ',';
+                participants << "V" << cycle_ids[i];
+            }
+            ROS_INFO("[COOP_NLP] recovery_id=%llu participants=%s",
+                     static_cast<unsigned long long>(snapshot.recovery_id),
+                     participants.str().c_str());
+            trySolveCooperative(snapshot, cycle_ids);
+        }
+
+        if (!locked_.active && cycle_ids.size() != 3) {
             const CandidateSelectionResult selection = candidate_selector_->evaluate(
                 snapshot, cycle_ids);
             if (!selection.complete_snapshot) {
@@ -1219,7 +1310,16 @@ private:
         CaseSaveResult saved;
         PreparedGuess prepared;
         if (build.complete && build.input.valid) {
-            prepared = prepareInitialGuess(build, save_case, &saved);
+            if (build.input.vehicles.size() == 3) {
+                prepared.actual = cooperative_initial_guess_generator_->generate(build.input);
+                prepared.original = prepared.actual;
+                if (save_case) {
+                    saved = saveInitialGuessCase(build, prepared.original, prepared.actual,
+                        results_directory_, case_prefix_ + "_coop");
+                }
+            } else {
+                prepared = prepareInitialGuess(build, save_case, &saved);
+            }
             latest_debug_original_guess_ = prepared.original;
             latest_debug_actual_guess_ = prepared.actual;
         }
@@ -1228,7 +1328,8 @@ private:
             latest_debug_solver_result_ = NlpSolveResult{};
             if (latest_debug_actual_guess_.generated) {
                 latest_debug_solver_result_ = solveAndSave(
-                    build, latest_debug_actual_guess_, saved);
+                    build, latest_debug_actual_guess_, saved,
+                    build.input.vehicles.size() == 3);
             }
             if (saved.success) last_debug_case_identity_ = identity;
         }
@@ -1298,6 +1399,9 @@ private:
     std::unique_ptr<HybridAstarPlanner> hybrid_planner_;
     std::unique_ptr<InitialGuessGenerator> initial_guess_generator_;
     std::unique_ptr<NlpSolver> nlp_solver_;
+    std::unique_ptr<CooperativeInitialGuessGenerator>
+        cooperative_initial_guess_generator_;
+    std::unique_ptr<CooperativeNlpSolver> cooperative_nlp_solver_;
     InitialGuessConfig initial_guess_config_;
     NlpSolverConfig solver_config_;
     CandidateSelectionConfig candidate_config_;

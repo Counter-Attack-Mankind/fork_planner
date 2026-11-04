@@ -9,10 +9,11 @@
 namespace forklift_nlp_recovery {
 namespace {
 
-constexpr std::array<NlpConstraintCategory, 4> kCategories{
+constexpr std::array<NlpConstraintCategory, 5> kCategories{
     NlpConstraintCategory::RK4,
     NlpConstraintCategory::AABB_NODE,
     NlpConstraintCategory::STATIC_OBCA,
+    NlpConstraintCategory::DYNAMIC_OBCA,
     NlpConstraintCategory::VARIABLE_BOUND};
 
 double boundViolation(double value, double lower, double upper) {
@@ -50,7 +51,8 @@ void appendDiagnostics(NlpConstraintDiagnostics& result,
         diagnostic.lower_bound = lower[index];
         diagnostic.upper_bound = upper[index];
         diagnostic.violation = violation;
-        if (metadata[index].category == NlpConstraintCategory::STATIC_OBCA &&
+        if ((metadata[index].category == NlpConstraintCategory::STATIC_OBCA ||
+             metadata[index].category == NlpConstraintCategory::DYNAMIC_OBCA) &&
             metadata[index].component.find("separation") != std::string::npos) {
             diagnostic.distance_shortfall = violation;
             category.max_distance_shortfall = std::max(
@@ -70,6 +72,7 @@ const char* nlpConstraintCategoryName(NlpConstraintCategory category) {
         case NlpConstraintCategory::RK4: return "rk4";
         case NlpConstraintCategory::AABB_NODE: return "aabb_node";
         case NlpConstraintCategory::STATIC_OBCA: return "static_obca";
+        case NlpConstraintCategory::DYNAMIC_OBCA: return "dynamic_obca";
         case NlpConstraintCategory::VARIABLE_BOUND: return "variable_bound";
     }
     return "unknown";

@@ -20,20 +20,26 @@ find_package(yaml-cpp REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_input forklift_nlp_recovery_selection forklift_nlp_recovery_initial_guess forklift_nlp_recovery_validator forklift_nlp_recovery_constraint_diagnostics forklift_nlp_recovery_solver forklift_nlp_recovery_replay
+  LIBRARIES forklift_nlp_recovery_geometry forklift_nlp_recovery_model forklift_nlp_recovery_input forklift_nlp_recovery_selection forklift_nlp_recovery_initial_guess forklift_nlp_recovery_validator forklift_nlp_recovery_constraint_diagnostics forklift_nlp_recovery_solver forklift_nlp_recovery_cooperative forklift_nlp_recovery_replay
   CATKIN_DEPENDS roscpp roslib geometry_msgs std_msgs std_srvs visualization_msgs forklift_map forklift_planner sandbox_msgs
 )
 
 include_directories(include ../forklift_planner/include ${catkin_INCLUDE_DIRS})
 
 add_library(forklift_nlp_recovery_geometry
-  src/optimization/corridor_builder.cpp
+  src/optimization/common/corridor_builder.cpp
   src/geometry/coordinate_mapper.cpp
 )
 add_dependencies(forklift_nlp_recovery_geometry ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_geometry ${catkin_LIBRARIES})
 
-add_library(forklift_nlp_recovery_input src/optimization/optimization_input.cpp)
+add_library(forklift_nlp_recovery_model
+  src/optimization/common/kinematic_model.cpp
+)
+add_dependencies(forklift_nlp_recovery_model ${catkin_EXPORTED_TARGETS})
+target_link_libraries(forklift_nlp_recovery_model casadi ${catkin_LIBRARIES})
+
+add_library(forklift_nlp_recovery_input src/optimization/common/optimization_input.cpp)
 add_dependencies(forklift_nlp_recovery_input ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_input
   forklift_nlp_recovery_geometry
@@ -41,8 +47,8 @@ target_link_libraries(forklift_nlp_recovery_input
 )
 
 add_library(forklift_nlp_recovery_selection
-  src/optimization/candidate_selector.cpp
-  src/optimization/hybrid_astar.cpp
+  src/optimization/single_vehicle/candidate_selector.cpp
+  src/optimization/single_vehicle/hybrid_astar.cpp
 )
 add_dependencies(forklift_nlp_recovery_selection ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_selection
@@ -52,7 +58,7 @@ target_link_libraries(forklift_nlp_recovery_selection
 )
 
 add_library(forklift_nlp_recovery_initial_guess
-  src/optimization/initial_guess.cpp
+  src/optimization/single_vehicle/initial_guess.cpp
 )
 add_dependencies(forklift_nlp_recovery_initial_guess ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_initial_guess
@@ -60,7 +66,7 @@ target_link_libraries(forklift_nlp_recovery_initial_guess
   ${catkin_LIBRARIES}
 )
 
-add_library(forklift_nlp_recovery_validator src/optimization/nlp_validator.cpp)
+add_library(forklift_nlp_recovery_validator src/optimization/common/nlp_validator.cpp)
 add_dependencies(forklift_nlp_recovery_validator ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_validator
   forklift_nlp_recovery_initial_guess
@@ -68,17 +74,34 @@ target_link_libraries(forklift_nlp_recovery_validator
 )
 
 add_library(forklift_nlp_recovery_constraint_diagnostics
-  src/optimization/nlp_constraint_diagnostics.cpp
+  src/optimization/common/nlp_constraint_diagnostics.cpp
 )
 add_dependencies(forklift_nlp_recovery_constraint_diagnostics ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_constraint_diagnostics ${catkin_LIBRARIES})
 
-add_library(forklift_nlp_recovery_solver src/optimization/nlp_solver.cpp)
+add_library(forklift_nlp_recovery_solver src/optimization/single_vehicle/nlp_solver.cpp)
 add_dependencies(forklift_nlp_recovery_solver ${catkin_EXPORTED_TARGETS})
 target_link_libraries(forklift_nlp_recovery_solver
   forklift_nlp_recovery_initial_guess
   forklift_nlp_recovery_validator
   forklift_nlp_recovery_constraint_diagnostics
+  forklift_nlp_recovery_model
+  casadi
+  ${catkin_LIBRARIES}
+)
+
+add_library(forklift_nlp_recovery_cooperative
+  src/optimization/cooperative/cooperative_initial_guess.cpp
+  src/optimization/cooperative/cooperative_nlp_solver.cpp
+  src/optimization/cooperative/dynamic_obca.cpp
+)
+add_dependencies(forklift_nlp_recovery_cooperative ${catkin_EXPORTED_TARGETS})
+target_link_libraries(forklift_nlp_recovery_cooperative
+  forklift_nlp_recovery_solver
+  forklift_nlp_recovery_validator
+  forklift_nlp_recovery_constraint_diagnostics
+  forklift_nlp_recovery_input
+  forklift_nlp_recovery_model
   casadi
   ${catkin_LIBRARIES}
 )
@@ -102,6 +125,7 @@ add_executable(recovery_visualizer_node
 add_dependencies(recovery_visualizer_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(recovery_visualizer_node
   forklift_nlp_recovery_solver
+  forklift_nlp_recovery_cooperative
   forklift_nlp_recovery_selection
   forklift_nlp_recovery_initial_guess
   forklift_nlp_recovery_input
@@ -209,6 +233,17 @@ if(CATKIN_ENABLE_TESTING)
     )
   endif()
 
+  catkin_add_gtest(cooperative_initial_guess_test
+    test/cooperative_initial_guess_test.cpp)
+  if(TARGET cooperative_initial_guess_test)
+    add_dependencies(cooperative_initial_guess_test ${catkin_EXPORTED_TARGETS})
+    target_link_libraries(cooperative_initial_guess_test
+      forklift_nlp_recovery_cooperative
+      forklift_nlp_recovery_input
+      ${catkin_LIBRARIES}
+    )
+  endif()
+
   catkin_add_gtest(replay_data_test test/replay_data_test.cpp)
   if(TARGET replay_data_test)
     add_dependencies(replay_data_test ${catkin_EXPORTED_TARGETS})
@@ -217,11 +252,13 @@ if(CATKIN_ENABLE_TESTING)
 endif()
 
 install(TARGETS forklift_nlp_recovery_geometry forklift_nlp_recovery_input
+                forklift_nlp_recovery_model
                 forklift_nlp_recovery_selection
                 forklift_nlp_recovery_initial_guess
                 forklift_nlp_recovery_validator
                 forklift_nlp_recovery_constraint_diagnostics
                 forklift_nlp_recovery_solver
+                forklift_nlp_recovery_cooperative
                 forklift_nlp_recovery_replay
                 recovery_visualizer_node
                 nlp_trajectory_replay_node

@@ -1,5 +1,6 @@
 #include "forklift_nlp_recovery/nlp_solver.h"
 #include "forklift_nlp_recovery/nlp_validator.h"
+#include "forklift_nlp_recovery/common/kinematic_model.h"
 
 #include <casadi/casadi.hpp>
 
@@ -34,30 +35,6 @@ double equivalentAngle(double angle, double reference) {
 Pose2d bodyCenter(const Pose2d& rear, double offset) {
     return {rear.x + offset * std::cos(rear.yaw),
             rear.y + offset * std::sin(rear.yaw), rear.yaw};
-}
-
-casadi::MX derivative(const casadi::MX& state, const casadi::MX& control,
-                      double wheel_base) {
-    return casadi::MX::vertcat({state(3) * cos(state(2)),
-                               state(3) * sin(state(2)),
-                               state(3) * tan(state(4)) / wheel_base,
-                               control(0), control(1)});
-}
-
-casadi::MX integrateRk4(const casadi::MX& state, const casadi::MX& control,
-                        const casadi::MX& duration, double wheel_base) {
-    const casadi::MX k1 = derivative(state, control, wheel_base);
-    const casadi::MX k2 = derivative(state + duration * 0.5 * k1, control,
-                                     wheel_base);
-    const casadi::MX k3 = derivative(state + duration * 0.5 * k2, control,
-                                     wheel_base);
-    const casadi::MX k4 = derivative(state + duration * k3, control, wheel_base);
-    return state + duration * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
-}
-
-casadi::MX symbolicCenter(const casadi::MX& state, double offset) {
-    return casadi::MX::vertcat({state(0) + offset * cos(state(2)),
-                               state(1) + offset * sin(state(2))});
 }
 
 const VehicleInitialGuess* findGuess(const NlpInitialGuess& guess, int id) {
@@ -291,7 +268,7 @@ void addStaticObca(const casadi::MX& state, const Pose2d& initial_rear,
         {NlpConstraintCategory::STATIC_OBCA, moving.id, obstacle.id, node,
          sample_name + "_normalization"});
 
-    const casadi::MX center = symbolicCenter(state, moving.parameters.rear_axle_to_center);
+    const casadi::MX center = symbolicBodyCenter(state, moving.parameters.rear_axle_to_center);
     const casadi::MX separation =
         -0.5 * moving.parameters.length * (mu(0) + mu(1)) -
         0.5 * moving.parameters.width * (mu(2) + mu(3)) +
@@ -450,7 +427,7 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                 return result;
             }
             const Aabb& box = vehicle.corridor[node];
-            const casadi::MX center = symbolicCenter(state(casadi::Slice(), node),
+            const casadi::MX center = symbolicBodyCenter(state(casadi::Slice(), node),
                 vehicle.parameters.rear_axle_to_center);
             constraints.add(center(0), box.min_x, box.max_x,
                 {NlpConstraintCategory::AABB_NODE, vehicle.id, -1, node, "x"});
@@ -459,7 +436,7 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
             if (node + 1 == nodes) continue;
             const casadi::MX current_state = state(casadi::Slice(), node);
             const casadi::MX current_control = control(casadi::Slice(), node);
-            const casadi::MX predicted = integrateRk4(current_state, current_control,
+            const casadi::MX predicted = integrateBicycleRk4(current_state, current_control,
                                                        dt, vehicle.parameters.wheel_base);
             static const char* rk4_components[] = {"rear_x", "rear_y", "heading",
                                                     "signed_speed", "front_steer"};
@@ -502,7 +479,7 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                     obstacle, node, "node", variables, initial_values,
                     lower_bounds, upper_bounds, variable_metadata, constraints);
                 if (node + 1 == nodes) continue;
-                const casadi::MX midpoint = integrateRk4(
+                const casadi::MX midpoint = integrateBicycleRk4(
                     vehicle.state(casadi::Slice(), node),
                     vehicle.control(casadi::Slice(), node), dt * 0.5,
                     vehicle.input->parameters.wheel_base);
@@ -519,6 +496,8 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
         casadi::MX::zeros(0, 1) : casadi::MX::vertcat(constraints.expressions);
     const casadi::MXDict problem{{"x", decision}, {"f", objective},
                                  {"g", constraint_vector}};
+    result.statistics.variable_count = initial_values.size();
+    result.statistics.constraint_count = constraints.lower.size();
     casadi::Dict options;
     options["print_time"] = false;
     options["ipopt.max_iter"] = config_.max_iterations;
@@ -661,11 +640,16 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << "wall_time: " << result.statistics.wall_time << '\n'
            << "objective: " << result.statistics.objective << '\n'
            << "max_constraint_violation: " << result.statistics.max_constraint_violation << '\n'
+           << "variable_count: " << result.statistics.variable_count << '\n'
+           << "constraint_count: " << result.statistics.constraint_count << '\n'
            << "node_count: " << result.node_count << '\n'
            << "total_time: " << result.total_time << '\n'
            << "average_dt: " << result.average_dt << '\n'
            << "collision_models:\n"
-           << "  optimization_constraints: active_obb_static_obb_obca\n"
+           << "  optimization_constraints: "
+           << (result.vehicles.size() == 3 ?
+               "dynamic_participant_and_static_obb_obca\n" :
+               "active_obb_static_obb_obca\n")
            << "  independent_validation: obb_sat\n"
            << "validation:\n"
            << "  collision_geometry: obb_sat\n"
@@ -676,6 +660,10 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << result.validation.max_kinematic_position_residual << '\n'
            << "  max_kinematic_heading_residual: "
            << result.validation.max_kinematic_heading_residual << '\n'
+           << "  max_kinematic_speed_residual: "
+           << result.validation.max_kinematic_speed_residual << '\n'
+           << "  max_kinematic_steer_residual: "
+           << result.validation.max_kinematic_steer_residual << '\n'
            << "  max_speed_violation: " << result.validation.max_speed_violation << '\n'
            << "  max_steer_violation: " << result.validation.max_steer_violation << '\n'
            << "  max_acceleration_violation: "
@@ -685,6 +673,11 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << "  max_aabb_violation: " << result.validation.max_aabb_violation << '\n'
            << "  minimum_participant_obb_separation_margin: "
            << result.validation.minimum_participant_obb_separation_margin << '\n'
+           << "  minimum_participant_pair: ["
+           << result.validation.minimum_participant_vehicle_a_id << ", "
+           << result.validation.minimum_participant_vehicle_b_id << "]\n"
+           << "  minimum_participant_separation_time: "
+           << result.validation.minimum_participant_separation_time << '\n'
            << "  minimum_static_obb_separation_margin: "
            << result.validation.minimum_static_obb_separation_margin << '\n'
            << "  participant_obb_collision_samples: "

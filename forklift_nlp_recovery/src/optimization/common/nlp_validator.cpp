@@ -127,12 +127,13 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
     }
     const double dt = result.total_time / static_cast<double>(result.node_count - 1);
     const size_t substeps = std::max<size_t>(1, config.validation_substeps);
+    const bool cooperative = input.vehicles.size() == 3;
     std::vector<std::vector<NumericState>> samples(result.vehicles.size());
     for (size_t index = 0; index < result.vehicles.size(); ++index) {
         const auto& vehicle = result.vehicles[index];
         const auto& source = input.vehicles[index];
         if (vehicle.id != source.id || vehicle.nodes.size() != result.node_count ||
-            source.corridor.size() != result.node_count) {
+            (cooperative ? !source.stc_valid : source.corridor.size() != result.node_count)) {
             validation.reason = "vehicle ordering or node count mismatch";
             return validation;
         }
@@ -150,6 +151,10 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
         validation.max_start_error = std::max(validation.max_start_error,
             std::abs(normalizeAngle(first.rear_axle_pose.yaw - source.initial_state.rear_axle_pose.yaw)));
         validation.max_start_error = std::max(validation.max_start_error, std::abs(first.signed_speed));
+        if (source.frozen_initial_state.steering_valid) {
+            validation.max_start_error = std::max(validation.max_start_error,
+                std::abs(first.front_steer - source.frozen_initial_state.steering_angle));
+        }
         validation.max_terminal_error = std::max(validation.max_terminal_error,
             std::hypot(last.rear_axle_pose.x - source.terminal.pose.x,
                        last.rear_axle_pose.y - source.terminal.pose.y));
@@ -170,12 +175,13 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
                 validation.max_steer_rate_violation = std::max(validation.max_steer_rate_violation,
                     std::max(0.0, std::abs(value.steer_rate) - source.parameters.max_steer_rate));
             }
-            if (value.aabb_index != static_cast<int>(node)) {
+            if (!cooperative && value.aabb_index != static_cast<int>(node)) {
                 ++validation.aabb_violation_samples;
                 validation.max_aabb_violation = kInfinity;
                 continue;
             }
-            const double violation = pointAabbViolation(value.disc_center, source.corridor[node]);
+            const Aabb& box = cooperative ? source.safe_stc : source.corridor[node];
+            const double violation = pointAabbViolation(value.disc_center, box);
             validation.max_aabb_violation = std::max(validation.max_aabb_violation, violation);
             if (violation > config.validation_tolerance) ++validation.aabb_violation_samples;
         }
@@ -194,6 +200,12 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
             validation.max_kinematic_heading_residual = std::max(
                 validation.max_kinematic_heading_residual,
                 std::abs(normalizeAngle(predicted.yaw - next.rear_axle_pose.yaw)));
+            validation.max_kinematic_speed_residual = std::max(
+                validation.max_kinematic_speed_residual,
+                std::abs(predicted.speed - next.signed_speed));
+            validation.max_kinematic_steer_residual = std::max(
+                validation.max_kinematic_steer_residual,
+                std::abs(predicted.steer - next.front_steer));
             for (size_t substep = 0; substep < substeps; ++substep) {
                 const double fraction = static_cast<double>(substep) / static_cast<double>(substeps);
                 const NumericState state = integrateRk4(initial, control, dt * fraction,
@@ -201,8 +213,8 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
                 samples[index].push_back(state);
                 const Pose2d center = bodyCenter({state.x, state.y, state.yaw},
                                                  source.parameters.rear_axle_to_center);
-                const double stc_violation = pointAabbViolation(center,
-                    source.corridor[interval]);
+                const Aabb& box = cooperative ? source.safe_stc : source.corridor[interval];
+                const double stc_violation = pointAabbViolation(center, box);
                 validation.max_aabb_violation = std::max(
                     validation.max_aabb_violation, stc_violation);
                 if (stc_violation > config.validation_tolerance) {
@@ -231,6 +243,40 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
                 result.node_count - 2, substeps, result.total_time,
                 last_node.disc_center, detail.type, detail.shelf_index,
                 detail.distance});
+        }
+    }
+
+    for (size_t first = 0; first < samples.size(); ++first) {
+        for (size_t second = first + 1; second < samples.size(); ++second) {
+            if (samples[first].size() != samples[second].size()) {
+                validation.reason = "participant trajectories do not share one validation time grid";
+                return validation;
+            }
+            for (size_t sample = 0; sample < samples[first].size(); ++sample) {
+                const NumericState& first_state = samples[first][sample];
+                const NumericState& second_state = samples[second][sample];
+                const VehicleParameters& first_parameters = input.vehicles[first].parameters;
+                const VehicleParameters& second_parameters = input.vehicles[second].parameters;
+                const Obb first_box = vehicleObb(
+                    {first_state.x, first_state.y, first_state.yaw},
+                    first_parameters.length, first_parameters.width,
+                    first_parameters.rear_axle_to_center);
+                const Obb second_box = vehicleObb(
+                    {second_state.x, second_state.y, second_state.yaw},
+                    second_parameters.length, second_parameters.width,
+                    second_parameters.rear_axle_to_center);
+                const double margin = obbSatSeparationMargin(first_box, second_box);
+                if (margin < validation.minimum_participant_obb_separation_margin) {
+                    validation.minimum_participant_obb_separation_margin = margin;
+                    validation.minimum_participant_vehicle_a_id = input.vehicles[first].id;
+                    validation.minimum_participant_vehicle_b_id = input.vehicles[second].id;
+                    validation.minimum_participant_separation_time =
+                        static_cast<double>(sample) * dt / static_cast<double>(substeps);
+                }
+                if (margin < -config.validation_tolerance) {
+                    ++validation.participant_obb_collision_samples;
+                }
+            }
         }
     }
 
@@ -266,6 +312,8 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
         validation.max_terminal_error <= tolerance &&
         validation.max_kinematic_position_residual <= tolerance &&
         validation.max_kinematic_heading_residual <= tolerance &&
+        validation.max_kinematic_speed_residual <= tolerance &&
+        validation.max_kinematic_steer_residual <= tolerance &&
         validation.max_speed_violation <= tolerance && validation.max_steer_violation <= tolerance &&
         validation.max_acceleration_violation <= tolerance &&
         validation.max_steer_rate_violation <= tolerance &&
@@ -275,8 +323,8 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
         validation.aabb_violation_samples == 0 &&
         validation.static_map_violation_samples == 0;
     validation.reason = validation.passed
-        ? "all STC/disc-center and sampled static-vehicle OBB SAT checks passed"
-        : "one or more STC/disc-center or static-vehicle OBB SAT checks failed";
+        ? "all STC, map, static OBB and synchronized participant OBB SAT checks passed"
+        : "one or more STC, map, static OBB or participant OBB SAT checks failed";
     return validation;
 }
 
