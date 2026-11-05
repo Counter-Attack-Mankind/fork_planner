@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
+
 #include "forklift_nlp_recovery/nlp_solver.h"
 
 namespace fnr = forklift_nlp_recovery;
@@ -85,10 +88,42 @@ TEST(NlpSolverTest, BuildsSingleVehicleProblemWith51NodeGrid) {
     ASSERT_EQ(prepared.actual_guess.node_count, 51U);
     const fnr::NlpSolveResult result = fixture.solver.solve(input, prepared.actual_guess);
     EXPECT_TRUE(result.problem_built) << result.reason;
+    ASSERT_TRUE(result.solver_success) << result.reason;
+    EXPECT_TRUE(result.validation.passed) << result.validation.reason;
     EXPECT_EQ(result.node_count, 51U);
     EXPECT_GE(result.constraint_diagnostics.categories.size(), 3U);
+    EXPECT_NE(std::find_if(result.constraint_diagnostics.categories.begin(),
+                           result.constraint_diagnostics.categories.end(),
+                           [](const fnr::NlpConstraintCategoryDiagnostics& category) {
+                               return category.category ==
+                                      fnr::NlpConstraintCategory::KINEMATIC_EULER;
+                           }),
+              result.constraint_diagnostics.categories.end());
     ASSERT_EQ(result.vehicles.size(), 1U);
     EXPECT_EQ(result.vehicles[0].nodes.size(), 51U);
+    const auto& nodes = result.vehicles[0].nodes;
+    const double dt = result.total_time / static_cast<double>(nodes.size() - 1U);
+    for (size_t node = 0; node + 1U < nodes.size(); ++node) {
+        const auto& current = nodes[node];
+        const auto& next = nodes[node + 1U];
+        EXPECT_NEAR(next.rear_axle_pose.x,
+                    current.rear_axle_pose.x +
+                        dt * current.signed_speed * std::cos(current.rear_axle_pose.yaw),
+                    1e-7);
+        EXPECT_NEAR(next.rear_axle_pose.y,
+                    current.rear_axle_pose.y +
+                        dt * current.signed_speed * std::sin(current.rear_axle_pose.yaw),
+                    1e-7);
+        EXPECT_NEAR(next.rear_axle_pose.yaw,
+                    current.rear_axle_pose.yaw +
+                        dt * current.signed_speed * std::tan(current.front_steer) /
+                            input.vehicles.front().parameters.wheel_base,
+                    1e-7);
+        EXPECT_NEAR(next.signed_speed,
+                    current.signed_speed + dt * current.acceleration, 1e-7);
+        EXPECT_NEAR(next.front_steer,
+                    current.front_steer + dt * current.steer_rate, 1e-7);
+    }
 }
 
 int main(int argc, char** argv) {

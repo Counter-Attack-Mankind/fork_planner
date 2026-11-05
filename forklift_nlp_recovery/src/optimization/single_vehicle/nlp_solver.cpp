@@ -436,14 +436,14 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
             if (node + 1 == nodes) continue;
             const casadi::MX current_state = state(casadi::Slice(), node);
             const casadi::MX current_control = control(casadi::Slice(), node);
-            const casadi::MX predicted = integrateBicycleRk4(current_state, current_control,
+            const casadi::MX predicted = integrateBicycleEuler(current_state, current_control,
                                                        dt, vehicle.parameters.wheel_base);
-            static const char* rk4_components[] = {"rear_x", "rear_y", "heading",
-                                                    "signed_speed", "front_steer"};
+            static const char* euler_components[] = {"rear_x", "rear_y", "heading",
+                                                      "signed_speed", "front_steer"};
             for (size_t component = 0; component < 5; ++component) {
                 constraints.add(state(component, node + 1) - predicted(component),
-                    0.0, 0.0, {NlpConstraintCategory::RK4, vehicle.id, -1,
-                               node, rk4_components[component]});
+                    0.0, 0.0, {NlpConstraintCategory::KINEMATIC_EULER, vehicle.id, -1,
+                               node, euler_components[component]});
             }
             const casadi::MX acceleration = control(0, node);
             const casadi::MX steer_rate = control(1, node);
@@ -479,7 +479,7 @@ NlpSolveResult NlpSolver::solve(const NlpOptimizationInput& input,
                     obstacle, node, "node", variables, initial_values,
                     lower_bounds, upper_bounds, variable_metadata, constraints);
                 if (node + 1 == nodes) continue;
-                const casadi::MX midpoint = integrateBicycleRk4(
+                const casadi::MX midpoint = integrateBicycleEuler(
                     vehicle.state(casadi::Slice(), node),
                     vehicle.control(casadi::Slice(), node), dt * 0.5,
                     vehicle.input->parameters.wheel_base);
@@ -634,6 +634,7 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << "reason: " << yamlQuote(result.reason) << '\n'
            << "solver: " << yamlQuote(result.statistics.solver_name) << '\n'
            << "casadi_version: " << yamlQuote(result.statistics.casadi_version) << '\n'
+           << "kinematic_integrator: euler\n"
            << "return_status: " << yamlQuote(result.statistics.return_status) << '\n'
            << "iterations: " << result.statistics.iterations << '\n'
            << "cpu_time: " << result.statistics.cpu_time << '\n'

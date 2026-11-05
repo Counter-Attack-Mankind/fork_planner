@@ -162,6 +162,10 @@ private:
                           latest, error.c_str());
                 return;
             }
+            if (replay_.report.kinematic_integrator != "euler") {
+                ROS_WARN("[NLP_OFFLINE] result %u is tagged as legacy RK4; Euler playback "
+                         "may differ from its original dynamics", latest);
+            }
             replay_ready_ = replay_.report.solver_success && replay_.report.validation_passed;
             if (replay_ready_) {
                 result_detected_ = true;

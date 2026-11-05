@@ -95,20 +95,10 @@ NumericState addScaled(const NumericState& state, const NumericState& delta,
             state.steer + scale * delta.steer};
 }
 
-NumericState integrateRk4(const NumericState& state,
-                          const NumericControl& control, double duration,
-                          double wheel_base) {
-    const NumericState k1 = derivative(state, control, wheel_base);
-    const NumericState k2 = derivative(addScaled(state, k1, duration * 0.5), control, wheel_base);
-    const NumericState k3 = derivative(addScaled(state, k2, duration * 0.5), control, wheel_base);
-    const NumericState k4 = derivative(addScaled(state, k3, duration), control, wheel_base);
-    NumericState result = state;
-    result.x += duration * (k1.x + 2.0 * k2.x + 2.0 * k3.x + k4.x) / 6.0;
-    result.y += duration * (k1.y + 2.0 * k2.y + 2.0 * k3.y + k4.y) / 6.0;
-    result.yaw += duration * (k1.yaw + 2.0 * k2.yaw + 2.0 * k3.yaw + k4.yaw) / 6.0;
-    result.speed += duration * (k1.speed + 2.0 * k2.speed + 2.0 * k3.speed + k4.speed) / 6.0;
-    result.steer += duration * (k1.steer + 2.0 * k2.steer + 2.0 * k3.steer + k4.steer) / 6.0;
-    return result;
+NumericState integrateEuler(const NumericState& state,
+                            const NumericControl& control, double duration,
+                            double wheel_base) {
+    return addScaled(state, derivative(state, control, wheel_base), duration);
 }
 
 }  // namespace
@@ -193,7 +183,8 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
                                        current.rear_axle_pose.yaw, current.signed_speed,
                                        current.front_steer};
             const NumericControl control{current.acceleration, current.steer_rate};
-            const NumericState predicted = integrateRk4(initial, control, dt, source.parameters.wheel_base);
+            const NumericState predicted = integrateEuler(
+                initial, control, dt, source.parameters.wheel_base);
             validation.max_kinematic_position_residual = std::max(
                 validation.max_kinematic_position_residual,
                 std::hypot(predicted.x - next.rear_axle_pose.x, predicted.y - next.rear_axle_pose.y));
@@ -208,8 +199,8 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
                 std::abs(predicted.steer - next.front_steer));
             for (size_t substep = 0; substep < substeps; ++substep) {
                 const double fraction = static_cast<double>(substep) / static_cast<double>(substeps);
-                const NumericState state = integrateRk4(initial, control, dt * fraction,
-                                                         source.parameters.wheel_base);
+                const NumericState state = integrateEuler(
+                    initial, control, dt * fraction, source.parameters.wheel_base);
                 samples[index].push_back(state);
                 const Pose2d center = bodyCenter({state.x, state.y, state.yaw},
                                                  source.parameters.rear_axle_to_center);

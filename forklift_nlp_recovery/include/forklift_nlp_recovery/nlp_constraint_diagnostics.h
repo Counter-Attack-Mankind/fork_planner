@@ -7,7 +7,7 @@
 namespace forklift_nlp_recovery {
 
 enum class NlpConstraintCategory {
-    RK4,
+    KINEMATIC_EULER,
     AABB_NODE,
     STATIC_OBCA,
     DYNAMIC_OBCA,
@@ -15,7 +15,7 @@ enum class NlpConstraintCategory {
 };
 
 struct NlpConstraintMetadata {
-    NlpConstraintCategory category = NlpConstraintCategory::RK4;
+    NlpConstraintCategory category = NlpConstraintCategory::KINEMATIC_EULER;
     int vehicle_id = -1;
     int other_vehicle_id = -1;
     size_t node_index = 0;
@@ -34,7 +34,7 @@ struct NlpConstraintDiagnosticsInput {
 };
 
 struct NlpConstraintCategoryDiagnostics {
-    NlpConstraintCategory category = NlpConstraintCategory::RK4;
+    NlpConstraintCategory category = NlpConstraintCategory::KINEMATIC_EULER;
     size_t sample_count = 0;
     size_t violation_count = 0;
     double max_violation = 0.0;

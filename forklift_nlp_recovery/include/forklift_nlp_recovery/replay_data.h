@@ -58,6 +58,7 @@ struct ReplaySolverReport {
     bool validation_passed = false;
     std::string return_status;
     std::string validation_reason;
+    std::string kinematic_integrator = "legacy_rk4";
     std::string collision_geometry = "unknown";
     bool has_obb_validation_metrics = false;
     std::size_t node_count = 0;
@@ -113,7 +114,7 @@ struct ReplayDiagnostics {
 };
 
 bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::string& error);
-ReplayNode integrateReplayNode(const ReplayNode& source, double dt, double wheel_base);
+ReplayNode integrateReplayNodeEuler(const ReplayNode& source, double dt, double wheel_base);
 ReplayNode sampleReplayVehicle(const ReplayVehicle& vehicle, double time, std::size_t* interval_index = nullptr);
 ReplayPose replayBodyCenter(const ReplayPose& rear_axle, double rear_axle_to_center);
 double replayAabbViolation(const ReplayPose& center, const ReplayAabb& box);

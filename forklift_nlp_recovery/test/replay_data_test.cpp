@@ -71,6 +71,7 @@ std::filesystem::path writeFullStcCase() {
            << "validation:\n  reason: failed\n  minimum_participant_obb_separation_margin: 0.8\n"
            << "  minimum_static_obb_separation_margin: 0\n  participant_obb_collision_samples: 0\n"
            << "  static_obb_collision_samples: 0\n  aabb_violation_samples: 0\n";
+    report << "kinematic_integrator: euler\n";
     return directory;
 }
 
@@ -86,6 +87,7 @@ TEST(ReplayDataTest, LoadsNonContiguousVehicleIdsAndCommonGrid) {
     EXPECT_DOUBLE_EQ(replay_case.vehicles.front().parameters.disc_radius, 0.12);
     EXPECT_EQ(replay_case.report.collision_geometry,
               "legacy_body_center_discs");
+    EXPECT_EQ(replay_case.report.kinematic_integrator, "legacy_rk4");
     EXPECT_FALSE(replay_case.report.has_obb_validation_metrics);
     std::filesystem::remove_all(directory);
 }
@@ -110,6 +112,7 @@ TEST(ReplayDataTest, LoadsThreeVehicleFullStcWithNegativeAabbIndex) {
         EXPECT_EQ(vehicle.nodes.front().aabb_index, -1);
     }
     EXPECT_FALSE(replay_case.report.solver_success);
+    EXPECT_EQ(replay_case.report.kinematic_integrator, "euler");
     std::filesystem::remove_all(directory);
 }
 
@@ -123,15 +126,29 @@ TEST(ReplayDataTest, RequiresAllThreeSavedFiles) {
     std::filesystem::remove_all(directory);
 }
 
-TEST(ReplayDataTest, UsesSolverRk4ForIntermediatePose) {
+TEST(ReplayDataTest, UsesForwardEulerForIntermediatePose) {
     ReplayVehicle value = vehicle(5, 0.0, 0.0, 1.0);
     value.nodes.front().steer = 0.2;
+    value.nodes.front().acceleration = 0.4;
+    value.nodes.front().steer_rate = 0.1;
     const ReplayNode half = sampleReplayVehicle(value, 0.5);
-    const ReplayNode direct = integrateReplayNode(value.nodes.front(), 0.5, value.parameters.wheel_base);
+    const ReplayNode direct = integrateReplayNodeEuler(
+        value.nodes.front(), 0.5, value.parameters.wheel_base);
     EXPECT_NEAR(half.rear_axle.x, direct.rear_axle.x, 1e-12);
     EXPECT_NEAR(half.rear_axle.y, direct.rear_axle.y, 1e-12);
     EXPECT_NEAR(half.rear_axle.yaw, direct.rear_axle.yaw, 1e-12);
-    EXPECT_GT(std::abs(half.rear_axle.y), 1e-4);
+    EXPECT_NEAR(half.rear_axle.x, 0.5, 1e-12);
+    EXPECT_NEAR(half.rear_axle.y, 0.0, 1e-12);
+    EXPECT_NEAR(half.rear_axle.yaw, std::tan(0.2), 1e-12);
+    EXPECT_NEAR(half.speed, 1.2, 1e-12);
+    EXPECT_NEAR(half.steer, 0.25, 1e-12);
+    const ReplayNode full = integrateReplayNodeEuler(
+        value.nodes.front(), 1.0, value.parameters.wheel_base);
+    EXPECT_NEAR(full.rear_axle.x, 1.0, 1e-12);
+    EXPECT_NEAR(full.rear_axle.y, 0.0, 1e-12);
+    EXPECT_NEAR(full.rear_axle.yaw, 2.0 * std::tan(0.2), 1e-12);
+    EXPECT_NEAR(full.speed, 1.4, 1e-12);
+    EXPECT_NEAR(full.steer, 0.3, 1e-12);
 }
 
 TEST(ReplayDataTest, IgnoresFormerDiscOverlapWhenObbsAreSeparated) {

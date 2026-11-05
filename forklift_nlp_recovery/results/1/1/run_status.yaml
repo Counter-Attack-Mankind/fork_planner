@@ -1,7 +1,0 @@
-schema_version: 1
-case: 1
-run: 1
-stage: solver
-complete: true
-success: true
-reason: solver and independent validation succeeded

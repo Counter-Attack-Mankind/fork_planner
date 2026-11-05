@@ -10,7 +10,7 @@ namespace forklift_nlp_recovery {
 namespace {
 
 constexpr std::array<NlpConstraintCategory, 5> kCategories{
-    NlpConstraintCategory::RK4,
+    NlpConstraintCategory::KINEMATIC_EULER,
     NlpConstraintCategory::AABB_NODE,
     NlpConstraintCategory::STATIC_OBCA,
     NlpConstraintCategory::DYNAMIC_OBCA,
@@ -69,7 +69,7 @@ void appendDiagnostics(NlpConstraintDiagnostics& result,
 
 const char* nlpConstraintCategoryName(NlpConstraintCategory category) {
     switch (category) {
-        case NlpConstraintCategory::RK4: return "rk4";
+        case NlpConstraintCategory::KINEMATIC_EULER: return "kinematic_euler";
         case NlpConstraintCategory::AABB_NODE: return "aabb_node";
         case NlpConstraintCategory::STATIC_OBCA: return "static_obca";
         case NlpConstraintCategory::DYNAMIC_OBCA: return "dynamic_obca";

@@ -74,12 +74,6 @@ NumericState derivative(const NumericState& state, double acceleration, double s
             state.speed * std::tan(state.steer) / wheel_base, acceleration, steer_rate};
 }
 
-NumericState addScaled(const NumericState& state, const NumericState& delta, double scale) {
-    return {state.x + scale * delta.x, state.y + scale * delta.y,
-            state.yaw + scale * delta.yaw, state.speed + scale * delta.speed,
-            state.steer + scale * delta.steer};
-}
-
 std::array<ReplayPose, 4> obbCorners(const ReplayPose& rear_axle, double length,
                                      double width, double rear_axle_to_center) {
     const ReplayPose center = replayBodyCenter(rear_axle, rear_axle_to_center);
@@ -302,6 +296,13 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
         loaded.report.solver_success = report["solver_success"].as<bool>();
         loaded.report.validation_passed = report["validation_passed"].as<bool>();
         loaded.report.return_status = report["return_status"].as<std::string>();
+        loaded.report.kinematic_integrator = report["kinematic_integrator"] ?
+            report["kinematic_integrator"].as<std::string>() : "legacy_rk4";
+        if (loaded.report.kinematic_integrator != "euler" &&
+            loaded.report.kinematic_integrator != "legacy_rk4") {
+            throw std::runtime_error("unsupported kinematic_integrator: " +
+                                     loaded.report.kinematic_integrator);
+        }
         loaded.report.node_count = report["node_count"].as<std::size_t>();
         loaded.report.total_time = requireDouble(report, "total_time");
         const YAML::Node validation = report["validation"];
@@ -345,21 +346,20 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
     }
 }
 
-ReplayNode integrateReplayNode(const ReplayNode& source, double dt, double wheel_base) {
-    if (dt < 0.0 || wheel_base <= 0.0) throw std::invalid_argument("invalid RK4 interval or wheel base");
+ReplayNode integrateReplayNodeEuler(const ReplayNode& source, double dt, double wheel_base) {
+    if (dt < 0.0 || wheel_base <= 0.0) {
+        throw std::invalid_argument("invalid Euler interval or wheel base");
+    }
     NumericState state{source.rear_axle.x, source.rear_axle.y, source.rear_axle.yaw, source.speed, source.steer};
-    const NumericState k1 = derivative(state, source.acceleration, source.steer_rate, wheel_base);
-    const NumericState k2 = derivative(addScaled(state, k1, 0.5 * dt), source.acceleration, source.steer_rate, wheel_base);
-    const NumericState k3 = derivative(addScaled(state, k2, 0.5 * dt), source.acceleration, source.steer_rate, wheel_base);
-    const NumericState k4 = derivative(addScaled(state, k3, dt), source.acceleration, source.steer_rate, wheel_base);
-    const double scale = dt / 6.0;
+    const NumericState rate = derivative(
+        state, source.acceleration, source.steer_rate, wheel_base);
     ReplayNode result = source;
     result.time += dt;
-    result.rear_axle.x += scale * (k1.x + 2.0 * k2.x + 2.0 * k3.x + k4.x);
-    result.rear_axle.y += scale * (k1.y + 2.0 * k2.y + 2.0 * k3.y + k4.y);
-    result.rear_axle.yaw += scale * (k1.yaw + 2.0 * k2.yaw + 2.0 * k3.yaw + k4.yaw);
-    result.speed += scale * (k1.speed + 2.0 * k2.speed + 2.0 * k3.speed + k4.speed);
-    result.steer += scale * (k1.steer + 2.0 * k2.steer + 2.0 * k3.steer + k4.steer);
+    result.rear_axle.x += dt * rate.x;
+    result.rear_axle.y += dt * rate.y;
+    result.rear_axle.yaw += dt * rate.yaw;
+    result.speed += dt * rate.speed;
+    result.steer += dt * rate.steer;
     return result;
 }
 
@@ -377,8 +377,9 @@ ReplayNode sampleReplayVehicle(const ReplayVehicle& vehicle, double time, std::s
         [](double value, const ReplayNode& node) { return value < node.time; });
     const std::size_t interval = static_cast<std::size_t>(std::distance(vehicle.nodes.begin(), upper) - 1);
     if (interval_index) *interval_index = interval;
-    return integrateReplayNode(vehicle.nodes[interval], time - vehicle.nodes[interval].time,
-                               vehicle.parameters.wheel_base);
+    return integrateReplayNodeEuler(
+        vehicle.nodes[interval], time - vehicle.nodes[interval].time,
+        vehicle.parameters.wheel_base);
 }
 
 ReplayPose replayBodyCenter(const ReplayPose& rear_axle, double rear_axle_to_center) {

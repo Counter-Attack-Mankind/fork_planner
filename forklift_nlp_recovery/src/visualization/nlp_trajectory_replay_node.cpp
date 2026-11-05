@@ -344,6 +344,11 @@ private:
                  diagnostics_.minimum_participant_obb_separation_margin,
                  diagnostics_.minimum_static_obb_separation_margin,
                  diagnostics_.intervals.size());
+        if (replay_case_.report.kinematic_integrator != "euler") {
+            ROS_WARN("Replay result has no Euler integrator tag and is treated as legacy RK4; "
+                     "continuous interpolation uses the current Euler sampler and may differ "
+                     "from the saved result's original dynamics");
+        }
         for (const ReplayViolationInterval& interval : diagnostics_.intervals) {
             ROS_WARN("replay violation type=%s vehicles=%d,%d time=[%.6f, %.6f] max=%.6f",
                      replayViolationTypeName(interval.type), interval.vehicle_id, interval.other_id,

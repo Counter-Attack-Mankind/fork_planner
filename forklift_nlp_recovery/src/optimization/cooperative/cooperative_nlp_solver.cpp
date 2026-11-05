@@ -222,15 +222,16 @@ NlpSolveResult CooperativeNlpSolver::solve(
                 {NlpConstraintCategory::AABB_NODE, vehicle.id, -1, node, "stc_y"});
             if (node + 1 == nodes) continue;
             const casadi::MX u = control(casadi::Slice(), node);
-            const casadi::MX predicted = integrateBicycleRk4(current, u, dt,
+            const casadi::MX predicted = integrateBicycleEuler(current, u, dt,
                                                        vehicle.parameters.wheel_base);
-            static const char* rk4[] = {"rear_x", "rear_y", "heading",
-                                        "signed_speed", "front_steer"};
+            static const char* euler[] = {"rear_x", "rear_y", "heading",
+                                          "signed_speed", "front_steer"};
             for (size_t component = 0; component < 5; ++component) {
                 constraints.add(state(component, node + 1) - predicted(component), 0.0, 0.0,
-                    {NlpConstraintCategory::RK4, vehicle.id, -1, node, rk4[component]});
+                    {NlpConstraintCategory::KINEMATIC_EULER, vehicle.id, -1, node,
+                     euler[component]});
             }
-            const casadi::MX midpoint = integrateBicycleRk4(current, u, dt * 0.5,
+            const casadi::MX midpoint = integrateBicycleEuler(current, u, dt * 0.5,
                                                        vehicle.parameters.wheel_base);
             const casadi::MX midpoint_center = symbolicBodyCenter(midpoint,
                 vehicle.parameters.rear_axle_to_center);
@@ -279,7 +280,7 @@ NlpSolveResult CooperativeNlpSolver::solve(
                     moving.input->parameters, fixed_parameters, moving.input->id,
                     obstacle.id, node, "node", NlpConstraintCategory::STATIC_OBCA);
                 if (node + 1 == nodes) continue;
-                const casadi::MX midpoint = integrateBicycleRk4(moving.state(casadi::Slice(), node),
+                const casadi::MX midpoint = integrateBicycleEuler(moving.state(casadi::Slice(), node),
                     moving.control(casadi::Slice(), node), dt * 0.5,
                     moving.input->parameters.wheel_base);
                 addObca(midpoint, fixed, moving.guess->nodes[node].rear_axle_pose,
@@ -300,10 +301,10 @@ NlpSolveResult CooperativeNlpSolver::solve(
                     b.input->parameters, a.input->id, b.input->id, node, "node",
                     NlpConstraintCategory::DYNAMIC_OBCA);
                 if (node + 1 == nodes) continue;
-                const casadi::MX midpoint_a = integrateBicycleRk4(a.state(casadi::Slice(), node),
+                const casadi::MX midpoint_a = integrateBicycleEuler(a.state(casadi::Slice(), node),
                     a.control(casadi::Slice(), node), dt * 0.5,
                     a.input->parameters.wheel_base);
-                const casadi::MX midpoint_b = integrateBicycleRk4(b.state(casadi::Slice(), node),
+                const casadi::MX midpoint_b = integrateBicycleEuler(b.state(casadi::Slice(), node),
                     b.control(casadi::Slice(), node), dt * 0.5,
                     b.input->parameters.wheel_base);
                 addObca(midpoint_a, midpoint_b, a.guess->nodes[node].rear_axle_pose,

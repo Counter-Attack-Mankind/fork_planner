@@ -10,17 +10,10 @@ casadi::MX bicycleDerivative(const casadi::MX& state,
                                control(0), control(1)});
 }
 
-casadi::MX integrateBicycleRk4(const casadi::MX& state,
-                               const casadi::MX& control,
-                               const casadi::MX& duration, double wheel_base) {
-    const casadi::MX k1 = bicycleDerivative(state, control, wheel_base);
-    const casadi::MX k2 = bicycleDerivative(state + duration * 0.5 * k1,
-                                             control, wheel_base);
-    const casadi::MX k3 = bicycleDerivative(state + duration * 0.5 * k2,
-                                             control, wheel_base);
-    const casadi::MX k4 = bicycleDerivative(state + duration * k3,
-                                             control, wheel_base);
-    return state + duration * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+casadi::MX integrateBicycleEuler(const casadi::MX& state,
+                                 const casadi::MX& control,
+                                 const casadi::MX& duration, double wheel_base) {
+    return state + duration * bicycleDerivative(state, control, wheel_base);
 }
 
 casadi::MX symbolicBodyCenter(const casadi::MX& state,
