@@ -153,6 +153,12 @@ public:
         private_nh_.param("solver_reference_direction_weight",
                           solver_config_.reference_direction_weight,
                           solver_config_.reference_direction_weight);
+        private_nh_.param("terminal_position_weight",
+                          solver_config_.terminal_position_weight,
+                          solver_config_.terminal_position_weight);
+        private_nh_.param("terminal_heading_weight",
+                          solver_config_.terminal_heading_weight,
+                          solver_config_.terminal_heading_weight);
         private_nh_.param("solver_direction_smoothing_speed",
                           solver_config_.direction_smoothing_speed,
                           solver_config_.direction_smoothing_speed);
@@ -292,13 +298,16 @@ public:
                  "disc_radius=%.4f boundary_clearance=%.4f "
                  "shelf_inflation=%.4f topic=%s output=%s "
                  "initial_grid=(N=%zu,margin=%.2f) "
-                 "solver_time_scale=[%.2f,%.2f] validation_substeps=%zu cases=%s results=%s",
+                 "solver_time_scale=[%.2f,%.2f] coop_terminal_weights=(position=%.2f,heading=%.2f) "
+                 "validation_substeps=%zu cases=%s results=%s",
                  mode_name_.c_str(), execute_after_solve_, selected_ids.str().c_str(),
                  builder_->vehicleRadius(),
                  builder_->boundaryClearance(), builder_->shelfInflation(),
                  snapshot_topic_.c_str(), debug_output_file_.c_str(),
                  initial_guess_config_.node_count, initial_guess_config_.time_margin,
                  solver_config_.min_time_scale, solver_config_.max_time_scale,
+                 solver_config_.terminal_position_weight,
+                 solver_config_.terminal_heading_weight,
                  solver_config_.validation_substeps,
                  case_directory_.c_str(),
                  results_directory_.c_str());
@@ -973,11 +982,12 @@ private:
                  result.validation.minimum_participant_vehicle_a_id,
                  result.validation.minimum_participant_vehicle_b_id,
                  result.validation.minimum_participant_separation_time);
-        if (!result.execution_publish_eligible) {
+        if (!result.solver_success || !result.validation_passed) {
             ROS_ERROR("[COOP_NLP] solve rejected: %s", result.reason.c_str());
             return false;
         }
-        submitLockedTrajectory();
+        ROS_INFO("[COOP_NLP] safe soft-terminal experiment saved for offline replay; "
+                 "execution and task-path rejoin remain disabled");
         return true;
     }
 
@@ -1188,14 +1198,30 @@ private:
                  result.validation_passed ? "passed" : "failed",
                  result.execution_publish_eligible,
                  result.reason.c_str());
+        for (const TerminalStateDiagnostics& terminal :
+             result.validation.terminal_states) {
+            ROS_INFO("[COOP_NLP][terminal] V%d specified=(%.6f,%.6f,%.6f) "
+                     "optimized=(%.6f,%.6f,%.6f) position_error=%.6f "
+                     "heading_error=%.6f speed_error=%.3g penalty=%.6f",
+                     terminal.vehicle_id,
+                     terminal.specified_pose.x, terminal.specified_pose.y,
+                     terminal.specified_pose.yaw,
+                     terminal.optimized_pose.x, terminal.optimized_pose.y,
+                     terminal.optimized_pose.yaw,
+                     terminal.position_error, terminal.heading_error,
+                     terminal.speed_error, terminal.penalty);
+        }
         if (!result.validation_passed) {
             ROS_WARN("[nlp_recovery][solver] independent validation: "
-                     "boundary=(%.3g,%.3g) dynamics=(%.3g,%.3g,%.3g,%.3g) "
+                     "start=%.3g terminal=(position %.3g,heading %.3g,speed %.3g) "
+                     "dynamics=(%.3g,%.3g,%.3g,%.3g) "
                      "bounds=(v %.3g,steer %.3g,a %.3g,omega %.3g) "
                      "aabb=%.3g/%zu obb_sat=(pair %zu,static %zu) "
                      "map_samples=%zu min_obb_margin=(pair %.3g,static %.3g)",
                      result.validation.max_start_error,
-                     result.validation.max_terminal_error,
+                     result.validation.max_terminal_position_error,
+                     result.validation.max_terminal_heading_error,
+                     result.validation.max_terminal_speed_error,
                      result.validation.max_kinematic_position_residual,
                      result.validation.max_kinematic_heading_residual,
                      result.validation.max_kinematic_speed_residual,
@@ -1233,9 +1259,21 @@ private:
             cooperative_nlp_solver_->solve(build.input, guess) :
             nlp_solver_->solve(build.input, guess);
         std::string completeness_reason;
-        result.execution_publish_eligible = optimizedTrajectoryComplete(
+        const bool trajectory_complete = optimizedTrajectoryComplete(
             build.input, result, completeness_reason);
-        if (result.solver_success && !result.execution_publish_eligible) {
+        if (cooperative) {
+            result.execution_publish_eligible = false;
+            result.task_path_rejoin_eligible = false;
+            completeness_reason = trajectory_complete ?
+                "cooperative soft-terminal experiment is offline-only; path rejoin is not implemented" :
+                completeness_reason;
+            ROS_INFO("[COOP_NLP] execution disabled: %s",
+                     completeness_reason.c_str());
+        } else {
+            result.execution_publish_eligible = trajectory_complete;
+        }
+        if (!cooperative && result.solver_success &&
+            !result.execution_publish_eligible) {
             ROS_ERROR("[nlp_recovery][solver] IPOPT succeeded but trajectory is not "
                       "publishable: %s", completeness_reason.c_str());
         }
@@ -1256,7 +1294,7 @@ private:
         if (locked_.result_directory.success &&
             locked_.result_directory.path == saved.case_directory) {
             const bool success = result.solver_success && result.validation_passed &&
-                                 result.execution_publish_eligible;
+                                 (cooperative || result.execution_publish_eligible);
             case_manager_->writeRunStatus(locked_.result_directory, "solver", true,
                                           success, result.reason, error);
         }
@@ -1304,12 +1342,28 @@ private:
             }
             markers.markers.push_back(path);
             markers.markers.push_back(centers);
+            if (!vehicle.nodes.empty()) {
+                const Pose2d& actual_end = vehicle.nodes.back().rear_axle_pose;
+                addSolidPoint(markers, prefix + "_actual_terminal_point",
+                              vehicle.id, actual_end,
+                              color(1.0f, 0.65f, 0.0f, 1.0f));
+                addArrow(markers, prefix + "_actual_terminal_arrow",
+                         vehicle.id, actual_end,
+                         color(1.0f, 0.65f, 0.0f, 1.0f));
+                addText(markers, prefix + "_actual_terminal_text", vehicle.id,
+                        actual_end.x, actual_end.y, 0.34,
+                        poseText("V" + std::to_string(vehicle.id) +
+                                 " optimized end rear", actual_end),
+                        color(1.0f, 0.65f, 0.0f, 1.0f), 0.055);
+            }
         }
         std::ostringstream status;
         status << "IPOPT " << result.statistics.return_status
                << " T=" << std::fixed << std::setprecision(2)
                << result.total_time << "s iter=" << result.statistics.iterations
-               << " validation=" << (result.validation_passed ? "PASS" : "FAIL");
+               << " validation=" << (result.validation_passed ? "PASS" : "FAIL")
+               << " publish=" << (result.execution_publish_eligible ? "YES" : "NO")
+               << " rejoin=" << (result.task_path_rejoin_eligible ? "YES" : "NO");
         addText(markers, prefix + "_solver_status", 0,
                 map_param_.field_width * 0.5,
                 map_param_.field_height - 0.22, 0.32, status.str(),

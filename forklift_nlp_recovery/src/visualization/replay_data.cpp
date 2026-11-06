@@ -188,6 +188,10 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
             vehicle.parameters.rear_axle_to_center = requireDouble(parameters, "rear_axle_to_center");
             vehicle.parameters.disc_radius = requireDouble(parameters, "disc_radius");
             vehicle.parameters.wheel_base = requireDouble(parameters, "wheel_base");
+            if (source["terminal_rear_axle"]) {
+                vehicle.specified_terminal = readPose(source["terminal_rear_axle"]);
+                vehicle.specified_terminal_valid = true;
+            }
             if (vehicle.parameters.length <= 0.0 || vehicle.parameters.width <= 0.0 ||
                 vehicle.parameters.disc_radius <= 0.0 || vehicle.parameters.wheel_base <= 0.0) {
                 throw std::runtime_error("vehicle " + std::to_string(vehicle.id) + " has invalid geometry");
@@ -295,6 +299,10 @@ bool loadReplayCase(const std::string& case_dir, ReplayCase& replay_case, std::s
         }
         loaded.report.solver_success = report["solver_success"].as<bool>();
         loaded.report.validation_passed = report["validation_passed"].as<bool>();
+        loaded.report.execution_publish_eligible = report["execution_publish_eligible"] ?
+            report["execution_publish_eligible"].as<bool>() : false;
+        loaded.report.task_path_rejoin_eligible = report["task_path_rejoin_eligible"] ?
+            report["task_path_rejoin_eligible"].as<bool>() : false;
         loaded.report.return_status = report["return_status"].as<std::string>();
         loaded.report.kinematic_integrator = report["kinematic_integrator"] ?
             report["kinematic_integrator"].as<std::string>() : "legacy_rk4";

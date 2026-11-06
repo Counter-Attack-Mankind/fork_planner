@@ -43,6 +43,7 @@ NlpInitialGuess CooperativeInitialGuessGenerator::generate(
         guess.time_grid[node] = guess.average_dt * static_cast<double>(node);
     }
 
+    // 对每辆车的初始解生成，
     for (const NlpVehicleInput& vehicle : input.vehicles) {
         VehicleInitialGuess vehicle_guess;
         vehicle_guess.id = vehicle.id;

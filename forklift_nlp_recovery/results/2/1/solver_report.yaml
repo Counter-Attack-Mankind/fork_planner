@@ -1,0 +1,213 @@
+problem_built: true
+solver_success: true
+validation_passed: true
+execution_publish_eligible: false
+execution_published: false
+cooperative_soft_terminal: true
+task_path_rejoin_eligible: false
+executable_trajectory: false
+reason: "cooperative solver and independent validation succeeded"
+solver: "ipopt"
+casadi_version: "3.7.2+"
+kinematic_integrator: euler
+return_status: "Solve_Succeeded"
+iterations: 85
+cpu_time: 6.679210000
+wall_time: 6.670107010
+objective: 16.047478916
+max_constraint_violation: 0.000000090
+variable_count: 4744
+constraint_count: 3030
+node_count: 41
+total_time: 8.400232074
+average_dt: 0.210005802
+terminal_soft_constraint:
+  enabled: true
+  position_weight: 30.000000000
+  heading_weight: 15.000000000
+  total_penalty: 5.557005677
+  vehicles:
+    - id: 1
+      specified_pose: {x: 1.142338975, y: 0.715537695, heading: 1.813963401}
+      optimized_pose: {x: 1.420959727, y: 0.715512535, heading: 1.812538643}
+      position_error: 0.278620753
+      heading_error: 0.001424758
+      speed_error: 0.000000000
+      penalty: 2.328916167
+    - id: 3
+      specified_pose: {x: 0.155565723, y: 0.707320102, heading: 1.795476059}
+      optimized_pose: {x: 0.194941794, y: 0.657272521, heading: 1.798217344}
+      position_error: 0.063680730
+      heading_error: 0.002741285
+      speed_error: 0.000000000
+      penalty: 0.121769781
+    - id: 2
+      specified_pose: {x: 1.543549910, y: 0.755822854, heading: 2.628602606}
+      optimized_pose: {x: 1.260570294, y: 0.613684398, heading: 2.709388584}
+      position_error: 0.316671445
+      heading_error: 0.080785977
+      speed_error: 0.000000000
+      penalty: 3.106319729
+collision_models:
+  optimization_constraints: dynamic_participant_and_static_obb_obca
+  independent_validation: obb_sat
+validation:
+  collision_geometry: obb_sat
+  reason: "all hard constraints and safety checks passed; cooperative terminal pose errors are soft metrics"
+  max_start_error: 0.000000000
+  max_terminal_error: 0.316671445
+  max_terminal_position_error: 0.316671445
+  max_terminal_heading_error: 0.080785977
+  max_terminal_speed_error: 0.000000000
+  max_kinematic_position_residual: 0.000000000
+  max_kinematic_heading_residual: 0.000000000
+  max_kinematic_speed_residual: 0.000000000
+  max_kinematic_steer_residual: 0.000000000
+  max_speed_violation: 0.000000000
+  max_steer_violation: 0.000000000
+  max_acceleration_violation: 0.000000000
+  max_steer_rate_violation: 0.000000000
+  max_aabb_violation: 0.000003538
+  minimum_participant_obb_separation_margin: -0.000704508
+  minimum_participant_pair: [3, 2]
+  minimum_participant_separation_time: 5.607154910
+  minimum_static_obb_separation_margin: 2.783167773
+  participant_obb_collision_samples: 0
+  static_obb_collision_samples: 0
+  aabb_violation_samples: 0
+  static_map_violation_samples: 0
+  static_map_violations: []
+direction_diagnostics:
+  speed_hysteresis_threshold: 0.000000000
+  vehicles:
+constraint_diagnostics:
+  available: true
+  reason: "ok"
+  max_violation: 0.000000090
+  categories:
+    - category: kinematic_euler
+      sample_count: 600
+      violation_count: 591
+      max_violation: 0.000000000
+      max_distance_shortfall_m: 0.000000000
+    - category: aabb_node
+      sample_count: 486
+      violation_count: 1
+      max_violation: 0.000000001
+      max_distance_shortfall_m: 0.000000000
+    - category: static_obca
+      sample_count: 972
+      violation_count: 726
+      max_violation: 0.000000000
+      max_distance_shortfall_m: 0.000000000
+    - category: dynamic_obca
+      sample_count: 972
+      violation_count: 720
+      max_violation: 0.000000090
+      max_distance_shortfall_m: 0.000000005
+    - category: variable_bound
+      sample_count: 4744
+      violation_count: 0
+      max_violation: 0.000000000
+      max_distance_shortfall_m: 0.000000000
+  worst_violations:
+    - rank: 1
+      category: dynamic_obca
+      vehicle_id: 1
+      other_vehicle_id: 2
+      node: 35
+      component: "midpoint_normalization"
+      value: 1.000000090
+      lower_bound: 1.000000000
+      upper_bound: 1.000000000
+      violation: 0.000000090
+    - rank: 2
+      category: dynamic_obca
+      vehicle_id: 1
+      other_vehicle_id: 2
+      node: 36
+      component: "node_normalization"
+      value: 1.000000089
+      lower_bound: 1.000000000
+      upper_bound: 1.000000000
+      violation: 0.000000089
+    - rank: 3
+      category: dynamic_obca
+      vehicle_id: 1
+      other_vehicle_id: 2
+      node: 35
+      component: "node_normalization"
+      value: 1.000000071
+      lower_bound: 1.000000000
+      upper_bound: 1.000000000
+      violation: 0.000000071
+    - rank: 4
+      category: dynamic_obca
+      vehicle_id: 1
+      other_vehicle_id: 2
+      node: 34
+      component: "midpoint_normalization"
+      value: 1.000000050
+      lower_bound: 1.000000000
+      upper_bound: 1.000000000
+      violation: 0.000000050
+    - rank: 5
+      category: dynamic_obca
+      vehicle_id: 1
+      other_vehicle_id: 2
+      node: 36
+      component: "midpoint_normalization"
+      value: 1.000000036
+      lower_bound: 1.000000000
+      upper_bound: 1.000000000
+      violation: 0.000000036
+    - rank: 6
+      category: dynamic_obca
+      vehicle_id: 1
+      other_vehicle_id: 2
+      node: 34
+      component: "node_normalization"
+      value: 1.000000034
+      lower_bound: 1.000000000
+      upper_bound: 1.000000000
+      violation: 0.000000034
+    - rank: 7
+      category: dynamic_obca
+      vehicle_id: 1
+      other_vehicle_id: 2
+      node: 33
+      component: "midpoint_normalization"
+      value: 1.000000021
+      lower_bound: 1.000000000
+      upper_bound: 1.000000000
+      violation: 0.000000021
+    - rank: 8
+      category: dynamic_obca
+      vehicle_id: 3
+      other_vehicle_id: 2
+      node: 24
+      component: "node_normalization"
+      value: 1.000000016
+      lower_bound: 1.000000000
+      upper_bound: 1.000000000
+      violation: 0.000000016
+    - rank: 9
+      category: dynamic_obca
+      vehicle_id: 1
+      other_vehicle_id: 2
+      node: 33
+      component: "node_normalization"
+      value: 1.000000012
+      lower_bound: 1.000000000
+      upper_bound: 1.000000000
+      violation: 0.000000012
+    - rank: 10
+      category: dynamic_obca
+      vehicle_id: 1
+      other_vehicle_id: 2
+      node: 32
+      component: "midpoint_normalization"
+      value: 1.000000007
+      lower_bound: 1.000000000
+      upper_bound: 1.000000000
+      violation: 0.000000007

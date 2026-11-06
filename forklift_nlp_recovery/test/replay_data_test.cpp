@@ -54,6 +54,8 @@ std::filesystem::path writeFullStcCase() {
     for (int id : {2, 5, 9}) {
         input << "  - id: " << id << "\n"
               << "    parameters: {length: 0.2, width: 0.1, rear_axle_to_center: 0.05, disc_radius: 0.12, wheel_base: 0.5}\n"
+              << "    terminal_rear_axle: {x: 1.2, y: " << (id == 2 ? 0 : (id == 5 ? 1 : 2))
+              << ", yaw: 0.1}\n"
               << "    aabbs: [{min_x: -1, max_x: 3, min_y: -1, max_y: 4}]\n";
     }
     input << "static_vehicles: []\n";
@@ -67,7 +69,8 @@ std::filesystem::path writeFullStcCase() {
     }
     csv.close();
     std::ofstream report(directory / "solver_report.yaml");
-    report << "solver_success: false\nvalidation_passed: false\nreturn_status: Maximum_Iterations_Exceeded\nnode_count: 2\ntotal_time: 1.0\n"
+    report << "solver_success: false\nvalidation_passed: false\nexecution_publish_eligible: false\n"
+           << "task_path_rejoin_eligible: false\nreturn_status: Maximum_Iterations_Exceeded\nnode_count: 2\ntotal_time: 1.0\n"
            << "validation:\n  reason: failed\n  minimum_participant_obb_separation_margin: 0.8\n"
            << "  minimum_static_obb_separation_margin: 0\n  participant_obb_collision_samples: 0\n"
            << "  static_obb_collision_samples: 0\n  aabb_violation_samples: 0\n";
@@ -110,8 +113,12 @@ TEST(ReplayDataTest, LoadsThreeVehicleFullStcWithNegativeAabbIndex) {
     for (const ReplayVehicle& vehicle : replay_case.vehicles) {
         EXPECT_EQ(vehicle.corridor.size(), 1U);
         EXPECT_EQ(vehicle.nodes.front().aabb_index, -1);
+        EXPECT_TRUE(vehicle.specified_terminal_valid);
+        EXPECT_DOUBLE_EQ(vehicle.specified_terminal.x, 1.2);
     }
     EXPECT_FALSE(replay_case.report.solver_success);
+    EXPECT_FALSE(replay_case.report.execution_publish_eligible);
+    EXPECT_FALSE(replay_case.report.task_path_rejoin_eligible);
     EXPECT_EQ(replay_case.report.kinematic_integrator, "euler");
     std::filesystem::remove_all(directory);
 }

@@ -4,6 +4,7 @@
   <arg name="run" default="1"/>
   <arg name="playback_rate" default="1.0"/>
   <arg name="start_rviz" default="true"/>
+  <arg name="initial_guess_nodes" default="21"/>
   <arg name="case_root" default="$(find forklift_nlp_recovery)/case"/>
   <arg name="results_root" default="$(find forklift_nlp_recovery)/results"/>
 
@@ -21,6 +22,7 @@
       <param name="case_dir" value="$(arg case_root)"/>
       <param name="results_dir" value="$(arg results_root)"/>
       <param name="offline_case_number" value="$(arg case)"/>
+      <param name="initial_guess_nodes" value="$(arg initial_guess_nodes)"/>
     </node>
     <node pkg="forklift_nlp_recovery" type="nlp_offline_case_node"
           name="nlp_offline_case" output="screen" required="true">

@@ -1,0 +1,7 @@
+schema_version: 1
+case: 2
+run: 2
+stage: solver
+complete: true
+success: true
+reason: cooperative solver and independent validation succeeded

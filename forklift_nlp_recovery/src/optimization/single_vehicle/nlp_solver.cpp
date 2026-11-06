@@ -624,12 +624,14 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
         error = "cannot open solver_report.yaml";
         return false;
     }
-    report << std::boolalpha << std::fixed << std::setprecision(9)
+    report << std::boolalpha << std::fixed << std::setprecision(12)
            << "problem_built: " << result.problem_built << '\n'
            << "solver_success: " << result.solver_success << '\n'
            << "validation_passed: " << result.validation_passed << '\n'
            << "execution_publish_eligible: " << result.execution_publish_eligible << '\n'
            << "execution_published: " << result.execution_published << '\n'
+           << "cooperative_soft_terminal: " << result.cooperative_soft_terminal << '\n'
+           << "task_path_rejoin_eligible: " << result.task_path_rejoin_eligible << '\n'
            << "executable_trajectory: " << result.execution_publish_eligible << '\n'
            << "reason: " << yamlQuote(result.reason) << '\n'
            << "solver: " << yamlQuote(result.statistics.solver_name) << '\n'
@@ -646,6 +648,27 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << "node_count: " << result.node_count << '\n'
            << "total_time: " << result.total_time << '\n'
            << "average_dt: " << result.average_dt << '\n'
+           << "terminal_soft_constraint:\n"
+           << "  enabled: " << result.cooperative_soft_terminal << '\n'
+           << "  position_weight: " << result.terminal_position_weight << '\n'
+           << "  heading_weight: " << result.terminal_heading_weight << '\n'
+           << "  total_penalty: " << result.terminal_penalty << '\n'
+           << "  vehicles:\n";
+    for (const TerminalStateDiagnostics& terminal :
+         result.validation.terminal_states) {
+        report << "    - id: " << terminal.vehicle_id << '\n'
+               << "      specified_pose: {x: " << terminal.specified_pose.x
+               << ", y: " << terminal.specified_pose.y
+               << ", heading: " << terminal.specified_pose.yaw << "}\n"
+               << "      optimized_pose: {x: " << terminal.optimized_pose.x
+               << ", y: " << terminal.optimized_pose.y
+               << ", heading: " << terminal.optimized_pose.yaw << "}\n"
+               << "      position_error: " << terminal.position_error << '\n'
+               << "      heading_error: " << terminal.heading_error << '\n'
+               << "      speed_error: " << terminal.speed_error << '\n'
+               << "      penalty: " << terminal.penalty << '\n';
+    }
+    report
            << "collision_models:\n"
            << "  optimization_constraints: "
            << (result.vehicles.size() == 3 ?
@@ -657,6 +680,12 @@ bool saveNlpSolveResult(const NlpSolveResult& result,
            << "  reason: " << yamlQuote(result.validation.reason) << '\n'
            << "  max_start_error: " << result.validation.max_start_error << '\n'
            << "  max_terminal_error: " << result.validation.max_terminal_error << '\n'
+           << "  max_terminal_position_error: "
+           << result.validation.max_terminal_position_error << '\n'
+           << "  max_terminal_heading_error: "
+           << result.validation.max_terminal_heading_error << '\n'
+           << "  max_terminal_speed_error: "
+           << result.validation.max_terminal_speed_error << '\n'
            << "  max_kinematic_position_residual: "
            << result.validation.max_kinematic_position_residual << '\n'
            << "  max_kinematic_heading_residual: "

@@ -17,6 +17,8 @@ struct NlpSolverConfig {
     double steer_rate_weight = 5.0;
     double control_smooth_weight = 5.0;
     double reference_direction_weight = 5.0;
+    double terminal_position_weight = 30.0;
+    double terminal_heading_weight = 15.0;
     double direction_smoothing_speed = 0.02;
     double direction_switch_speed_threshold = 0.01;
     int max_iterations = 1000;
@@ -55,11 +57,24 @@ struct StaticMapViolation {
     double violation_distance = 0.0;
 };
 
+struct TerminalStateDiagnostics {
+    int vehicle_id = -1;
+    Pose2d specified_pose;
+    Pose2d optimized_pose;
+    double position_error = 0.0;
+    double heading_error = 0.0;
+    double speed_error = 0.0;
+    double penalty = 0.0;
+};
+
 struct NlpSolutionValidation {
     bool passed = false;
     std::string reason;
     double max_start_error = 0.0;
     double max_terminal_error = 0.0;
+    double max_terminal_position_error = 0.0;
+    double max_terminal_heading_error = 0.0;
+    double max_terminal_speed_error = 0.0;
     double max_kinematic_position_residual = 0.0;
     double max_kinematic_heading_residual = 0.0;
     double max_kinematic_speed_residual = 0.0;
@@ -79,6 +94,7 @@ struct NlpSolutionValidation {
     size_t aabb_violation_samples = 0;
     size_t static_map_violation_samples = 0;
     std::vector<StaticMapViolation> static_map_violations;
+    std::vector<TerminalStateDiagnostics> terminal_states;
 };
 
 struct NlpSolverStatistics {
@@ -109,11 +125,16 @@ struct NlpSolveResult {
     bool validation_passed = false;
     bool execution_publish_eligible = false;
     bool execution_published = false;
+    bool cooperative_soft_terminal = false;
+    bool task_path_rejoin_eligible = true;
     std::string reason;
     size_t node_count = 0;
     double total_time = 0.0;
     double average_dt = 0.0;
     double direction_switch_speed_threshold = 0.0;
+    double terminal_position_weight = 0.0;
+    double terminal_heading_weight = 0.0;
+    double terminal_penalty = 0.0;
     std::vector<OptimizedVehicleTrajectory> vehicles;
     NlpSolverStatistics statistics;
     std::vector<VehicleDirectionDiagnostics> direction_diagnostics;

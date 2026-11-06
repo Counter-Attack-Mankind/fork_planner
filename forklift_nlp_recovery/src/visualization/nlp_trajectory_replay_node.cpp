@@ -144,6 +144,31 @@ private:
                                                        node.rear_axle.y, 0.055));
             }
             array.markers.push_back(configurations);
+            if (vehicle.specified_terminal_valid) {
+                auto specified = marker("specified_terminal",
+                                        visualization_msgs::Marker::SPHERE, stamp);
+                specified.pose.position = point(vehicle.specified_terminal.x,
+                                                vehicle.specified_terminal.y, 0.09);
+                specified.scale.x = specified.scale.y = specified.scale.z = 0.055;
+                specified.color = color(0.0f, 1.0f, 0.0f, 0.95f);
+                array.markers.push_back(specified);
+                addText(array, "specified_terminal_label",
+                        vehicle.specified_terminal.x, vehicle.specified_terminal.y,
+                        0.17, "V" + std::to_string(vehicle.id) + " specified end",
+                        color(0.0f, 1.0f, 0.0f), 0.055, stamp);
+            }
+            if (!vehicle.nodes.empty()) {
+                const ReplayPose& actual = vehicle.nodes.back().rear_axle;
+                auto optimized = marker("optimized_terminal",
+                                        visualization_msgs::Marker::SPHERE, stamp);
+                optimized.pose.position = point(actual.x, actual.y, 0.10);
+                optimized.scale.x = optimized.scale.y = optimized.scale.z = 0.055;
+                optimized.color = color(1.0f, 0.65f, 0.0f, 0.95f);
+                array.markers.push_back(optimized);
+                addText(array, "optimized_terminal_label", actual.x, actual.y,
+                        0.20, "V" + std::to_string(vehicle.id) + " optimized end",
+                        color(1.0f, 0.65f, 0.0f), 0.055, stamp);
+            }
         }
         std::set<int> colliding_static_ids;
         for (const ReplayViolation& violation : violations) {
@@ -297,7 +322,9 @@ private:
         status << replay_case_.case_id << "  t=" << std::fixed << std::setprecision(2)
                << playback_time_ << "/" << replay_case_.total_time << "  x" << playback_rate_
                << (paused_ ? "  PAUSED" : "") << "\nIPOPT: " << replay_case_.report.return_status
-               << "  saved validation: " << (replay_case_.report.validation_passed ? "PASS" : "FAIL");
+               << "  saved validation: " << (replay_case_.report.validation_passed ? "PASS" : "FAIL")
+               << "  publish: " << (replay_case_.report.execution_publish_eligible ? "YES" : "NO")
+               << "  rejoin: " << (replay_case_.report.task_path_rejoin_eligible ? "YES" : "NO");
         addText(array, "status", map_param_.field_width * 0.5, map_param_.field_height + 0.12,
                 0.1, status.str(), color(1.0f, 1.0f, 1.0f), 0.09, stamp);
         marker_pub_.publish(array);

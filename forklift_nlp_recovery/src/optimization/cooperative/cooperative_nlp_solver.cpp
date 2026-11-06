@@ -89,6 +89,10 @@ CooperativeNlpSolver::CooperativeNlpSolver(
 NlpSolveResult CooperativeNlpSolver::solve(
     const NlpOptimizationInput& input, const NlpInitialGuess& initial_guess) const {
     NlpSolveResult result;
+    result.cooperative_soft_terminal = true;
+    result.task_path_rejoin_eligible = false;
+    result.terminal_position_weight = config_.terminal_position_weight;
+    result.terminal_heading_weight = config_.terminal_heading_weight;
     result.statistics.casadi_version = casadi::CasadiMeta::version();
     result.constraint_diagnostics.reason = "candidate solution unavailable";
     if (!input.valid || input.vehicles.size() != 3 ||
@@ -99,6 +103,8 @@ NlpSolveResult CooperativeNlpSolver::solve(
     }
     if (config_.min_time_scale <= 0.0 ||
         config_.max_time_scale < config_.min_time_scale ||
+        config_.terminal_position_weight < 0.0 ||
+        config_.terminal_heading_weight < 0.0 ||
         config_.validation_substeps == 0) {
         result.reason = "invalid cooperative solver configuration";
         return result;
@@ -193,10 +199,8 @@ NlpSolveResult CooperativeNlpSolver::solve(
                     lower_bounds[base + 4] = upper_bounds[base + 4] =
                         vehicle.frozen_initial_state.steering_angle;
                 }
-            } else if (node + 1 == nodes) {
-                lower_bounds[base] = upper_bounds[base] = vehicle.terminal.pose.x;
-                lower_bounds[base + 1] = upper_bounds[base + 1] = vehicle.terminal.pose.y;
-                lower_bounds[base + 2] = upper_bounds[base + 2] = terminal_heading;
+            }
+            if (node + 1 == nodes) {
                 lower_bounds[base + 3] = upper_bounds[base + 3] = 0.0;
             }
         }
@@ -250,6 +254,13 @@ NlpSolveResult CooperativeNlpSolver::solve(
                 objective += config_.control_smooth_weight * (da * da + dw * dw);
             }
         }
+        const casadi::MX terminal_dx = state(0, nodes - 1) - vehicle.terminal.pose.x;
+        const casadi::MX terminal_dy = state(1, nodes - 1) - vehicle.terminal.pose.y;
+        const casadi::MX terminal_dtheta = state(2, nodes - 1) - terminal_heading;
+        objective += config_.terminal_position_weight *
+                         (terminal_dx * terminal_dx + terminal_dy * terminal_dy) +
+                     config_.terminal_heading_weight *
+                         terminal_dtheta * terminal_dtheta;
         symbolic.push_back({state, control, &vehicle, guess});
     }
 
@@ -385,6 +396,11 @@ NlpSolveResult CooperativeNlpSolver::solve(
             result.vehicles.push_back(std::move(trajectory));
         }
         result.validation = validateSolution(input, result, config_, corridor_builder_);
+        result.terminal_penalty = 0.0;
+        for (const TerminalStateDiagnostics& terminal :
+             result.validation.terminal_states) {
+            result.terminal_penalty += terminal.penalty;
+        }
         result.validation_passed = result.validation.passed;
         if (!result.solver_success) {
             result.reason = "IPOPT did not report success: " + result.statistics.return_status;

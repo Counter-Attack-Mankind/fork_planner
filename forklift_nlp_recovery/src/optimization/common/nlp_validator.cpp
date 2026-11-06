@@ -145,12 +145,32 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
             validation.max_start_error = std::max(validation.max_start_error,
                 std::abs(first.front_steer - source.frozen_initial_state.steering_angle));
         }
-        validation.max_terminal_error = std::max(validation.max_terminal_error,
-            std::hypot(last.rear_axle_pose.x - source.terminal.pose.x,
-                       last.rear_axle_pose.y - source.terminal.pose.y));
-        validation.max_terminal_error = std::max(validation.max_terminal_error,
-            std::abs(normalizeAngle(last.rear_axle_pose.yaw - source.terminal.pose.yaw)));
-        validation.max_terminal_error = std::max(validation.max_terminal_error, std::abs(last.signed_speed));
+        TerminalStateDiagnostics terminal;
+        terminal.vehicle_id = source.id;
+        terminal.specified_pose = source.terminal.pose;
+        terminal.optimized_pose = last.rear_axle_pose;
+        terminal.position_error = std::hypot(
+            last.rear_axle_pose.x - source.terminal.pose.x,
+            last.rear_axle_pose.y - source.terminal.pose.y);
+        terminal.heading_error = std::abs(normalizeAngle(
+            last.rear_axle_pose.yaw - source.terminal.pose.yaw));
+        terminal.speed_error = std::abs(last.signed_speed);
+        if (cooperative) {
+            terminal.penalty = config.terminal_position_weight *
+                                   terminal.position_error * terminal.position_error +
+                               config.terminal_heading_weight *
+                                   terminal.heading_error * terminal.heading_error;
+        }
+        validation.terminal_states.push_back(terminal);
+        validation.max_terminal_position_error = std::max(
+            validation.max_terminal_position_error, terminal.position_error);
+        validation.max_terminal_heading_error = std::max(
+            validation.max_terminal_heading_error, terminal.heading_error);
+        validation.max_terminal_speed_error = std::max(
+            validation.max_terminal_speed_error, terminal.speed_error);
+        validation.max_terminal_error = std::max(
+            {validation.max_terminal_error, terminal.position_error,
+             terminal.heading_error, terminal.speed_error});
 
         for (size_t node = 0; node < result.node_count; ++node) {
             const auto& value = vehicle.nodes[node];
@@ -299,8 +319,11 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
         validation.minimum_static_obb_separation_margin = 0.0;
     }
     const double tolerance = config.validation_tolerance;
+    const bool terminal_hard_constraints_passed = cooperative ?
+        validation.max_terminal_speed_error <= tolerance :
+        validation.max_terminal_error <= tolerance;
     validation.passed = validation.max_start_error <= tolerance &&
-        validation.max_terminal_error <= tolerance &&
+        terminal_hard_constraints_passed &&
         validation.max_kinematic_position_residual <= tolerance &&
         validation.max_kinematic_heading_residual <= tolerance &&
         validation.max_kinematic_speed_residual <= tolerance &&
@@ -313,9 +336,15 @@ NlpSolutionValidation validateSolution(const NlpOptimizationInput& input,
         validation.static_obb_collision_samples == 0 &&
         validation.aabb_violation_samples == 0 &&
         validation.static_map_violation_samples == 0;
-    validation.reason = validation.passed
-        ? "all STC, map, static OBB and synchronized participant OBB SAT checks passed"
-        : "one or more STC, map, static OBB or participant OBB SAT checks failed";
+    if (validation.passed) {
+        validation.reason = cooperative ?
+            "all hard constraints and safety checks passed; cooperative terminal pose errors are soft metrics" :
+            "all terminal, STC, map, static OBB and synchronized participant OBB SAT checks passed";
+    } else {
+        validation.reason = cooperative ?
+            "one or more hard dynamics, terminal speed, STC, map or OBB safety checks failed" :
+            "one or more terminal, dynamics, STC, map or OBB safety checks failed";
+    }
     return validation;
 }
 

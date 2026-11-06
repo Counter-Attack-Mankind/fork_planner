@@ -41,6 +41,8 @@ struct ReplayNode {
 struct ReplayVehicle {
     int id = -1;
     ReplayParameters parameters;
+    bool specified_terminal_valid = false;
+    ReplayPose specified_terminal;
     std::vector<ReplayAabb> corridor;
     std::vector<ReplayNode> nodes;
 };
@@ -56,6 +58,8 @@ struct ReplayStaticVehicle {
 struct ReplaySolverReport {
     bool solver_success = false;
     bool validation_passed = false;
+    bool execution_publish_eligible = false;
+    bool task_path_rejoin_eligible = false;
     std::string return_status;
     std::string validation_reason;
     std::string kinematic_integrator = "legacy_rk4";
